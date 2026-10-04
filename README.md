@@ -2,7 +2,7 @@
 
 A digital twin of the **EXP2 finished-goods warehouse**, built only with **Google Apps Script** (web app) and **Google Sheets** (database), fed by **SAP extractions**. It shows on a wall TV and on office PCs what is in the warehouse, where, since when, what is still waiting in production, and how full the racks and the shipping docks are.
 
-**Status:** design phase (phase 0). The plan, the simulated database and the screen mockups are ready; no application code yet.
+**Status:** phase 0a, the Apps Script application is ready for the demo on simulated data (*Phase 0a : application Apps Script prête pour la démo sur données simulées*). The code is in [`apps-script/src`](apps-script/), its install guide in [apps-script/README.md](apps-script/README.md), the tests in [`tests/`](tests/). Next: run it on the real TV and plant network, then phase 0b (real exports, site survey, IT approval).
 
 | | |
 |---|---|
@@ -10,7 +10,7 @@ A digital twin of the **EXP2 finished-goods warehouse**, built only with **Googl
 | **Input** | SAP MB51 exports (production declarations, transfers), uploaded from the PC page. No live SAP link. |
 | **Warehouse** | EXP2, about 1,600 m², 8 storage blocks (1,464 pallet places assumed), 8 shipping docks. |
 | **Screens** | TV (3D view, key numbers, docks) and PC (lookup, pending, 2D plan, trucks, import). |
-| **Documents** | [Implementation plan](docs/IMPLEMENTATION_PLAN.md) · [illustrated plan](https://claude.ai/artifact/43H2yDzvaYKBgpRcck7pvT) · [Sample database](sample-data/README.md) |
+| **Documents** | [Install and first use](apps-script/README.md) · [Architecture](docs/ARCHITECTURE.md) · [Implementation plan](docs/IMPLEMENTATION_PLAN.md) · [illustrated plan](https://claude.ai/artifact/43H2yDzvaYKBgpRcck7pvT) · [Sample database](sample-data/README.md) |
 
 ---
 
@@ -19,8 +19,20 @@ A digital twin of the **EXP2 finished-goods warehouse**, built only with **Googl
 - **Quoi :** un jumeau numérique de l'entrepôt d'expédition **EXP2**, sur Google Apps Script + Google Sheets uniquement.
 - **Données :** les extractions SAP **MB51** (déclarations de production 101 → PRD2, transferts 311 PRD2 → EXP2 / EXP2 ↔ EMRT) sont importées depuis la page PC. Pas de lien direct avec SAP.
 - **Logique :** déclaré mais pas encore en EXP2 = **en attente** ; transféré en EXP2 = **en stock**, avec date d'entrée, âge et emplacement ; sorti (601 ou 311 vers EMRT) = **sorti**, avec date de sortie.
-- **Écrans :** une **TV** (vue 3D, saturation des blocs, quais et camions, alertes) et des **PC** (recherche article, en attente, plan 2D, quais & camions, import).
-- **À faire maintenant :** répondre aux [questions ouvertes](docs/IMPLEMENTATION_PLAN.md#13-open-questions-most-important-first) et fournir un export réel d'une journée.
+- **Écrans :** une **TV** (vue 3D, saturation des blocs, quais et camions, alertes) et des **PC** (recherche article, en attente, plan 2D, quais & camions, import, simulation).
+- **État :** phase 0a, application Apps Script prête pour la démo sur données simulées ([installation](apps-script/README.md), [premier usage](#premier-usage)).
+- **À faire maintenant :** montrer la démo sur la vraie TV, répondre aux [questions ouvertes](docs/IMPLEMENTATION_PLAN.md#13-open-questions-most-important-first) et fournir un export réel d'une journée.
+
+### Premier usage
+
+Une fois le code installé dans le Google Sheet ([apps-script/README.md](apps-script/README.md), étapes 1 et 2) :
+
+1. Rechargez le classeur, puis menu **EXP2 Jumeau › Installer / réinitialiser la base** : les onglets et les deux clés d'accès sont créés.
+2. Onglet **ACCUEIL › Générer 14 jours** : une base simulée réaliste (données fictives) est créée et calculée. « Simuler +1 jour » ajoute la journée suivante.
+3. Dans l'éditeur Apps Script : **Déployer › Nouveau déploiement › Application Web** (exécuter en tant que « Moi »). Copiez l'URL qui se termine par **/exec** (Déployer › Gérer les déploiements) et collez-la dans **EXP2 Jumeau › Panneau de contrôle › Liens**.
+4. **EXP2 Jumeau › Ouvrir le jumeau** : le lien de l'écran **TV** (`?mode=tv&rotate=1`, à ouvrir en plein écran sur la TV) et les liens des **pages PC** (recherche article, en attente, plan 2D, quais & camions, import, simulation).
+5. Les **clés** s'affichent dans la même fenêtre : la clé **administrateur** (import, simulation, recalcul) et la clé **quais** (page Quais & camions). Les pages PC la demandent une fois par session. Ne la communiquez qu'aux personnes concernées ; après une fuite : **EXP2 Jumeau › Régénérer les clés**.
+6. Données réelles : **EXP2 Jumeau › Simulation › Effacer la simulation**, puis page PC **Import** (fichiers SAP MB51).
 
 ---
 
@@ -33,7 +45,7 @@ A digital twin of the **EXP2 finished-goods warehouse**, built only with **Googl
 5. [Repository structure](#repository-structure)
 6. [Simulated database](#simulated-database)
 7. [Data needed from SAP](#data-needed-from-sap)
-8. [Development workflow (planned)](#development-workflow-planned)
+8. [Development workflow](#development-workflow)
 9. [Glossary](#glossary)
 
 ---
@@ -107,7 +119,7 @@ Mockups of all of them are in the [illustrated plan](https://claude.ai/artifact/
 
 | Phase | Content | Done when |
 |---|---|---|
-| **Phase 0a** **(next)** | Demo on simulated data: Load the sample database into a Google Sheet and deploy a read-only viewer: the TV screen and the article lookup, marked "DONNÉES SIMULÉES".; Run it on the real TV hardware and the plant network: 3D, CDN libraries, link access, Google banner.; Show it to the stakeholders and collect their reactions. | Stakeholders have seen it on the real TV, and the 3D view and libraries work on the plant network. |
+| **Phase 0a** **(ready)** | Demo on simulated data: Load the sample database into a Google Sheet and deploy a read-only viewer: the TV screen and the article lookup, marked "DONNÉES SIMULÉES".; Run it on the real TV hardware and the plant network: 3D, CDN libraries, link access, Google banner.; Show it to the stakeholders and collect their reactions. | Stakeholders have seen it on the real TV, and the 3D view and libraries work on the plant network. |
 | **Phase 0b** **(next)** | Clarify and approve: Answer the questions at the end of this page; send 1–2 weeks of real exports, unmodified.; Site survey: real dimensions, block types and levels, real dock doors.; IT approval of the Google account and of the link mode; list of stakeholders. | Written IT approval, a validated capacity per block, and real files that import into the sample structure. |
 | **Phase 1** | Data foundation: One movements table for all files, a global duplicate check, exits and opening stock required.; The calculation engine (stock per storage location, pending, FIFO dates, pallets per article), tested automatically on the sample database and the messy export files.; The import page with its checks, the freshness stamp, the import log.; A one-page procedure in French: who exports and imports, when, and who replaces them. | EXP2 stock in the twin equals MB52, article by article. Re-uploading a file adds 0 lines. The messy files give exactly their expected results. |
 | **Phase 2** | PC: lookup, pending, saturation: Pages: Recherche article, En attente, Plan 2D.; Saturation per block and overall, positions labeled "théorique" (placeholder by family).; Floor occupancy in m². | Any article found in under 10 s with its entry dates. Block saturation matches a count of 2 blocks within ±5 %. |
@@ -122,22 +134,25 @@ Full feature list, data requirements, risks and open questions: [docs/IMPLEMENTA
 ```text
 WMS_exp_zone/
 ├── README.md                       ← you are here
+├── apps-script/
+│   ├── README.md                   ← install in a Google Sheet, first use, real data, tests
+│   ├── .clasp.json.example         ← copy to .clasp.json at the repository root (rootDir: apps-script/src)
+│   └── src/                        ← the Apps Script project, pushed as is by clasp (no sub-folder)
+│       ├── appsscript.json         ← manifest
+│       ├── Config.gs, Engine.gs, Normalize.gs, Simulation.gs   ← pure JavaScript (also run in Node tests and the browser)
+│       ├── Repo.gs, Api.gs, Main.gs, Assets.gs                 ← sheet storage, web app API, menu / ACCUEIL / sidebar
+│       └── Index.html + Client, PageTv, PagesPc, Twin3d, Iso, Plan2d, Styles, Sidebar (.html)
 ├── docs/
+│   ├── ARCHITECTURE.md             ← technical contract of the app (files, tabs, engine, API, state, web app)
 │   └── IMPLEMENTATION_PLAN.md      ← the full plan (data, logic, screens, phases, risks, questions)
+├── tests/
+│   ├── *.test.js                   ← npm test: engine vs oracle, normaliser vs messy files, simulation, API, harness
+│   └── harness/                    ← npm run harness / npm run e2e: every screen without Google, Playwright run, screenshots
 └── sample-data/
     ├── README.md                   ← what each tab contains
     ├── EXP2_twin_sample_db.xlsx    ← simulated database, Google-Sheets-ready
     ├── csv/                        ← one CSV per tab (same content)
     └── messy/                      ← realistic messy SAP exports + expected import results
-```
-
-Planned from phase 1 (not created yet):
-
-```text
-apps-script/
-├── viewer/     ← read-only web app: TV mode + stakeholder link
-├── admin/      ← import, trucks form, settings (restricted access)
-└── shared/     ← calculation code used by both
 ```
 
 ## Simulated database
@@ -173,10 +188,11 @@ apps-script/
 
 Recommended extra columns in the MB51 layout: **Poste**, **Date / Heure de saisie**, **Magasin récepteur (UMLGO)**, **Lot**, **Référence**. See the plan for why.
 
-## Development workflow (planned)
+## Development workflow
 
-- Code lives in this repository and is pushed to Apps Script with [`clasp`](https://github.com/google/clasp).
-- Two Apps Script projects (viewer and admin) share one Google Sheet; each keeps **one stable deployment URL** that is updated in place.
+- Code lives in this repository (`apps-script/src`) and is pushed to the Apps Script project bound to the Google Sheet with [`clasp`](https://github.com/google/clasp) (`rootDir: apps-script/src`).
+- One container-bound Apps Script project: the menu, the simulation and the web app (TV + PC pages). Write actions are protected by two access keys (admin, docks). The web app keeps **one stable deployment URL** (`/exec`) that is updated in place (Déployer › Gérer les déploiements › Modifier › Nouvelle version).
+- `npm test`, `npm run harness` and `npm run e2e` run everything without Google (see [apps-script/README.md](apps-script/README.md#tests-and-local-harness-no-google-needed)).
 - The spreadsheet and scripts belong to a **team Google account**, never a personal one. A nightly copy of the spreadsheet is kept in Drive.
 - Work happens on feature branches; `main` holds what is deployed.
 

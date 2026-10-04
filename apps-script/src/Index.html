@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="fr" class="mode-<?= mode ?>">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <?!= include_('Styles') ?>
+</head>
+<body class="theme-<?= mode ?>" data-mode="<?= mode ?>" data-page="<?= page ?>">
+  <div id="app"></div>
+  <noscript>Le jumeau numérique EXP2 a besoin de JavaScript.</noscript>
+  <script><?!= moduleSource_('Config') ?></script>
+  <script><?!= moduleSource_('Normalize') ?></script>
+  <?!= include_('Client') ?>
+  <?!= include_('Plan2d') ?>
+  <?!= include_('Iso') ?>
+  <?!= include_('Twin3d') ?>
+  <?!= include_('PageTv') ?>
+  <?!= include_('PagesPc') ?>
+  <script>window.App.start();</script>
+</body>
+</html>

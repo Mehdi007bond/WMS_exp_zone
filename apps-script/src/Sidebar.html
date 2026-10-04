@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --ink: #1f2a37;
+      --muted: #5b6773;
+      --line: #dde3ea;
+      --soft: #f4f6f8;
+      --accent: #1a5fb4;
+      --accent-ink: #ffffff;
+      --good: #0c7a0c;
+      --warn: #b26a00;
+      --crit: #c62828;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 12px 12px 24px;
+      font: 13px/1.45 "Google Sans", Roboto, Arial, sans-serif;
+      color: var(--ink);
+      background: #ffffff;
+    }
+    h1 { font-size: 16px; margin: 0; }
+    .sub { color: var(--muted); margin: 2px 0 12px; font-size: 12px; }
+    h2 {
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 8px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 8px;
+      border-radius: 10px;
+      background: var(--soft);
+      color: var(--muted);
+      margin-left: 6px;
+      vertical-align: 1px;
+    }
+    .badge.sim { background: #fff3d6; color: #8a5a00; }
+    .badge.sap { background: #e3f4e3; color: var(--good); }
+    dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; }
+    dt { color: var(--muted); }
+    dd { margin: 0; font-weight: 600; text-align: right; }
+    .alerts { margin: 8px 0 0; padding: 0; list-style: none; }
+    .alerts li { font-size: 12px; padding: 3px 0 3px 10px; border-left: 3px solid var(--warn); margin-bottom: 4px; color: var(--ink); }
+    .alerts li.crit { border-left-color: var(--crit); }
+    form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
+    input {
+      font: inherit;
+      color: var(--ink);
+      padding: 5px 7px;
+      border: 1px solid #c9d2dc;
+      border-radius: 6px;
+      width: 100%;
+      min-width: 0;
+    }
+    input:focus { outline: 2px solid #9cc0ec; border-color: var(--accent); }
+    .actions { display: flex; gap: 8px; margin-top: 10px; }
+    button {
+      flex: 1;
+      font: 600 13px/1 "Google Sans", Roboto, Arial, sans-serif;
+      padding: 9px 8px;
+      border-radius: 6px;
+      border: 1px solid #c9d2dc;
+      background: #ffffff;
+      color: var(--ink);
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    button:disabled { opacity: .55; cursor: progress; }
+    .msg { margin-top: 10px; font-size: 12px; min-height: 18px; }
+    .msg.ok { color: var(--good); }
+    .msg.err { color: var(--crit); }
+    .msg.busy { color: var(--muted); }
+    .links a { display: block; color: var(--accent); margin: 3px 0; word-break: break-all; }
+    .hint { font-size: 12px; color: var(--muted); }
+    .key { display: flex; gap: 6px; align-items: center; margin: 4px 0 8px; }
+    .key input { font: 600 13px/1.2 "Roboto Mono", Consolas, monospace; letter-spacing: .05em; background: var(--soft); }
+    .key button { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
+    .muted { color: var(--muted); font-weight: 400; }
+    details { grid-column: 1 / -1; }
+    details summary { cursor: pointer; font-size: 12px; color: var(--muted); margin: 2px 0 6px; }
+    details .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button.confirm { background: #b26a00; border-color: #b26a00; color: #fff; }
+    .url { display: flex; gap: 6px; margin-top: 8px; }
+    .url input { font-size: 12px; }
+    .url button { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>EXP2 · Jumeau numérique</h1>
+  <p class="sub">Panneau de contrôle</p>
+
+  <section class="card" aria-live="polite">
+    <h2>État des données <span id="sourceBadge" class="badge">…</span></h2>
+    <div id="status" class="hint">Chargement…</div>
+  </section>
+
+  <section class="card">
+    <h2>Simulation</h2>
+    <form id="simForm" autocomplete="off">
+      <label>Jours ouvrés
+        <input type="number" id="days" min="1" max="60" step="1" value="14" required>
+      </label>
+      <label>Date de fin
+        <input type="date" id="endDate">
+      </label>
+      <details>
+        <summary>Options avancées</summary>
+        <div class="grid">
+          <label>Palettes / jour
+            <input type="number" id="palletsPerDay" min="5" max="500" step="1" placeholder="auto (70)">
+          </label>
+          <label title="Même numéro = mêmes données simulées">Variante (n°)
+            <input type="number" id="seed" min="0" step="1" value="2026">
+          </label>
+        </div>
+      </details>
+    </form>
+    <div class="actions">
+      <button type="submit" form="simForm" class="primary" id="btnSimulate">Générer 14 jours</button>
+      <button type="button" id="btnNextDay">+1 jour</button>
+      <button type="button" id="btnRecompute">Recalculer</button>
+    </div>
+    <div id="msg" class="msg" role="status"></div>
+    <p class="hint">« Générer » remplace les données simulées (un second clic confirme) ; les lignes importées depuis SAP sont conservées.</p>
+  </section>
+
+  <section class="card">
+    <h2>Liens</h2>
+    <div id="links" class="links hint">Chargement…</div>
+    <div class="hint" style="margin-top:8px">URL de l’application Web (se termine par <b>/exec</b> : Déployer › Gérer les déploiements)</div>
+    <form class="url" id="urlForm" autocomplete="off">
+      <input type="url" id="webAppUrl" placeholder="https://script.google.com/macros/s/…/exec" spellcheck="false">
+      <button type="submit" id="btnUrl">Enregistrer</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Clés d'accès</h2>
+    <div class="hint">Clé administrateur (import, simulation, recalcul)</div>
+    <div class="key"><input id="keyAdmin" readonly value="…"><button type="button" data-copy="keyAdmin">Copier</button></div>
+    <div class="hint">Clé quais (page Quais &amp; camions)</div>
+    <div class="key"><input id="keyDocks" readonly value="…"><button type="button" data-copy="keyDocks">Copier</button></div>
+  </section>
+
+  <script>
+    (function () {
+      var busy = false;
+
+      function $(id) { return document.getElementById(id); }
+
+      function esc(s) {
+        return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+      }
+
+      function call(name, args, onOk, onErr) {
+        var runner = google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr || showError);
+        runner[name].apply(runner, args || []);
+      }
+
+      function frDate(iso) {
+        return iso ? String(iso).slice(8, 10) + '.' + String(iso).slice(5, 7) + '.' + String(iso).slice(0, 4) : '—';
+      }
+
+      function frDateTime(iso) {
+        if (!iso) return '—';
+        var d = new Date(iso);
+        if (isNaN(d.getTime())) return String(iso);
+        function p(n) { return (n < 10 ? '0' : '') + n; }
+        return p(d.getDate()) + '.' + p(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+      }
+
+      function frNum(n) {
+        if (n === null || n === undefined || isNaN(n)) return '—';
+        return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+      }
+
+      function frPct(f) {
+        if (f === null || f === undefined || isNaN(f)) return '—';
+        return (Math.round(f * 1000) / 10).toFixed(1).replace('.', ',') + '\u00a0%';
+      }
+
+      function setMessage(text, kind) {
+        var m = $('msg');
+        m.textContent = text || '';
+        m.className = 'msg' + (kind ? ' ' + kind : '');
+      }
+
+      function setBusy(on, text) {
+        busy = on;
+        ['btnSimulate', 'btnNextDay', 'btnRecompute'].forEach(function (id) { $(id).disabled = on; });
+        if (on) setMessage(text || 'Traitement en cours…', 'busy');
+      }
+
+      function showError(err) {
+        setBusy(false);
+        setMessage((err && err.message) ? err.message : String(err), 'err');
+      }
+
+      function renderStatus(s) {
+        var badge = $('sourceBadge');
+        if (!s.installed) {
+          badge.textContent = 'non installée';
+          badge.className = 'badge';
+          $('status').innerHTML = 'Base non installée : menu <b>EXP2 Jumeau › Installer / réinitialiser la base</b>.';
+          return;
+        }
+        var st = s.state;
+        if (!st) {
+          badge.textContent = 'vide';
+          badge.className = 'badge';
+          $('status').innerHTML = 'Aucun calcul pour l\'instant : cliquez sur <b>Générer 14 jours</b> ou importez des fichiers SAP.';
+        } else {
+          var sim = st.source === 'SIMULATION';
+          badge.textContent = sim ? 'simulation' : 'SAP';
+          badge.className = 'badge ' + (sim ? 'sim' : 'sap');
+          var rows = [
+            ['Données au', frDate(st.asOf)],
+            ['Palettes EXP2', frNum(st.exp2Pallets) + ' <span class="muted">/ ' + frNum(st.capacity) + '</span>'],
+            ['Saturation EXP2', frPct(st.saturation)],
+            ['En attente PRD2', frNum(st.pendingPallets) + ' pal' + (st.oldestPendingDays ? ' <span class="muted">(' + st.oldestPendingDays + ' j)</span>' : '')],
+            ['Quais occupés', (st.docksOccupied || 0) + ' / ' + (st.docksTotal || 0)],
+            ['Alertes', st.alerts + (st.critical ? ' <span class="muted">dont ' + st.critical + ' critique' + (st.critical > 1 ? 's' : '') + '</span>' : '')],
+            ['Calculé le', frDateTime(st.computedAt)]
+          ];
+          if (s.lastImport) rows.splice(6, 0, ['Dernier import', esc(s.lastImport.kind) + ' <span class="muted">' + frDateTime(s.lastImport.at) + '</span>']);
+          var html = '<dl>' + rows.map(function (r) { return '<dt>' + esc(r[0]) + '</dt><dd>' + r[1] + '</dd>'; }).join('') + '</dl>';
+          if (st.alertsList && st.alertsList.length) {
+            html += '<ul class="alerts">' + st.alertsList.map(function (a) {
+              return '<li class="' + (a.level === 'crit' ? 'crit' : '') + '">' + esc(a.text) + '</li>';
+            }).join('') + '</ul>';
+          }
+          $('status').innerHTML = html;
+        }
+      }
+
+      function fillDefaults(s) {
+        var d = s.defaults || {};
+        if (d.endDate && !$('endDate').value) $('endDate').value = d.endDate;
+        $('endDate').max = todayIso();
+        if (d.seed !== undefined && d.seed !== null) $('seed').value = d.seed;
+        if (d.palletsPerDay) $('palletsPerDay').value = d.palletsPerDay;
+      }
+
+      function todayIso() {
+        var d = new Date();
+        function p(n) { return (n < 10 ? '0' : '') + n; }
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+      }
+
+      function loadStatus(first) {
+        call('sidebar_status', [], function (s) {
+          renderStatus(s);
+          if (first) fillDefaults(s);
+        });
+      }
+
+      function showLinks(r) {
+          var l = r.links || {};
+          if (l.source === 'saved' && l.base && !$('webAppUrl').value) $('webAppUrl').value = l.base;
+          if (l.deployed) {
+            $('links').innerHTML = '<a href="' + esc(l.tv) + '" target="_blank" rel="noopener">Écran TV (rotation des scènes)</a>' +
+              (l.pages || []).map(function (p) {
+                return '<a href="' + esc(p.url) + '" target="_blank" rel="noopener">PC · ' + esc(p.label) + '</a>';
+              }).join('');
+            $('links').className = 'links';
+          } else {
+            $('links').textContent = l.instructions || 'Application Web non déployée.';
+            $('links').className = 'links hint';
+          }
+          $('keyAdmin').value = (r.keys && r.keys.admin) || '—';
+          $('keyDocks').value = (r.keys && r.keys.docks) || '—';
+      }
+
+      function loadLinks() {
+        call('sidebar_links', [], showLinks);
+      }
+
+      $('urlForm').addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        $('btnUrl').disabled = true;
+        call('sidebar_setWebAppUrl', [$('webAppUrl').value.trim()], function (r) {
+          $('btnUrl').disabled = false;
+          showLinks(r);
+          setMessage(r.links && r.links.deployed ? 'URL enregistrée : liens TV et PC à jour (onglet ACCUEIL aussi).' : 'URL effacée : liens automatiques.', 'ok');
+        }, function (err) {
+          $('btnUrl').disabled = false;
+          showError(err);
+        });
+      });
+
+      function done(res) {
+        setBusy(false);
+        setMessage(res.message || 'Terminé.', 'ok');
+        if (res.status) renderStatus(res.status);
+      }
+
+      function readInt(id) {
+        var v = $(id).value.trim();
+        return v === '' ? '' : Number(v);
+      }
+
+      // « Générer N jours » follows the number of days; the first click only arms the replacement (a second click
+      // within 6 s confirms), like the « Remplacer la simulation ? » question of the PC page.
+      var armed = null;
+      function simLabel() {
+        var d = Math.round(Number($('days').value));
+        return 'Générer ' + (d > 0 ? d : 14) + ' jours';
+      }
+      function disarm() {
+        if (armed) clearTimeout(armed);
+        armed = null;
+        $('btnSimulate').textContent = simLabel();
+        $('btnSimulate').classList.remove('confirm');
+      }
+      $('days').addEventListener('input', disarm);
+
+      $('simForm').addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        if (busy) return;
+        if (!$('simForm').reportValidity()) return;
+        if (!armed) {
+          $('btnSimulate').textContent = 'Confirmer le remplacement';
+          $('btnSimulate').classList.add('confirm');
+          armed = setTimeout(disarm, 6000);
+          return;
+        }
+        disarm();
+        var params = {
+          days: readInt('days'),
+          endDate: $('endDate').value || '',
+          palletsPerDay: readInt('palletsPerDay'),
+          seed: readInt('seed')
+        };
+        setBusy(true, 'Génération de la simulation… (quelques secondes)');
+        call('sidebar_simulate', [params], done, showError);
+      });
+
+      $('btnNextDay').addEventListener('click', function () {
+        if (busy) return;
+        setBusy(true, 'Simulation de la journée suivante…');
+        call('sidebar_nextDay', [], done, showError);
+      });
+
+      $('btnRecompute').addEventListener('click', function () {
+        if (busy) return;
+        setBusy(true, 'Recalcul en cours…');
+        call('sidebar_recompute', [], done, showError);
+      });
+
+      Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var input = $(btn.getAttribute('data-copy'));
+          var ok = function () {
+            btn.textContent = 'Copié';
+            setTimeout(function () { btn.textContent = 'Copier'; }, 1500);
+          };
+          input.select();
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(input.value).then(ok, function () {
+                if (document.execCommand('copy')) ok();
+              });
+            } else if (document.execCommand('copy')) {
+              ok();
+            }
+          } catch (e) {
+            // The text stays selected: Ctrl+C works.
+          }
+        });
+      });
+
+      loadStatus(true);
+      loadLinks();
+    })();
+  </script>
+</body>
+</html>

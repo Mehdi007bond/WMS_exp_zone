@@ -1,0 +1,535 @@
+<script>
+/**
+ * EXP2 Digital Twin - TV page (?mode=tv, full screen, dark, no mouse).
+ *
+ *   PageTv.mount(root, { rotate, scene })
+ *     rotate: true (?rotate=1) cycles the scenes every tvSceneS seconds (PARAM_SEUILS, else CFG.THRESHOLDS)
+ *     scene:  'overview' | 'plan' | 'pending' | 'docks' (?scene=...) shows one scene only
+ *
+ * Scenes: overview (3D + key numbers + block saturation + 8 docks), 2D plan saturation, pending list, docks.
+ * Header: brand, 'Données SAP du …' (or 'Données simulées au …'), freshness badge (or 'Connexion perdue' with the
+ * age of the shown state), alerts count; 'DONNÉES SIMULÉES' strip for simulated data; short grouped alerts in the
+ * ticker (the full texts are on the PC Simulation page and in the sidebar). Sized for a 55" screen read from 5 m.
+ * The screen is never blank: the last good state stays on screen when a refresh fails.
+ */
+(function () {
+  'use strict';
+  var App = window.App, f = App.fmt, esc = f.esc;
+  var SCENES = [
+    { id: 'overview', label: 'Vue d’ensemble' },
+    { id: 'plan', label: 'Plan 2D · saturation' },
+    { id: 'pending', label: 'En attente PRD2' },
+    { id: 'docks', label: 'Quais & camions' }
+  ];
+  function sceneIds() {
+    return SCENES.map(function (s) { return s.id; });
+  }
+
+  function template() {
+    return '' +
+      '<div class="tv-app">' +
+      '<header class="tv-top">' +
+      '<div class="tv-brand">EXP2 <span>·</span> Jumeau numérique</div>' +
+      '<div class="tv-fresh" data-r="fresh">Données SAP du <b>—</b></div>' +
+      '<div class="tv-badge" data-r="badge"><i></i><span>Chargement…</span></div>' +
+      '<div class="tv-pill ok" data-r="alerts"><i></i><span>—</span></div>' +
+      '<div class="tv-dots" data-r="dots" aria-hidden="true"></div>' +
+      '</header>' +
+      '<div class="tv-sim" data-r="sim" hidden><b>▲ DONNÉES SIMULÉES</b><span>Base d’exemple générée dans le classeur · ne pas utiliser pour décider</span></div>' +
+      '<main class="tv-scenes">' +
+      '<section class="tv-scene scene-overview" data-scene="overview">' +
+      '<div class="tv-twin"><div class="tv-twin-stage" data-r="stage"></div><div class="tv-legend" data-r="legend"></div>' +
+      '<div class="tv-note">Positions théoriques · placement par famille</div></div>' +
+      '<div class="tv-side"><div class="tv-kpis" data-r="kpis"></div>' +
+      '<div class="tv-blocks" data-r="blocks"></div></div>' +
+      '<div class="tv-docks" data-r="docks"></div>' +
+      '</section>' +
+      '<section class="tv-scene scene-plan" data-scene="plan"><div class="scene-pad" style="position:absolute;inset:0">' +
+      '<h2 class="tv-title">Plan 2D · saturation par bloc <small>placement théorique par famille</small></h2>' +
+      '<div class="scene-body"><div class="tv-plan-box"><svg data-r="plan" aria-label="Plan 2D de l’entrepôt, blocs colorés selon leur saturation"></svg>' +
+      '<div class="ramps" data-r="planRamp"></div></div><div class="tv-blist" data-r="blist"></div></div></div></section>' +
+      '<section class="tv-scene scene-pending" data-scene="pending"><div class="scene-pad" style="position:absolute;inset:0">' +
+      '<h2 class="tv-title">En attente PRD2 <small>déclarées en production, pas encore transférées en EXP2 · la plus ancienne d’abord</small></h2>' +
+      '<div class="tv-stats" data-r="pstats"></div>' +
+      '<div class="scene-body"><div class="tv-table" data-r="ptable"></div><div class="tv-chart" data-r="pchart"></div></div></div></section>' +
+      '<section class="tv-scene scene-docks" data-scene="docks"><div class="scene-pad" style="position:absolute;inset:0">' +
+      '<h2 class="tv-title">Quais d’expédition <small>camions, chargement et zone quai</small></h2>' +
+      '<div class="tv-stats" data-r="dstats"></div>' +
+      '<div class="scene-body" data-r="dcards"></div></div></section>' +
+      '<div class="tv-empty" data-r="empty" hidden></div>' +
+      '</main>' +
+      '<footer class="tv-ticker" data-r="ticker"><div class="tv-ticker-track" data-r="track"></div></footer>' +
+      '</div>';
+  }
+
+  function mount(root, opts) {
+    opts = opts || {};
+    document.documentElement.classList.add('mode-tv');
+    root.innerHTML = template();
+    var R = {};
+    App.$$('[data-r]', root).forEach(function (e) { R[e.getAttribute('data-r')] = e; });
+    var app = App.$('.tv-app', root);
+    var sceneEls = App.$$('.tv-scene', root);
+    var fixed = sceneIds().indexOf(opts.scene) >= 0 ? opts.scene : '';
+    var rotate = !!opts.rotate && !fixed;
+    var scene = fixed || 'overview';
+    var twin = null;
+    var shown = null;
+    var sceneTimer = null, sceneS = 0;
+
+    R.dots.innerHTML = rotate ? SCENES.map(function () { return '<i></i>'; }).join('') : '';
+
+    // Each scene has its own title: the header keeps its room for the data date.
+    function showScene(id) {
+      scene = id;
+      sceneEls.forEach(function (s) { s.classList.toggle('on', s.getAttribute('data-scene') === id); });
+      App.$$('i', R.dots).forEach(function (d, i) { d.classList.toggle('on', SCENES[i].id === id); });
+      if (id === 'overview' && twin) setTimeout(function () { twin.resize(); }, 50);
+      if (id === 'pending' || id === 'docks') setTimeout(fitTables, 30);
+    }
+
+    function nextScene() {
+      if (App.store.status !== 'ok') return;
+      var ids = sceneIds();
+      showScene(ids[(ids.indexOf(scene) + 1) % ids.length]);
+    }
+
+    // Scene duration: tvSceneS of PARAM_SEUILS (state thresholds), re-armed when it changes.
+    function armRotation() {
+      if (!rotate) return;
+      var sec = Math.max(10, Number(App.thresholds(App.store.state).tvSceneS) || 45);
+      if (sceneTimer && sec === sceneS) return;
+      if (sceneTimer) clearInterval(sceneTimer);
+      sceneS = sec;
+      sceneTimer = setInterval(nextScene, sec * 1000);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Header (refreshed on every state event and every 30 s)
+    // ---------------------------------------------------------------------------------------------
+    function header(store) {
+      var s = store.state;
+      var fr = App.freshness(s);
+      var conn = App.connection();
+      if (s && store.status !== 'empty') {
+        R.fresh.innerHTML = esc(fr.lead) + ' <b>' + esc(f.date(s.asOf)) + '</b>' +
+          (fr.imported ? ' · ' + esc(fr.verb) + ' <b>' + esc(fr.imported) + '</b>' : '');
+      } else {
+        R.fresh.innerHTML = 'Données SAP du <b>—</b>';
+      }
+      var badge = R.badge, cls = 'tv-badge', text, stale = false;
+      if (conn && s) {
+        cls += ' off';
+        text = 'Connexion perdue · état de ' + f.time(store.fetchedAt);
+      } else if (!s) {
+        cls += store.status === 'loading' ? '' : ' crit';
+        text = store.status === 'loading' ? 'Chargement…' : store.status === 'notInstalled' ? 'Base non installée' : store.status === 'empty' ? 'Aucune donnée' : 'Hors ligne';
+      } else if (store.status === 'empty') {
+        cls += ' warn';
+        text = 'Aucune donnée';
+      } else if (s.source === 'SIMULATION') {
+        // A simulated demo left on the TV is not "old SAP data": no red badge, no greyed figures the next morning.
+        text = 'Simulation' + (fr.ago ? ' · ' + fr.ago : '');
+      } else {
+        cls += fr.level === 'ok' ? '' : ' ' + fr.level;
+        text = fr.label + (fr.level !== 'ok' && fr.ago ? ' · import ' + fr.ago : '');
+        stale = fr.level === 'crit';
+      }
+      badge.className = cls;
+      badge.lastChild.textContent = text;
+      app.classList.toggle('stale', stale);
+      var alerts = (s && s.alerts) || [];
+      var crit = alerts.filter(function (a) { return a.level === 'crit'; }).length;
+      R.alerts.hidden = !s || store.status === 'empty';
+      R.alerts.className = 'tv-pill ' + (!alerts.length ? 'ok' : crit ? 'crit' : '');
+      R.alerts.lastChild.textContent = alerts.length ? f.plural(alerts.length, 'alerte', 'alertes') + (crit ? ' · ' + crit + ' critique' + (crit > 1 ? 's' : '') : '') : 'Aucune alerte';
+      R.sim.hidden = !(s && s.source === 'SIMULATION');
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Overview scene
+    // ---------------------------------------------------------------------------------------------
+    function kpis(s) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
+      var satSub;
+      if (k.daysToSaturation !== null && k.daysToSaturation !== undefined) satSub = '≈ ' + f.num(Math.round(k.daysToSaturation), 0) + ' j avant saturation';
+      else if (k.netPerDay !== null && k.netPerDay !== undefined && k.netPerDay < 0) satSub = 'en baisse : ' + f.signed(k.netPerDay, 1) + ' pal/j';
+      else if (k.netPerDay === 0) satSub = 'stable sur 7 jours';
+      else satSub = 'tendance : à venir';
+      var satColor = k.saturation >= thr.satCrit ? '#ff8f8f' : k.saturation >= thr.satWarn ? '#fbd46a' : '';
+      var dockSat = Number(k.dockSaturation) || 0;
+      var series = (s.daily || []).map(function (d) { return d.saturation; });
+      // Sub-lines kept short: they must fit the tile at the TV size, without an ellipsis.
+      var tiles = [
+        { l: 'Stock EXP2', v: f.num(k.exp2Pallets, 0) + ' <small>pal</small>',
+          s: f.num(k.capacity, 0) + ' places' + (k.toPlacePallets ? ' · <b>' + f.num(k.toPlacePallets, 0) + ' à placer</b>' : '') },
+        { l: 'Saturation EXP2', v: f.pct(k.saturation), color: satColor,
+          extra: App.sparkline(series, { label: 'Saturation EXP2 sur ' + series.length + ' jours', w: 220, h: 26 }), s: satSub },
+        { l: 'En attente PRD2', v: f.num(k.pendingPallets, 0) + ' <small>pal</small>',
+          s: (k.stuckPendingLines ? f.days(k.oldestPendingDays) + ' max · <b>' + f.plural(k.stuckPendingLines, 'ligne', 'lignes') + ' ≥ ' + thr.pendingDaysWarn + ' j</b>'
+            : 'plus ancienne : ' + f.days(k.oldestPendingDays)) },
+        { l: 'Entrées / sorties du jour', v: f.num(k.entriesToday, 0) + ' / ' + f.num(k.exitsToday, 0) + ' <small>pal</small>', s: 'journée du ' + f.date(s.asOf) },
+        { l: 'Saturation zone quai', v: f.pct(dockSat),
+          extra: '<div class="meter"><i style="width:' + Math.min(100, dockSat * 100) + '%;background:' + App.satColor(dockSat, { satWarn: thr.dockStagingWarn, satCrit: 1 }) + '"></i></div>',
+          s: f.num(k.docksStaged, 0) + ' / ' + f.num(k.docksCapacity, 0) + ' pal en zone quai' },
+        { l: 'Quais occupés', v: f.num(k.docksOccupied, 0) + ' <small>/ ' + f.num(k.docksTotal || (s.docks || []).length, 0) + '</small>',
+          s: 'EMRT : ' + f.num(k.emrtPallets, 0) + ' pal' }
+      ];
+      R.kpis.innerHTML = tiles.map(function (t) {
+        return '<div class="tv-kpi"><div class="l">' + esc(t.l) + '</div><div class="v"' + (t.color ? ' style="color:' + t.color + '"' : '') + '>' + t.v + '</div>' +
+          (t.extra || '') + '<div class="s">' + t.s + '</div></div>';
+      }).join('');
+    }
+
+    function blockBars(s) {
+      var thr = App.thresholds(s);
+      R.blocks.innerHTML = '<h4>Saturation par bloc <span>(seuils ' + Math.round(thr.satWarn * 100) + '\u00a0% / ' + Math.round(thr.satCrit * 100) + '\u00a0%)</span></h4>' +
+        (s.blocks || []).map(function (b) {
+          var v = Number(b.saturation) || 0;
+          return '<div class="tv-brow"><span>' + esc(b.id) + '</span><div class="bar"><i style="width:' + Math.min(100, v * 100) + '%;background:' + App.satColor(v, thr) + '"></i></div>' +
+            '<span class="p">' + f.pctInt(v) + '</span></div>';
+        }).join('');
+    }
+
+    function dockStrip(s) {
+      var thr = App.thresholds(s);
+      var docks = s.docks || [];
+      R.docks.style.gridTemplateColumns = 'repeat(' + Math.max(1, docks.length) + ', minmax(0, 1fr))';
+      R.docks.innerHTML = docks.map(function (d) {
+        var free = App.dockKind(d) === 'free';
+        var cap = Number(d.capacity) || 0, st = Number(d.staged) || 0;
+        var sr = cap ? st / cap : 0;
+        var scls = sr >= 1 ? 'crit' : sr >= thr.dockStagingWarn ? 'warn' : '';
+        var zone = '<div class="r">Zone quai <b class="' + scls + '">' + f.num(st, 0) + '/' + f.num(cap, 0) + '</b></div>';
+        // A free dock shows only « Libre » (and its staging zone when pallets wait there).
+        return '<div class="tv-q' + (free ? ' free' : '') + '"><div class="h">' + esc(f.quai(d.quai)) +
+          (free ? '<span>Libre</span>' : '<span class="tv-chip ' + dockChip(d) + '">' + esc(App.dockLabel(d)) + '</span>') + '</div>' +
+          App.truckSvg(d, true) +
+          (free ? (st > 0 ? zone : '') : '<div class="r">Palettes <b>' + f.num(d.loaded || 0, 0) + '/' + f.num(d.planned || 0, 0) + '</b></div>' + zone) +
+          '</div>';
+      }).join('');
+    }
+
+    // TV chip color of a dock status: amber truck waiting, blue loading, green ready to leave.
+    function dockChip(d) {
+      return { free: '', waiting: 'w', loading: 'b', loaded: 'g', busy: '' }[App.dockKind(d)];
+    }
+
+    function legend(s) {
+      var items = twin ? twin.legend(s) : (window.IsoView ? window.IsoView.legend('family', s) : []);
+      R.legend.innerHTML = items.map(function (x) {
+        return '<span><i style="background:' + esc(x.color) + '"></i>' + esc(String(x.label).replace(/^Famille /, '')) + '</span>';
+      }).join('') +
+        '<span><i class="ghost"></i>en attente PRD2</span>';
+    }
+
+    // Alerts grouped into short items readable from 5 m (one per kind, or per block / dock); full texts on the PC.
+    var TICKER_LABELS = {
+      NEGATIVE_STOCK: 'Stock négatif ramené à 0 (détail sur le PC)',
+      UNPAIRED_TRANSFER: 'Transfert sans ligne opposée (détail sur le PC)',
+      UNKNOWN_MVT: 'Type de mouvement non paramétré',
+      OTHER_MAGASIN: 'Lignes d’un magasin hors du jumeau',
+      OTHER_PLANT: 'Lignes d’une autre division ignorées',
+      BEFORE_OPENING: 'Lignes antérieures au stock initial ignorées',
+      NEGATIVE_OPENING: 'Stock initial négatif ignoré',
+      INVALID_LINE: 'Lignes incomplètes ignorées'
+    };
+
+    function tickerItems(s) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
+      var alerts = s.alerts || [];
+      var by = {}, order = [];
+      alerts.forEach(function (a) {
+        var code = a.code === 'NO_QPP' ? 'UNKNOWN_ARTICLE' : a.code;
+        if (!by[code]) {
+          by[code] = { level: 'warn', list: [] };
+          order.push(code);
+        }
+        if (a.level === 'crit') by[code].level = 'crit';
+        by[code].list.push(a);
+      });
+      var items = [];
+      function add(level, html) {
+        items.push({ level: level, html: html });
+      }
+      order.forEach(function (code) {
+        var g = by[code];
+        if (code === 'PENDING_STUCK') {
+          var n = Number(k.stuckPendingLines) || g.list.length;
+          add(g.level, '<b>' + f.plural(n, 'ligne', 'lignes') + '</b> en attente PRD2 depuis ≥ ' + thr.pendingDaysWarn + ' j (max ' + f.days(k.oldestPendingDays) + ')');
+        } else if (code === 'BLOCK_SAT') {
+          (s.blocks || []).filter(function (b) { return b.saturation !== null && b.saturation >= thr.satWarn; }).forEach(function (b) {
+            add(b.saturation >= thr.satCrit ? 'crit' : 'warn', 'Bloc <b>' + esc(b.id) + '</b> à ' + f.pctInt(b.saturation));
+          });
+        } else if (code === 'EXP2_SAT') {
+          add(g.level, 'EXP2 saturé à <b>' + f.pct(k.saturation) + '</b>');
+        } else if (code === 'DOCK_STAGING') {
+          (s.docks || []).forEach(function (d) {
+            var r = d.capacity > 0 ? d.staged / d.capacity : 0;
+            if (d.capacity > 0 && r >= thr.dockStagingWarn) {
+              add('warn', 'Quai <b>' + esc(f.quai(d.quai)) + '</b> : zone quai ' + (r >= 1 ? 'pleine' : 'à ' + f.pctInt(r)));
+            }
+          });
+        } else if (code === 'UNKNOWN_ARTICLE') {
+          var arts = Number(k.unknownArticles) || g.list.length;
+          add(g.level, '<b>' + f.plural(arts, 'article', 'articles') + '</b> sans quantité par palette');
+        } else if (code === 'TO_PLACE') {
+          add(g.level, '<b>' + f.plural(k.toPlacePallets || 0, 'palette', 'palettes') + '</b> à placer (blocs de la famille pleins)');
+        } else {
+          add(g.level, esc(TICKER_LABELS[code] || g.list[0].text));
+        }
+      });
+      return items;
+    }
+
+    function ticker(s) {
+      var k = s.kpi || {};
+      var alerts = s.alerts || [];
+      var parts = tickerItems(s).map(function (a) {
+        return '<span class="' + (a.level === 'crit' ? 'crit' : 'warn') + '">▲ ' + a.html + '</span>';
+      });
+      parts.push('<span class="info">Plus ancienne palette EXP2 : <b>' + f.days(k.oldestExp2Days) + '</b></span>');
+      if (!alerts.length) parts.unshift('<span class="info">● Aucune alerte</span>');
+      R.ticker.classList.toggle('calm', !alerts.length);
+      var html = parts.join('');
+      var track = R.track;
+      track.classList.remove('run');
+      track.innerHTML = html;
+      requestAnimationFrame(function () {
+        var avail = R.ticker.clientWidth;
+        var w = track.scrollWidth;
+        if (w > avail + 2) {
+          track.innerHTML = html + html;
+          var rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+          var speed = rem * 5; // px per second
+          track.style.setProperty('--ticker-s', Math.max(20, Math.round((track.scrollWidth / 2) / speed)) + 's');
+          track.classList.add('run');
+        }
+      });
+    }
+
+    // Static camera (as in the approved mockup) and labels sized for the TV: 1.5 rem (24 px at 1080p). No dock badges
+    // in the view: at that size they cover the block labels, and the dock strip below lists Q1-Q8.
+    function renderTwin(s) {
+      if (!twin) {
+        R.stage.innerHTML = '';
+        var rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+        twin = App.mountTwin(R.stage, s, { autoRotate: false, theme: 'dark', mode: 'family', boost: 1.4, labelPx: Math.round(rem * 1.5),
+          dockLabels: false });
+      } else {
+        twin.update(s);
+      }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Plan scene
+    // ---------------------------------------------------------------------------------------------
+    function planScene(s) {
+      var thr = App.thresholds(s);
+      var sat = {};
+      (s.blocks || []).forEach(function (b) { sat[b.id] = b.saturation; });
+      window.Plan2D.build(R.plan, s.layout, {
+        sat: sat, thresholds: thr, ghosts: (s.kpi || {}).pendingPallets || 0, trucks: s.docks || []
+      });
+      R.planRamp.innerHTML = window.Plan2D.legendHtml(thr) + '<div class="note">Libellés d’allée à confirmer (relevé terrain)</div>';
+      var k = s.kpi || {};
+      R.blist.innerHTML = (s.blocks || []).map(function (b) {
+        var v = Number(b.saturation) || 0;
+        var info = [];
+        if (b.label) info.push(esc(b.label));
+        if (b.families) info.push('famille ' + esc(b.families));
+        info.push(f.num(b.pallets, 0) + ' / ' + f.num(b.capacity, 0) + ' pal');
+        return '<div class="row"><b>' + esc(b.id) + '</b><div class="bar"><i style="width:' + Math.min(100, v * 100) + '%;background:' + App.satColor(v, thr) + '"></i></div>' +
+          '<span class="p">' + f.pctInt(v) + '</span><span class="lbl">' + info.join(' · ') + '</span></div>';
+      }).join('') + (k.toPlacePallets ? '<div class="tp"><b>' + f.plural(k.toPlacePallets, 'palette', 'palettes') + ' à placer</b> : capacité des blocs de la famille dépassée.</div>' : '');
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Pending scene
+    // ---------------------------------------------------------------------------------------------
+    function statTiles(list) {
+      return list.map(function (t) {
+        return '<div class="tv-kpi"><div class="l">' + esc(t.l) + '</div><div class="v">' + t.v + '</div><div class="s">' + t.s + '</div></div>';
+      }).join('');
+    }
+
+    function pendingScene(s) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
+      var rows = s.pending || [];
+      var arts = {};
+      rows.forEach(function (p) { arts[p.article] = true; });
+      var byDate = App.pendingByDate(s);
+      var today = byDate.filter(function (d) { return d.date === s.asOf; })[0];
+      R.pstats.innerHTML = statTiles([
+        { l: 'Palettes en attente', v: f.num(k.pendingPallets, 0) + ' <small>pal</small>', s: f.plural(rows.length, 'ligne', 'lignes') + ' · ' + f.plural(Object.keys(arts).length, 'article', 'articles') },
+        { l: 'Plus ancienne attente', v: f.num(k.oldestPendingDays, 0) + ' <small>jours</small>', s: rows[0] ? 'déclarée le ' + f.date(rows[0].date) : '—' },
+        { l: 'En attente depuis ≥ ' + thr.pendingDaysWarn + ' jours', v: f.num(k.stuckPendingLines, 0) + ' <small>lignes</small>', s: 'à relancer' },
+        { l: 'Déclarées le ' + f.dateShort(s.asOf), v: f.num(today ? today.pallets : 0, 0) + ' <small>pal</small>', s: 'normal en fin de journée' }
+      ]);
+      R.ptable.innerHTML = rows.length ? '<table><thead><tr><th>Article</th><th>Désignation</th><th>Déclarée le</th><th class="num">Pal*</th><th class="num">Attente</th></tr></thead><tbody>' +
+        rows.map(function (p) {
+          var cls = p.days >= (thr.pendingDaysCrit || 2 * thr.pendingDaysWarn) ? 'c' : p.days >= thr.pendingDaysWarn ? 'w' : '';
+          return '<tr><td class="mono">' + esc(p.article) + '</td><td>' + esc(p.designation) + '</td><td>' + esc(f.date(p.date)) + '</td>' +
+            '<td class="num">' + (p.pallets === null || p.pallets === undefined ? '?' : f.num(p.pallets, 0)) + '</td><td class="num"><span class="tv-chip ' + cls + '">' + f.days(p.days) + '</span></td></tr>';
+        }).join('') + '</tbody></table><div class="more" data-more hidden></div>' +
+        '<div class="note" data-note>* palette entamée comptée sur la ligne la plus ancienne de l’article</div>'
+        : '<div class="more">Aucune palette en attente : tout ce qui a été déclaré est transféré en EXP2.</div>';
+      var chartRows = byDate.slice(-12).map(function (d) {
+        return { label: f.dateShort(d.date), value: d.pallets, hot: d.date === s.asOf, title: f.date(d.date) + ' : ' + d.pallets + ' pal en attente' };
+      });
+      R.pchart.innerHTML = '<h3>Palettes en attente par date de déclaration</h3>' +
+        (chartRows.length ? App.barChart(chartRows, { w: 420, h: 230, dark: true, fontSize: 11, ariaLabel: 'Palettes en attente par date de déclaration' }) : '<div></div>') +
+        '<p>La barre bleue est la journée en cours : ces palettes sont normalement transférées dans les heures qui suivent. Les autres méritent un contrôle.</p>';
+    }
+
+    // Keeps only the table rows that fit (no scrolling on a TV).
+    function fitTables() {
+      var box = R.ptable, table = App.$('table', box);
+      if (!table || !box.clientHeight) return;
+      var rows = App.$$('tbody tr', table);
+      rows.forEach(function (r) { r.hidden = false; });
+      var more = App.$('[data-more]', box), note = App.$('[data-note]', box);
+      if (more) more.hidden = true;
+      var limit = box.clientHeight - (more ? 44 : 0) - (note ? note.offsetHeight + 12 : 0);
+      var hiddenN = 0;
+      for (var i = rows.length - 1; i >= 0 && table.offsetHeight > limit; i--) {
+        rows[i].hidden = true;
+        hiddenN++;
+      }
+      if (more && hiddenN) {
+        more.hidden = false;
+        more.textContent = '+ ' + f.plural(hiddenN, 'autre ligne', 'autres lignes') + ' (page PC « En attente »)';
+      }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Docks scene
+    // ---------------------------------------------------------------------------------------------
+    function docksScene(s) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
+      var docks = s.docks || [];
+      var loaded = 0, planned = 0;
+      docks.forEach(function (d) {
+        if (App.dockKind(d) === 'free') return;
+        loaded += Number(d.loaded) || 0;
+        planned += Number(d.planned) || 0;
+      });
+      var next = docks.filter(function (d) { return App.dockKind(d) !== 'free' && /^\d{1,2}:\d{2}$/.test(d.departure || ''); })
+        .map(function (d) { return d.departure; }).sort()[0];
+      R.dstats.innerHTML = statTiles([
+        { l: 'Quais occupés', v: f.num(k.docksOccupied, 0) + ' <small>/ ' + f.num(k.docksTotal || docks.length, 0) + '</small>', s: f.plural((k.docksTotal || docks.length) - (k.docksOccupied || 0), 'quai libre', 'quais libres') },
+        { l: 'Saturation zone quai', v: f.pct(k.dockSaturation || 0), s: f.num(k.docksStaged, 0) + ' / ' + f.num(k.docksCapacity, 0) + ' pal préparées' },
+        { l: 'Chargement en cours', v: f.num(loaded, 0) + ' <small>/ ' + f.num(planned, 0) + ' pal</small>', s: 'chargées / prévues, camions à quai' },
+        { l: 'Palettes restant à charger', v: f.num(Math.max(0, planned - loaded), 0) + ' <small>pal</small>', s: next ? 'prochain départ ' + esc(next) : 'aucun départ prévu' }
+      ]);
+      var cols = Math.max(1, Math.ceil(docks.length / 2));
+      R.dcards.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+      R.dcards.innerHTML = docks.map(function (d) {
+        var free = App.dockKind(d) === 'free';
+        var cap = Number(d.capacity) || 0, st = Number(d.staged) || 0, sr = cap ? st / cap : 0;
+        var lp = !free && d.planned ? Math.min(100, (Number(d.loaded) || 0) / d.planned * 100) : 0;
+        var zone = '<div class="line"><span>Zone quai</span><b>' + f.num(st, 0) + ' / ' + f.num(cap, 0) + '</b>' +
+          '<div class="bar"><i style="width:' + Math.min(100, sr * 100) + '%;background:' + App.satColor(sr, { satWarn: thr.dockStagingWarn, satCrit: 1 }) + '"></i></div></div>';
+        if (free) {
+          return '<div class="tv-dock free"><div class="h"><b>' + esc(f.quai(d.quai)) + '</b><span class="tv-chip">Libre</span></div>' +
+            App.truckSvg(d, true) + (st > 0 ? zone : '') + '</div>';
+        }
+        var times = [];
+        if (d.arrival) times.push('arrivé ' + esc(d.arrival));
+        if (d.departure) times.push('départ prévu ' + esc(d.departure));
+        return '<div class="tv-dock"><div class="h"><b>' + esc(f.quai(d.quai)) + '</b><span class="tv-chip ' + dockChip(d) + '">' + esc(App.dockLabel(d)) + '</span></div>' +
+          App.truckSvg(d, true) +
+          '<div class="who">' + esc(d.truck || 'Camion') + (d.carrier ? ' · ' + esc(d.carrier) : '') +
+            (times.length ? '<small>' + times.join(' · ') + '</small>' : '') + '</div>' +
+          '<div class="line"><span>Palettes</span><b>' + f.num(d.loaded || 0, 0) + ' / ' + f.num(d.planned || 0, 0) + '</b>' +
+          '<div class="bar"><i style="width:' + lp + '%;background:#5b9be0"></i></div></div>' + zone + '</div>';
+      }).join('');
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Empty / loading / error
+    // ---------------------------------------------------------------------------------------------
+    function emptyCard(store) {
+      var html;
+      if (store.status === 'loading') {
+        html = '<div class="card"><div class="marking"></div><h2>Chargement…</h2><p>Lecture de l’état de l’entrepôt EXP2 dans Google Sheets.</p></div>';
+      } else if (store.status === 'notInstalled') {
+        html = '<div class="card"><div class="marking"></div><h2>Base non installée</h2>' +
+          '<p>Le classeur Google Sheets n’est pas encore prêt.</p><ol>' +
+          '<li>Ouvrez le classeur, menu <b>EXP2 Jumeau › Installer / réinitialiser la base</b>.</li>' +
+          '<li>Puis cliquez sur <b>Générer 14 jours</b> (onglet ACCUEIL) pour générer la simulation, ou importez les extractions SAP depuis la page PC <b>Import</b>.</li>' +
+          '</ol><p>Cet écran se met à jour tout seul dans la minute qui suit.</p></div>';
+      } else if (store.status === 'error') {
+        html = '<div class="card"><div class="marking"></div><h2>Connexion impossible</h2><p>' + esc(store.message) + '</p>' +
+          '<p>Nouvel essai automatique toutes les ' + Math.round(App.pollPeriodMs() / 1000) + ' secondes.</p></div>';
+      } else {
+        html = '<div class="card"><div class="marking"></div><h2>Aucune donnée pour l’instant</h2>' +
+          '<p>La base est installée mais ne contient encore aucun mouvement SAP.</p><ol>' +
+          '<li>Pour une démonstration : dans le classeur Google Sheets, onglet <b>ACCUEIL</b>, cliquez sur <b>Générer 14 jours</b> ' +
+          '(ou menu <b>EXP2 Jumeau › Simulation › Générer 14 jours</b>) pour générer la simulation.</li>' +
+          '<li>Pour les données réelles : déposez les extractions SAP MB51 sur la page PC <b>Import</b>.</li>' +
+          '</ol><p>Cet écran se met à jour tout seul dans la minute qui suit.</p></div>';
+      }
+      R.empty.innerHTML = html;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // State events
+    // ---------------------------------------------------------------------------------------------
+    function renderAll(s) {
+      var steps = [kpis, blockBars, dockStrip, renderTwin, legend, ticker, planScene, pendingScene, docksScene];
+      steps.forEach(function (fn) {
+        try {
+          fn(s);
+        } catch (e) {
+          if (window.console) console.error(e);
+        }
+      });
+      setTimeout(fitTables, 30);
+    }
+
+    function onState(store) {
+      header(store);
+      armRotation();
+      var s = store.state;
+      var showData = !!s && store.status === 'ok';
+      R.empty.hidden = showData;
+      sceneEls.forEach(function (e) { e.style.display = showData ? '' : 'none'; });
+      if (!showData) {
+        emptyCard(store);
+        R.track.innerHTML = s ? '' : '<span class="info">' + esc(store.status === 'loading' ? 'Chargement…' : store.message || '') + '</span>';
+        R.ticker.classList.add('calm');
+        return;
+      }
+      if (s !== shown) {
+        shown = s;
+        renderAll(s);
+      }
+    }
+
+    App.onState(onState);
+    App.onTick(header);
+    onState(App.store);
+    showScene(scene);
+    armRotation();
+    var onResize = App.debounce(function () {
+      if (twin) twin.resize();
+      if (shown) {
+        ticker(shown);
+        fitTables();
+      }
+    }, 200);
+    window.addEventListener('resize', onResize);
+    return {
+      showScene: showScene,
+      destroy: function () {
+        if (sceneTimer) clearInterval(sceneTimer);
+        window.removeEventListener('resize', onResize);
+        if (twin) twin.destroy();
+      }
+    };
+  }
+
+  window.PageTv = { mount: mount, SCENES: SCENES };
+})();
+</script>

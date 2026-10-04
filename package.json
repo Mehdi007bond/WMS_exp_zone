@@ -4,8 +4,9 @@
   "private": true,
   "description": "EXP2 warehouse digital twin: Google Apps Script + Google Sheets (tests and local harness)",
   "scripts": {
-    "test": "node --test tests/",
-    "harness": "node tests/harness/build.js"
+    "test": "node --test \"tests/*.test.js\"",
+    "harness": "node tests/harness/build.js",
+    "e2e": "node tests/harness/e2e.js"
   },
   "devDependencies": {
     "xlsx": "0.18.5"

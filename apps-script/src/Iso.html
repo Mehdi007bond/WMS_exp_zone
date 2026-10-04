@@ -1,0 +1,318 @@
+<script>
+/**
+ * EXP2 Digital Twin - isometric "2.5D" canvas view, the fallback of the three.js twin.
+ *
+ *   IsoView.draw(canvas, layout, state, opts)
+ *     layout: state.layout or CFG.DEFAULT_LAYOUT (normalised by Plan2D.normLayout)
+ *     state:  compact state - pallets per block (state.blocks, state.blockContents with family colors from
+ *             state.families), trucks (state.docks), pending ghosts (state.kpi.pendingPallets), block tags
+ *     opts:   { mode: 'family' | 'age' | 'saturation', boost (canvas resolution factor), pending (override) }
+ *   IsoView.legend(mode, state) -> [{ color, label }] (same entries as Twin3D.legend)
+ *
+ * The canvas takes the CSS size of its element; the picture is always dark (TV palette).
+ */
+(function () {
+  'use strict';
+  var BLOCK_FAM = {
+    blanc: '#e7ebef', creme: '#ecdeb0', cyan: '#a2dce9', rose: '#f0c0d5', vert: '#b8e2ab'
+  };
+  var WOOD = { t: '#9c7c52', l: '#7e6241', r: '#604a31' };
+  // Age and saturation colors follow the three.js twin (Twin3d.html): status colors, ages 7 / 14 days.
+  var AGE_DAYS = { warn: 7, crit: 14 };
+  // Hand-tuned tag heights (m) so that the labels of the default layout do not overlap; other blocks use 3.4 m.
+  var TAG_Z = { B2: 5.8, B4: 1.4, B6: 4.6 };
+
+  function conf() {
+    return typeof CFG !== 'undefined' && CFG ? CFG : {};
+  }
+
+  function shade(hex, f) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return hex;
+    var v = parseInt(m[1], 16), r = (v >> 16) & 255, g = (v >> 8) & 255, b = v & 255;
+    r = Math.min(255, Math.round(r * f));
+    g = Math.min(255, Math.round(g * f));
+    b = Math.min(255, Math.round(b * f));
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+  function faces(hex) {
+    return { t: hex, l: shade(hex, 0.84), r: shade(hex, 0.66) };
+  }
+
+  function statusColors() {
+    return (conf().COLORS || {}).status || { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b' };
+  }
+
+  function thresholds(state) {
+    var t = (state && state.thresholds) || conf().THRESHOLDS || {};
+    function n(v, d) {
+      var x = Number(v);
+      return v !== null && v !== undefined && v !== '' && isFinite(x) ? x : d;
+    }
+    return {
+      satWarn: n(t.satWarn, 0.85), satCrit: n(t.satCrit, 0.95),
+      ageWarn: n(t.ageWarnDays, AGE_DAYS.warn), ageCrit: n(t.ageCritDays, AGE_DAYS.crit)
+    };
+  }
+
+  function hexRgb(hex) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return [154, 164, 174];
+    var v = parseInt(m[1], 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  }
+
+  function mix(a, b, t) {
+    var x = hexRgb(a), y = hexRgb(b);
+    t = Math.max(0, Math.min(1, t));
+    return '#' + [0, 1, 2].map(function (i) {
+      var c = Math.round(x[i] + (y[i] - x[i]) * t);
+      return (c < 16 ? '0' : '') + c.toString(16);
+    }).join('');
+  }
+
+  function ageColor(age, thr) {
+    var a = Number(age), st = statusColors();
+    if (age === null || age === undefined || !isFinite(a)) return '#9aa4ae';
+    return a >= thr.ageCrit ? st.critical : a >= thr.ageWarn ? st.warning : st.good;
+  }
+
+  // Same ramp as the three.js twin: green, green -> amber up to satWarn, amber -> orange up to satCrit, red above.
+  function satColor(v, thr) {
+    var st = statusColors();
+    if (v === null || v === undefined || !isFinite(Number(v))) return '#9aa4ae';
+    v = Number(v);
+    var lo = Math.max(0, thr.satWarn - 0.25);
+    if (v < lo) return st.good;
+    if (v < thr.satWarn) return mix(st.good, st.warning, (v - lo) / (thr.satWarn - lo));
+    if (v < thr.satCrit) return mix(st.warning, st.serious, (v - thr.satWarn) / Math.max(1e-6, thr.satCrit - thr.satWarn));
+    return st.critical;
+  }
+
+  function pct(v) {
+    return Math.round(v * 100) + '\u00a0%';
+  }
+
+  function familyColor(state, fam, block) {
+    var fams = (state && state.families) || ((conf().COLORS || {}).families) || {};
+    if (fam && fams[fam]) return fams[fam];
+    return BLOCK_FAM[block.color] || '#c8ced5';
+  }
+
+  function isFree(d) {
+    if (window.App && window.App.dockKind) return window.App.dockKind(d) === 'free';
+    return !d.truck || String(d.status || '').toLowerCase() === 'libre';
+  }
+
+  function cab(color) {
+    if (window.App && window.App.cabColor) return window.App.cabColor(color);
+    return ((conf().COLORS || {}).cabs || {})[color] || '#8a949e';
+  }
+
+  /** Legend entries of a color mode (same labels as Twin3D.legend). */
+  function legend(mode, state) {
+    var thr = thresholds(state), st = statusColors();
+    if (mode === 'age') {
+      return [
+        { label: 'Moins de ' + thr.ageWarn + ' j', color: st.good },
+        { label: thr.ageWarn + ' à ' + (thr.ageCrit - 1) + ' j', color: st.warning },
+        { label: thr.ageCrit + ' j et plus', color: st.critical }
+      ];
+    }
+    if (mode === 'saturation') {
+      return [
+        { label: 'Moins de ' + pct(thr.satWarn), color: st.good },
+        { label: pct(thr.satWarn) + ' à ' + pct(thr.satCrit), color: st.warning },
+        { label: pct(thr.satCrit) + ' et plus', color: st.critical }
+      ];
+    }
+    var fams = {}, k;
+    var base = (conf().COLORS || {}).families || {};
+    for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) fams[k] = base[k];
+    var sf = (state && state.families) || {};
+    for (k in sf) if (Object.prototype.hasOwnProperty.call(sf, k)) fams[k] = sf[k];
+    return Object.keys(fams).sort().map(function (f) { return { label: 'Famille ' + f, color: fams[f] }; });
+  }
+
+  function draw(canvas, layout, state, opts) {
+    opts = opts || {};
+    var W = canvas.clientWidth, H = canvas.clientHeight;
+    if (!W || !H) return null;
+    var L = window.Plan2D ? window.Plan2D.normLayout(layout) : layout;
+    var mode = opts.mode || 'family';
+    var dpr = Math.min(3, (window.devicePixelRatio || 1) * (opts.boost || 1));
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    var c30 = Math.cos(Math.PI / 6), s30 = 0.5;
+    var BW = L.building.w, BH = L.building.h;
+    var spanX = (BW + BH) * c30, spanY = (BW + BH) * s30 + 5;
+    var s = Math.min((W - 30) / spanX, (H - 40) / spanY);
+    var ox = (W - spanX * s) / 2 + BH * c30 * s, oy = 30 + 3.2 * s + Math.max(0, (H - 40 - spanY * s) / 2);
+    var fs = Math.round(Math.max(11, Math.min(24, s * 1.25)));
+
+    function P(x, y, z) {
+      return [ox + (x - y) * c30 * s, oy + (x + y) * s30 * s - z * s];
+    }
+    function poly(pts, fill, stroke, lw) {
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.closePath();
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fill();
+      }
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = lw || 1;
+        ctx.stroke();
+      }
+    }
+    function flat(o, fill, stroke) {
+      poly([P(o.x, o.y, 0), P(o.x + o.w, o.y, 0), P(o.x + o.w, o.y + o.h, 0), P(o.x, o.y + o.h, 0)], fill, stroke, 1);
+    }
+    function box(b) {
+      var x = b.x, y = b.y, z = b.z, w = b.w, d = b.d, h = b.h, c = b.c;
+      if (b.ghost) {
+        ctx.setLineDash([3, 2]);
+        poly([P(x, y, z + h), P(x + w, y, z + h), P(x + w, y + d, z + h), P(x, y + d, z + h)], null, b.ghost, 1.2);
+        poly([P(x, y + d, z), P(x + w, y + d, z), P(x + w, y + d, z + h), P(x, y + d, z + h)], null, b.ghost, 1.2);
+        poly([P(x + w, y, z), P(x + w, y + d, z), P(x + w, y + d, z + h), P(x + w, y, z + h)], null, b.ghost, 1.2);
+        ctx.setLineDash([]);
+        return;
+      }
+      poly([P(x, y + d, z), P(x + w, y + d, z), P(x + w, y + d, z + h), P(x, y + d, z + h)], c.l);
+      poly([P(x + w, y, z), P(x + w, y + d, z), P(x + w, y + d, z + h), P(x + w, y, z + h)], c.r);
+      poly([P(x, y, z + h), P(x + w, y, z + h), P(x + w, y + d, z + h), P(x, y + d, z + h)], c.t, b.edge || null, 0.6);
+    }
+
+    // Floor slab and back walls.
+    poly([P(0, 0, 0), P(BW, 0, 0), P(BW, BH, 0), P(0, BH, 0)], '#1d252e', '#3a4654', 1.2);
+    box({ x: 0, y: -0.35, z: 0, w: BW, d: 0.35, h: 2.6, c: { t: '#3a4552', l: 'rgba(70,84,99,.55)', r: '#222a33' } });
+    box({ x: -0.35, y: 0, z: 0, w: 0.35, d: BH, h: 2.6, c: { t: '#3a4552', l: '#2b3540', r: 'rgba(60,72,86,.55)' } });
+    // Roads.
+    L.roads.forEach(function (r) {
+      flat(r, '#0e1318');
+      ctx.setLineDash([5, 5]);
+      ctx.strokeStyle = '#56616d';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      var a, b2;
+      if (r.w >= r.h) {
+        a = P(r.x + 0.4, r.y + r.h / 2, 0);
+        b2 = P(r.x + r.w - 0.4, r.y + r.h / 2, 0);
+      } else {
+        a = P(r.x + r.w / 2, r.y + 0.4, 0);
+        b2 = P(r.x + r.w / 2, r.y + r.h - 0.4, 0);
+      }
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b2[0], b2[1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    });
+    // Truck zone, other zones, dock edge.
+    if (L.truckZone) flat(L.truckZone, '#26303a', '#3a4654');
+    var conv = null;
+    L.zones.forEach(function (z) {
+      if (z.type === 'CONVOYEUR') conv = z;
+      var col = z.color && BLOCK_FAM[z.color] ? shade(BLOCK_FAM[z.color], 0.66) : '#2f3943';
+      flat(z, z.type === 'CONVOYEUR' ? '#3a4552' : col, '#45515e');
+    });
+    if (L.truckZone && L.quaiLine) {
+      var zc = L.truckZone, qy = L.quaiLine.y;
+      poly([P(zc.x, qy - 0.12, 0.02), P(zc.x + zc.w, qy - 0.12, 0.02), P(zc.x + zc.w, qy + 0.12, 0.02), P(zc.x, qy + 0.12, 0.02)], '#e2b52a');
+    }
+    L.blocks.forEach(function (b) { flat(b, '#2a333d', '#c9a227'); });
+
+    // Pallets (wooden base + load) and trucks, painter's order.
+    var items = [];
+    var blockState = {};
+    ((state && state.blocks) || []).forEach(function (bb) { blockState[bb.id] = bb; });
+    var contents = (state && state.blockContents) || {};
+    var thrC = thresholds(state);
+    L.blocks.forEach(function (b) {
+      var cap = window.Plan2D ? window.Plan2D.capacity(b) : b.cols * b.rows * b.levels;
+      var bs = blockState[b.id] || {};
+      var total = Math.min(Number(bs.pallets) || 0, b.cols * b.rows * b.levels);
+      var sat = bs.saturation !== undefined && bs.saturation !== null ? Number(bs.saturation) : (cap ? total / cap : 0);
+      // One color per pallet, in the order of the block contents (articles, oldest pallets first).
+      var colors = [];
+      (contents[b.id] || []).forEach(function (e) {
+        var col = mode === 'age' ? ageColor(e.ageMax, thrC) : mode === 'saturation' ? satColor(sat, thrC) : familyColor(state, e.family, b);
+        for (var k = 0; k < (Number(e.pallets) || 0) && colors.length < total; k++) colors.push(col);
+      });
+      var fallback = mode === 'saturation' ? satColor(sat, thrC) : mode === 'age' ? '#9aa4ae' : familyColor(state, '', b);
+      while (colors.length < total) colors.push(fallback);
+      var cw = b.w / b.cols, ch = b.h / b.rows, pw = cw * 0.8, pd = ch * 0.8;
+      var cache = {};
+      for (var i = 0; i < total; i++) {
+        var slot = Math.floor(i / b.levels), lev = i % b.levels;
+        var cc = slot % b.cols, rr = Math.floor(slot / b.cols);
+        var x = b.x + cc * cw + (cw - pw) / 2, y = b.y + rr * ch + (ch - pd) / 2, z = lev * 1.08;
+        var f = cache[colors[i]] || (cache[colors[i]] = faces(colors[i]));
+        items.push({ x: x, y: y, z: z, w: pw, d: pd, h: 0.14, c: WOOD, k: x + y + z * 0.01 });
+        items.push({ x: x, y: y, z: z + 0.14, w: pw, d: pd, h: 0.86, c: f, edge: 'rgba(0,0,0,.18)', k: x + y + z * 0.01 + 0.001 });
+      }
+    });
+    if (L.quaiLine) {
+      var qy0 = L.quaiLine.y, qw = L.quaiLine.w;
+      ((state && state.docks) || []).forEach(function (t) {
+        if (isFree(t)) return;
+        var q = L.quais.filter(function (qq) { return qq.id === t.quai; })[0];
+        if (!q) return;
+        var cx = Number(q.x) + qw / 2, c = cab(t.color);
+        items.push({ x: cx - 0.65, y: qy0 - 4.6, z: 0.25, w: 1.3, d: 4.35, h: 1.7, c: { t: '#d9dfe5', l: '#b5bec7', r: '#8e98a3' }, edge: 'rgba(0,0,0,.25)', k: cx + qy0 - 2.6 });
+        items.push({ x: cx - 0.62, y: qy0 - 5.55, z: 0.25, w: 1.24, d: 0.85, h: 1.45, c: { t: shade(c, 1.12), l: c, r: shade(c, 0.72) }, k: cx + qy0 - 5.55 });
+      });
+    }
+    var pending = opts.pending !== undefined ? Number(opts.pending) : Number(state && state.kpi ? state.kpi.pendingPallets : 0) || 0;
+    var gx = conv ? conv.x + 0.7 : 6, gy = conv ? conv.y - 1.55 : BH - 5;
+    var maxG = conv ? Math.max(1, Math.floor((conv.w - 0.7) / 1.05)) : 16;
+    for (var gI = 0; gI < Math.min(pending, maxG); gI++) {
+      items.push({ x: gx + gI * 1.05, y: gy, z: 0, w: 0.82, d: 0.82, h: 0.95, ghost: '#7cc8ff', k: gx + gy + gI * 1.05 });
+    }
+    items.sort(function (a, b) { return a.k - b.k; });
+    items.forEach(box);
+
+    // Labels.
+    ctx.textBaseline = 'middle';
+    function tag(x, y, z, txt, bg, fg, size, weight) {
+      var p = P(x, y, z);
+      size = size || fs;
+      ctx.font = (weight || 600) + ' ' + size + 'px "IBM Plex Sans", system-ui, sans-serif';
+      var w = ctx.measureText(txt).width + size, hh = size + 8;
+      ctx.fillStyle = bg;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(p[0] - w / 2, p[1] - hh / 2, w, hh, 4);
+      else ctx.rect(p[0] - w / 2, p[1] - hh / 2, w, hh);
+      ctx.fill();
+      ctx.fillStyle = fg;
+      ctx.textAlign = 'center';
+      ctx.fillText(txt, p[0], p[1] + 0.5);
+    }
+    var thr = (window.App && window.App.thresholds) ? window.App.thresholds(state) : (conf().THRESHOLDS || { satWarn: 0.85, satCrit: 0.95 });
+    if (opts.labels !== false) {
+      L.blocks.forEach(function (b) {
+        var bs = blockState[b.id];
+        var v = bs && bs.saturation !== null && bs.saturation !== undefined ? Number(bs.saturation) : 0;
+        var col = v >= thr.satCrit ? '#d03b3b' : v >= thr.satWarn ? '#fab219' : 'rgba(15,23,32,.92)';
+        var fg = v >= thr.satWarn && v < thr.satCrit ? '#1b1405' : '#eef2f6';
+        tag(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, b.id + '  ' + Math.round(v * 100) + '\u00a0%', col, fg);
+      });
+      if (pending > 0) {
+        tag(conv ? conv.x + conv.w / 2 : 14, conv ? conv.y + 1 : BH - 2.4, 1.6, 'En attente PRD2 : ' + pending + ' pal', 'rgba(22,74,118,.92)', '#eef6ff');
+      }
+      if (L.truckZone) {
+        tag(L.truckZone.x + 0.6, L.truckZone.y + 0.6, 0.2, 'Zone camion', 'rgba(10,15,20,.75)', '#a8b4c0', Math.max(10, fs - 2), 500);
+      }
+    }
+    return { scale: s };
+  }
+
+  window.IsoView = { draw: draw, legend: legend };
+})();
+</script>

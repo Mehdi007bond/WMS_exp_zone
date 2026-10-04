@@ -1,0 +1,1510 @@
+<!--
+  Twin3d.html: three.js r128 renderer of the EXP2 twin (TV and PC). Included by Index.html (include('Twin3d')).
+
+  window.Twin3D = {
+    supported() -> boolean                        three.js loaded and a WebGL context can be created
+    mount(container, layout, state, opts) -> handle
+    legend(mode, state, opts) -> [{ label, color }] French legend entries of a color mode
+  }
+  handle = { update(state), resize(), setMode('family'|'age'|'saturation'), destroy(),
+             getMode(), resetView(animate), highlight(article|null), project(xm, ym, hm), info(), renderNow() }
+
+  layout: state.layout (meters, CFG.DEFAULT_LAYOUT shape; truck_zone / quai_common accepted). x runs along the
+  50 m side, y along the 32 m side; three.js uses x -> x and y -> z, origin at the building center.
+  opts: { mode, theme: 'dark'|'light', autoRotate (true|'sway': slow swing around the home angle, 'spin': full turns),
+          autoRotateSpeed (rad/s), autoRotateResumeMs, onPick({ block,
+          article, blockId, x, y }), onContextLost(event), thresholds, ageWarnDays, ageCritDays, maxPixelRatio,
+          theta, phi, antialias, labelPx (label font size in px; default: stage width / 92, 10 to 20 px),
+          dockLabels (false: no dock number badges) }
+  mount() throws when WebGL cannot be created: callers check supported() first and fall back to Iso.
+-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha512-dLxUelApnYxpLt6K2iomGngnHO83iUvZytA3YjDUCjT0HDOHKXnVYdf3hU4JjM8uEhxf9nD1/ey98U3t2vZ0qQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+function Twin3dModule_() {
+  'use strict';
+
+  var MODES = ['family', 'age', 'saturation'];
+  var LEVEL_H = 1.25;           // height of one stacking level (m)
+  var BASE_H = 0.14;            // wooden pallet base (m)
+  var LOAD_H = 1.0;             // load on the pallet (m)
+  var FOOT = 0.86;              // pallet footprint / storage cell
+  var WALL_H = 1.2;             // low back walls
+  var WALL_T = 0.3;
+  var CONV_H = 0.45;            // conveyor height
+  var MAX_GHOSTS = 20;
+  var FRAME_MS = 1000 / 30;     // 30 fps cap
+  var MAX_DPR = 1.5;
+  var Y_ZONE = 0.01, Y_ROAD = 0.02, Y_FOOT = 0.03, Y_LINE = 0.045;
+  var DEFAULT_THRESHOLDS = { satWarn: 0.85, satCrit: 0.95 };
+  var DEFAULT_AGE = { warn: 7, crit: 14 };
+  var TRUCK_RATIO = 13.6 / 2.5; // semi-trailer length / width
+  var FALLBACK_COLORS = {
+    blocks: { blanc: '#f5f6f7', creme: '#efe3bb', cyan: '#c3e4ec', rose: '#f1cadb', vert: '#cfe6c8' },
+    families: { F1: '#e7ebef', F2: '#ecdeb0', F3: '#a2dce9', F4: '#f0c0d5', F5: '#b8e2ab' },
+    familyByBlockColor: { blanc: 'F1', creme: 'F2', cyan: 'F3', rose: 'F4', vert: 'F5' },
+    cabs: { bleu: '#2a78d6', rouge: '#e34948', vert: '#1baf7a', gris: '#8a949e', jaune: '#eda100' },
+    status: { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b' }
+  };
+  var EXTRA_FAMILY = ['#d9d2f0', '#f6d8bd', '#cfe0f5', '#e2e2e2', '#f3e3a6', '#cbe9dc', '#f2cfcf', '#dfe8c4'];
+  var THEMES = {
+    dark: {
+      bg: '#0b1118', floor: '#5f6874', slab: '#353c45', wall: '#7f8996', road: '#2a2f36', dash: '#eef1f4',
+      asphalt: '#24282e', parking: '#d6dbe0', zone: '#6c7581', outline: '#f2c200', plate: '#9aa3ad',
+      conveyor: '#8792a0', roller: '#454e59', office: '#8d99a6', wood: '#a87d4f', neutral: '#9aa3ad',
+      ghost: '#7cc8ff', shell: '#dfe6ee', shellLine: '#c3ccd6', chassis: '#2b3036', wheel: '#15181c',
+      cargo: '#c9a26b', glass: '#1b2632', dim: '#3a424c', ambient: 0.66, sun: 0.72
+    },
+    light: {
+      bg: '#e9edf1', floor: '#a9b1ba', slab: '#959ea8', wall: '#8b95a1', road: '#565e68', dash: '#ffffff',
+      asphalt: '#454b54', parking: '#eef1f4', zone: '#a9b1ba', outline: '#e0b000', plate: '#7d8792',
+      conveyor: '#7d8896', roller: '#3d4650', office: '#c3cbd4', wood: '#a87d4f', neutral: '#9aa3ad',
+      ghost: '#2f8fd8', shell: '#ffffff', shellLine: '#8994a0', chassis: '#2b3036', wheel: '#15181c',
+      cargo: '#c9a26b', glass: '#1b2632', dim: '#cfd5db', ambient: 0.7, sun: 0.65
+    }
+  };
+  var CSS = [
+    '.t3d-host{overflow:hidden}',
+    '.t3d-canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:block;touch-action:none;outline:none;cursor:grab;user-select:none;-webkit-user-select:none}',
+    '.t3d-canvas.t3d-drag{cursor:grabbing}',
+    '.t3d-overlay{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:hidden;',
+    'font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-weight:600;line-height:1.15}',
+    '.t3d-label{position:absolute;left:0;top:0;white-space:nowrap;color:#fff;background:rgba(12,18,26,.8);',
+    'border-radius:4px;padding:.18em .45em;box-shadow:0 1px 3px rgba(0,0,0,.35);will-change:transform}',
+    '.t3d-label b{font-weight:700}',
+    '.t3d-label.t3d-block{text-align:center;padding:.14em .42em}',
+    '.t3d-label.t3d-block b{display:block}',
+    '.t3d-label .t3d-pct{display:block;font-weight:700;font-size:.9em}',
+    '.t3d-compact .t3d-dock .t3d-sub{display:none}',
+    '.t3d-label.t3d-dock{border-radius:999px;padding:.1em .5em;font-size:.82em;background:rgba(30,36,44,.88)}',
+    '.t3d-label.t3d-dock.t3d-busy{background:rgba(26,86,160,.92)}',
+    '.t3d-label.t3d-dock .t3d-sub{opacity:.85;margin-left:.35em;font-weight:500}',
+    '.t3d-label.t3d-zone{background:rgba(12,18,26,.8);color:#ffd84a;text-transform:none;letter-spacing:0;font-size:.9em}',
+    '.t3d-label.t3d-pending{background:rgba(22,74,118,.9);font-size:.88em}'
+  ].join('');
+
+  var supportCache = null;
+
+  // ---------------------------------------------------------------------------------------------
+  // Small helpers (no three.js needed)
+  // ---------------------------------------------------------------------------------------------
+  function cfg_() {
+    return typeof CFG !== 'undefined' && CFG ? CFG : null;
+  }
+
+  function colors_() {
+    var c = cfg_();
+    return (c && c.COLORS) || FALLBACK_COLORS;
+  }
+
+  function num_(v, d) {
+    if (v === null || v === undefined || v === '') return d;
+    var n = Number(v);
+    return isNaN(n) ? d : n;
+  }
+
+  function key_(s) {
+    s = String(s === null || s === undefined ? '' : s).trim().toLowerCase();
+    return s.normalize ? s.normalize('NFD').replace(/[̀-ͯ]/g, '') : s;
+  }
+
+  function hash_(s) {
+    s = String(s || '');
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return ((h >>> 0) % 10007) / 10007;
+  }
+
+  function rgb_(hex) {
+    if (typeof hex !== 'string') return null;
+    var m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+    if (!m) return null;
+    var h = m[1];
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    var n = parseInt(h, 16);
+    return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+  }
+
+  function hex_(rgb) {
+    function c(v) {
+      var s = Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16);
+      return s.length < 2 ? '0' + s : s;
+    }
+    return '#' + c(rgb[0]) + c(rgb[1]) + c(rgb[2]);
+  }
+
+  function mix_(a, b, t) {
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  }
+
+  function scale_(a, f) {
+    return [Math.min(1, a[0] * f), Math.min(1, a[1] * f), Math.min(1, a[2] * f)];
+  }
+
+  function statusRgb_(name) {
+    var st = colors_().status || FALLBACK_COLORS.status;
+    return rgb_(st[name]) || rgb_(FALLBACK_COLORS.status[name]);
+  }
+
+  function thresholds_(state, opts) {
+    var c = cfg_();
+    var t = (opts && opts.thresholds) || (state && state.thresholds) || (c && c.THRESHOLDS) || {};
+    var o = opts || {};
+    return {
+      satWarn: num_(t.satWarn, DEFAULT_THRESHOLDS.satWarn),
+      satCrit: num_(t.satCrit, DEFAULT_THRESHOLDS.satCrit),
+      ageWarn: num_(o.ageWarnDays, num_(t.ageWarnDays, DEFAULT_AGE.warn)),
+      ageCrit: num_(o.ageCritDays, num_(t.ageCritDays, DEFAULT_AGE.crit))
+    };
+  }
+
+  // Saturation ramp: green up to (warn - 0.25), green -> amber up to warn, amber -> orange up to crit, red above.
+  function saturationRgb_(sat, thr) {
+    if (sat === null || sat === undefined || isNaN(Number(sat))) return null;
+    sat = Number(sat);
+    var lo = Math.max(0, thr.satWarn - 0.25);
+    if (sat < lo) return statusRgb_('good');
+    if (sat < thr.satWarn) return mix_(statusRgb_('good'), statusRgb_('warning'), (sat - lo) / (thr.satWarn - lo));
+    if (sat < thr.satCrit) return mix_(statusRgb_('warning'), statusRgb_('serious'), (sat - thr.satWarn) / Math.max(1e-6, thr.satCrit - thr.satWarn));
+    return statusRgb_('critical');
+  }
+
+  function saturationLevel_(sat, thr) {
+    if (sat === null || sat === undefined || isNaN(Number(sat))) return null;
+    return sat >= thr.satCrit ? 'critical' : sat >= thr.satWarn ? 'warning' : 'good';
+  }
+
+  function ageRgb_(age, thr) {
+    if (age === null || age === undefined || isNaN(Number(age))) return null;
+    return statusRgb_(age >= thr.ageCrit ? 'critical' : age >= thr.ageWarn ? 'warning' : 'good');
+  }
+
+  function familyHex_(family, state) {
+    if (!family) return null;
+    var fam = (state && state.families) || {};
+    if (fam[family]) return fam[family];
+    var base = colors_().families || {};
+    if (base[family]) return base[family];
+    return EXTRA_FAMILY[Math.floor(hash_(family) * EXTRA_FAMILY.length) % EXTRA_FAMILY.length];
+  }
+
+  function blockHex_(name) {
+    if (!name) return null;
+    if (rgb_(name)) return name;
+    var blocks = colors_().blocks || {};
+    var k = key_(name);
+    return blocks[k] || blocks[name] || null;
+  }
+
+  function pct_(sat) {
+    if (sat === null || sat === undefined || isNaN(Number(sat))) return '–';
+    return Math.round(Number(sat) * 100) + ' %';
+  }
+
+  function isFreeDock_(d) {
+    return key_(d.status).indexOf('libre') === 0;
+  }
+
+  function cabHex_(name) {
+    if (rgb_(name)) return name;
+    var cabs = colors_().cabs || FALLBACK_COLORS.cabs;
+    return cabs[key_(name)] || cabs.gris || '#8a949e';
+  }
+
+  // Layout in the CFG.DEFAULT_LAYOUT shape, whatever the source (state.layout or the config).
+  function normLayout_(L) {
+    var c = cfg_();
+    L = L || (c && c.DEFAULT_LAYOUT) || {};
+    var b = L.building || {};
+    var building = { x: num_(b.x, 0), y: num_(b.y, 0), w: num_(b.w, 50), h: num_(b.h, 32) };
+    var ql = L.quaiLine || L.quai_common || null;
+    var blocks = (L.blocks || []).map(function (k) {
+      var w = num_(k.w, 1), h = num_(k.h, 1);
+      return {
+        id: String(k.id), label: k.label || '', x: num_(k.x, 0), y: num_(k.y, 0), w: w, h: h,
+        cols: Math.max(1, Math.round(num_(k.cols, Math.round(w / 1.0)))),
+        rows: Math.max(1, Math.round(num_(k.rows, Math.round(h / 0.8)))),
+        levels: Math.max(1, Math.round(num_(k.levels, 2))),
+        color: k.color || '', families: k.families || ''
+      };
+    });
+    var tz = L.truckZone || L.truck_zone || null;
+    return {
+      building: building,
+      blocks: blocks,
+      truckZone: tz ? { label: tz.label || 'Zone camion', x: num_(tz.x, 0), y: num_(tz.y, 0), w: num_(tz.w, 0), h: num_(tz.h, 0) } : null,
+      quais: (L.quais || []).map(function (q) {
+        return {
+          id: String(q.id), x: num_(q.x, 0), y: num_(q.y, ql ? num_(ql.y, 0) : 0),
+          w: num_(q.w, ql ? num_(ql.w, 1.6) : 1.6), h: num_(q.h, ql ? num_(ql.h, 0.5) : 0.5)
+        };
+      }),
+      roads: (L.roads || []).map(function (r) {
+        return { id: r.id, x: num_(r.x, 0), y: num_(r.y, 0), w: num_(r.w, 0), h: num_(r.h, 0) };
+      }),
+      zones: (L.zones || []).map(function (z) {
+        return { id: String(z.id || ''), type: z.type || '', label: z.label || '', x: num_(z.x, 0), y: num_(z.y, 0),
+          w: num_(z.w, 0), h: num_(z.h, 0), color: z.color || '' };
+      })
+    };
+  }
+
+  // Merged box geometry with normals and optional vertex colors (bottom faces skipped: never seen).
+  function GeoBuilder_(withColor) {
+    this.p = [];
+    this.n = [];
+    this.c = withColor ? [] : null;
+    this.boxes = 0;
+  }
+  GeoBuilder_.prototype.quad_ = function (a, b, c, d, nx, ny, nz, col) {
+    var v = [a, b, c, a, c, d];
+    for (var i = 0; i < 6; i++) {
+      this.p.push(v[i][0], v[i][1], v[i][2]);
+      this.n.push(nx, ny, nz);
+      if (this.c) this.c.push(col[0], col[1], col[2]);
+    }
+  };
+  GeoBuilder_.prototype.box = function (x0, x1, y0, y1, z0, z1, col, flat) {
+    col = col || [1, 1, 1];
+    this.quad_([x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], 0, 1, 0, col);
+    this.boxes++;
+    if (flat) return this;
+    this.quad_([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], 1, 0, 0, col);
+    this.quad_([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], -1, 0, 0, col);
+    this.quad_([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], 0, 0, 1, col);
+    this.quad_([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], 0, 0, -1, col);
+    return this;
+  };
+  GeoBuilder_.prototype.flat = function (x0, x1, z0, z1, y, col) {
+    return this.box(x0, x1, y, y, z0, z1, col, true);
+  };
+  GeoBuilder_.prototype.build = function (T) {
+    var g = new T.BufferGeometry();
+    g.setAttribute('position', new T.Float32BufferAttribute(this.p, 3));
+    g.setAttribute('normal', new T.Float32BufferAttribute(this.n, 3));
+    if (this.c) g.setAttribute('color', new T.Float32BufferAttribute(this.c, 3));
+    g.computeBoundingSphere();
+    return g;
+  };
+
+  // ---------------------------------------------------------------------------------------------
+  // Public: supported, legend
+  // ---------------------------------------------------------------------------------------------
+  function supported() {
+    var T = typeof THREE !== 'undefined' ? THREE : null;
+    if (!T || !T.WebGLRenderer || !T.InstancedMesh) return false;
+    if (supportCache !== null) return supportCache;
+    var ok = false;
+    try {
+      var c = document.createElement('canvas');
+      var gl = c.getContext('webgl2') || c.getContext('webgl') || c.getContext('experimental-webgl');
+      ok = !!gl;
+      if (gl) {
+        var ext = gl.getExtension('WEBGL_lose_context');
+        if (ext) ext.loseContext();
+      }
+    } catch (e) {
+      ok = false;
+    }
+    supportCache = ok;
+    return ok;
+  }
+
+  function legend(mode, state, opts) {
+    var thr = thresholds_(state, opts);
+    var st = colors_().status || FALLBACK_COLORS.status;
+    if (mode === 'age') {
+      return [
+        { label: 'Moins de ' + thr.ageWarn + ' j', color: st.good },
+        { label: thr.ageWarn + ' à ' + (thr.ageCrit - 1) + ' j', color: st.warning },
+        { label: thr.ageCrit + ' j et plus', color: st.critical }
+      ];
+    }
+    if (mode === 'saturation') {
+      return [
+        { label: 'Moins de ' + pct_(thr.satWarn), color: st.good },
+        { label: pct_(thr.satWarn) + ' à ' + pct_(thr.satCrit), color: st.warning },
+        { label: pct_(thr.satCrit) + ' et plus', color: st.critical }
+      ];
+    }
+    var fam = {}, k;
+    var base = colors_().families || {};
+    for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) fam[k] = base[k];
+    var sf = (state && state.families) || {};
+    for (k in sf) if (Object.prototype.hasOwnProperty.call(sf, k)) fam[k] = sf[k];
+    return Object.keys(fam).sort().map(function (f) { return { label: 'Famille ' + f, color: fam[f] }; });
+  }
+
+  function injectCss_() {
+    if (document.getElementById('t3d-style')) return;
+    var s = document.createElement('style');
+    s.id = 't3d-style';
+    s.textContent = CSS;
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // mount
+  // ---------------------------------------------------------------------------------------------
+  function mount(container, layout, state, opts) {
+    var T = typeof THREE !== 'undefined' ? THREE : null;
+    if (!T) throw new Error('three.js indisponible');
+    if (!container) throw new Error('Conteneur 3D manquant');
+    opts = opts || {};
+    state = state || {};
+    injectCss_();
+
+    var theme = THEMES[opts.theme === 'light' ? 'light' : 'dark'];
+    var mode = MODES.indexOf(opts.mode) >= 0 ? opts.mode : 'family';
+    var highlightArticle = null;
+    var destroyed = false, lost = false;
+    var listeners = [];
+
+    // --- renderer, scene, camera -----------------------------------------------------------------
+    var renderer = new T.WebGLRenderer({ antialias: opts.antialias !== false, alpha: false, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Math.min(MAX_DPR, num_(opts.maxPixelRatio, MAX_DPR))));
+    renderer.setClearColor(new T.Color(theme.bg), 1);
+    renderer.shadowMap.enabled = false;
+    var canvas = renderer.domElement;
+    canvas.className = 't3d-canvas';
+    canvas.setAttribute('aria-label', 'Vue 3D de l\'entrepôt EXP2');
+
+    var restorePosition = null;
+    try {
+      if (window.getComputedStyle(container).position === 'static') {
+        restorePosition = container.style.position;
+        container.style.position = 'relative';
+      }
+    } catch (e) { /* detached container */ }
+    container.classList.add('t3d-host');
+    container.appendChild(canvas);
+    var overlay = document.createElement('div');
+    overlay.className = 't3d-overlay';
+    container.appendChild(overlay);
+
+    var scene = new T.Scene();
+    scene.background = new T.Color(theme.bg);
+    var camera = new T.PerspectiveCamera(38, 16 / 9, 0.5, 800);
+    var fitCam = new T.PerspectiveCamera(38, 16 / 9, 0.5, 800);
+    scene.add(new T.AmbientLight(0xffffff, theme.ambient));
+    var sun = new T.DirectionalLight(0xffffff, theme.sun);
+    sun.position.set(-18, 40, 26);
+    scene.add(sun);
+    var fill = new T.DirectionalLight(0xffffff, 0.18);
+    fill.position.set(25, 18, -30);
+    scene.add(fill);
+
+    // Shared resources.
+    var matVC = new T.MeshLambertMaterial({ vertexColors: true });
+    var matBase = new T.MeshLambertMaterial({ color: new T.Color(theme.wood) });
+    var matLoad = new T.MeshLambertMaterial({ color: 0xffffff });
+    var matGhost = new T.MeshLambertMaterial({ color: new T.Color(theme.ghost), transparent: true, opacity: 0.2, depthWrite: false });
+    var matGhostLine = new T.LineBasicMaterial({ color: new T.Color(theme.ghost), transparent: true, opacity: 0.9 });
+    var matShell = new T.MeshLambertMaterial({ color: new T.Color(theme.shell), transparent: true, opacity: 0.3, depthWrite: false, side: T.DoubleSide });
+    var matShellLine = new T.LineBasicMaterial({ color: new T.Color(theme.shellLine) });
+    var palletGeo = new GeoBuilder_(false)
+      .box(-0.5, 0.5, 0.72, 1, -0.5, 0.5)
+      .box(-0.5, -0.36, 0, 0.72, -0.5, 0.5)
+      .box(-0.07, 0.07, 0, 0.72, -0.5, 0.5)
+      .box(0.36, 0.5, 0, 0.72, -0.5, 0.5)
+      .build(T);
+    var unitBox = new GeoBuilder_(false).box(-0.5, 0.5, 0, 1, -0.5, 0.5).build(T);
+
+    // Scene state.
+    var L = null, layoutSig = '';
+    var C = {};                          // world-coordinate helpers of the current layout
+    var staticGroup = null;              // floor, walls, roads, zones, conveyor, dock edge
+    var footMesh = null, footRanges = [];
+    var baseMesh = null, loadMesh = null, capacity = 0;
+    var slots = [];                      // per layout block: [{ x, y, z }] lane by lane
+    var slotInfo = [];                   // per instance: { bi, entry }
+    var truckGroup = null, ghostGroup = null;
+    var labels = [];                     // { el, pos: Vector3, x, y, shown }
+    var blockLabels = [], dockLabels = {}, dockSeq = [], pendingLabel = null, zoneLabel = null;
+    var viewW = 300, viewH = 150, fontPx = 13, isCompact = false;
+    var stateBlocks = {};
+    var thr = thresholds_(state, opts);
+    var counts = { pallets: 0, ghosts: 0, trucks: 0 };
+
+    var tmpM = new T.Matrix4();
+    var tmpC = new T.Color();
+    var tmpV = new T.Vector3();
+
+    function wx_(x) { return x - C.cx; }
+    function wz_(y) { return y - C.cz; }
+
+    // --- static scene ------------------------------------------------------------------------------
+    function disposeObject_(obj) {
+      if (!obj) return;
+      obj.traverse(function (o) {
+        if (o.geometry && o.geometry !== palletGeo && o.geometry !== unitBox) o.geometry.dispose();
+      });
+      if (obj.parent) obj.parent.remove(obj);
+    }
+
+    function buildStatic_(rawLayout) {
+      L = normLayout_(rawLayout);
+      layoutSig = JSON.stringify(L);
+      var B = L.building;
+      C = { cx: B.x + B.w / 2, cz: B.y + B.h / 2, x0: B.x, x1: B.x + B.w, z0: B.y, z1: B.y + B.h };
+      if (footMesh) footMesh.material.dispose();
+      if (staticGroup) disposeObject_(staticGroup);
+      staticGroup = new T.Group();
+      scene.add(staticGroup);
+      var floor = rgb_(theme.floor);
+      var g = new GeoBuilder_(true);
+
+      // Floor slab.
+      g.box(wx_(B.x), wx_(B.x + B.w), -0.25, 0, wz_(B.y), wz_(B.y + B.h), floor);
+      // Low back walls (north, west, east); gap in front of the truck zone.
+      var wallC = rgb_(theme.wall);
+      var nz0 = wz_(B.y), nz1 = nz0 + WALL_T;
+      var tz = L.truckZone;
+      if (tz && tz.y - B.y < 3) {
+        if (tz.x > B.x) g.box(wx_(B.x), wx_(tz.x), 0, WALL_H, nz0, nz1, wallC);
+        if (tz.x + tz.w < B.x + B.w) g.box(wx_(tz.x + tz.w), wx_(B.x + B.w), 0, WALL_H, nz0, nz1, wallC);
+      } else {
+        g.box(wx_(B.x), wx_(B.x + B.w), 0, WALL_H, nz0, nz1, wallC);
+      }
+      g.box(wx_(B.x), wx_(B.x) + WALL_T, 0, WALL_H, wz_(B.y), wz_(B.y + B.h), wallC);
+      g.box(wx_(B.x + B.w) - WALL_T, wx_(B.x + B.w), 0, WALL_H, wz_(B.y), wz_(B.y + B.h), wallC);
+
+      // Zones (flat tints), offices (low box), conveyor (raised with rollers).
+      var conv = null, ech = null;
+      L.zones.forEach(function (z) {
+        var t = key_(z.type), id = key_(z.id);
+        if (t === 'convoyeur' || id === 'conv') {
+          conv = z;
+          return;
+        }
+        if (id === 'ech') ech = z;
+        var hex = blockHex_(z.color);
+        var col = hex ? mix_(floor, rgb_(hex), 0.45) : mix_(floor, rgb_(theme.zone), 0.6);
+        if (t === 'bureau' || id === 'bur') {
+          g.box(wx_(z.x), wx_(z.x + z.w), 0, 1.0, wz_(z.y), wz_(z.y + z.h), rgb_(theme.office));
+        } else {
+          g.flat(wx_(z.x), wx_(z.x + z.w), wz_(z.y), wz_(z.y + z.h), Y_ZONE, col);
+        }
+      });
+      if (conv) {
+        var along = conv.w >= conv.h;
+        g.box(wx_(conv.x), wx_(conv.x + conv.w), 0, CONV_H, wz_(conv.y), wz_(conv.y + conv.h), rgb_(theme.conveyor));
+        var len = along ? conv.w : conv.h;
+        var roller = rgb_(theme.roller);
+        for (var r = 0.25; r < len - 0.1; r += 0.5) {
+          if (along) g.box(wx_(conv.x + r - 0.04), wx_(conv.x + r + 0.04), CONV_H, CONV_H + 0.02, wz_(conv.y + 0.05), wz_(conv.y + conv.h - 0.05), roller);
+          else g.box(wx_(conv.x + 0.05), wx_(conv.x + conv.w - 0.05), CONV_H, CONV_H + 0.02, wz_(conv.y + r - 0.04), wz_(conv.y + r + 0.04), roller);
+        }
+      }
+      C.conv = conv;
+      C.ech = ech;
+
+      // Roads: dark planes with dashed center lines along their long side.
+      var road = rgb_(theme.road), dash = rgb_(theme.dash);
+      L.roads.forEach(function (rd) {
+        g.flat(wx_(rd.x), wx_(rd.x + rd.w), wz_(rd.y), wz_(rd.y + rd.h), Y_ROAD, road);
+        var horiz = rd.w >= rd.h, length = horiz ? rd.w : rd.h, half = 0.05;
+        for (var s = 0.4; s + 1.0 <= length - 0.3; s += 1.8) {
+          if (horiz) g.flat(wx_(rd.x + s), wx_(rd.x + s + 1.0), wz_(rd.y + rd.h / 2) - half, wz_(rd.y + rd.h / 2) + half, Y_LINE, dash);
+          else g.flat(wx_(rd.x + rd.w / 2) - half, wx_(rd.x + rd.w / 2) + half, wz_(rd.y + s), wz_(rd.y + s + 1.0), Y_LINE, dash);
+        }
+      });
+
+      // Zone camion: asphalt, parking lines between docks, yellow/black dock edge, dock levellers.
+      var dockY = L.quais.length ? L.quais[0].y : (tz ? tz.y + tz.h : 0);
+      C.dockY = dockY;
+      C.truckDir = tz && tz.y + tz.h / 2 < dockY ? -1 : 1;
+      C.truckRoom = tz ? Math.max(4, C.truckDir < 0 ? dockY - tz.y : tz.y + tz.h - dockY) : 11;
+      if (tz) {
+        g.flat(wx_(tz.x), wx_(tz.x + tz.w), wz_(tz.y), wz_(tz.y + tz.h), Y_ZONE, rgb_(theme.asphalt));
+        var park = rgb_(theme.parking);
+        var qs = L.quais.slice().sort(function (a, b) { return a.x - b.x; });
+        for (var i = 0; i + 1 < qs.length; i++) {
+          var mx = (qs[i].x + qs[i].w + qs[i + 1].x) / 2;
+          var zA = dockY + C.truckDir * 0.3, zB = dockY + C.truckDir * Math.min(C.truckRoom - 0.5, 9);
+          g.flat(wx_(mx) - 0.04, wx_(mx) + 0.04, wz_(Math.min(zA, zB)), wz_(Math.max(zA, zB)), Y_ROAD, park);
+        }
+        var seg = 0.35, x = tz.x, k = 0;
+        var e0 = C.truckDir < 0 ? dockY - 0.25 : dockY, e1 = e0 + 0.25;
+        while (x < tz.x + tz.w - 1e-6) {
+          var xe = Math.min(tz.x + tz.w, x + seg);
+          g.box(wx_(x), wx_(xe), 0, 0.15, wz_(e0), wz_(e1), k % 2 ? [0.1, 0.1, 0.1] : rgb_('#f2c200'));
+          x = xe;
+          k++;
+        }
+      }
+      L.quais.forEach(function (q) {
+        g.box(wx_(q.x), wx_(q.x + q.w), 0, 0.05, wz_(q.y), wz_(q.y + q.h), rgb_(theme.plate));
+      });
+
+      // Block footprints: yellow outlines (static) + tinted floors (separate mesh, recolored per mode).
+      var outline = rgb_(theme.outline), ow = 0.09;
+      L.blocks.forEach(function (b) {
+        var x0 = wx_(b.x), x1 = wx_(b.x + b.w), z0 = wz_(b.y), z1 = wz_(b.y + b.h);
+        g.box(x0 - ow, x1 + ow, Y_FOOT, Y_LINE, z0 - ow, z0, outline);
+        g.box(x0 - ow, x1 + ow, Y_FOOT, Y_LINE, z1, z1 + ow, outline);
+        g.box(x0 - ow, x0, Y_FOOT, Y_LINE, z0, z1, outline);
+        g.box(x1, x1 + ow, Y_FOOT, Y_LINE, z0, z1, outline);
+      });
+      var mesh = new T.Mesh(g.build(T), matVC);
+      mesh.name = 'static';
+      staticGroup.add(mesh);
+
+      var fg = new GeoBuilder_(true);
+      footRanges = [];
+      L.blocks.forEach(function (b) {
+        var start = fg.p.length / 3;
+        fg.flat(wx_(b.x), wx_(b.x + b.w), wz_(b.y), wz_(b.y + b.h), Y_FOOT, floor);
+        footRanges.push({ start: start, count: fg.p.length / 3 - start });
+      });
+      footMesh = new T.Mesh(fg.build(T), new T.MeshLambertMaterial({ vertexColors: true }));
+      footMesh.name = 'footprints';
+      staticGroup.add(footMesh);
+
+      // Storage slots, lane by lane: lane = one column (x) through all rows (z), each cell stacked level by level.
+      slots = L.blocks.map(function (b) {
+        var cw = b.w / b.cols, cd = b.h / b.rows, list = [];
+        for (var c = 0; c < b.cols; c++) {
+          for (var r2 = 0; r2 < b.rows; r2++) {
+            for (var l = 0; l < b.levels; l++) {
+              list.push({ x: wx_(b.x + (c + 0.5) * cw), z: wz_(b.y + (r2 + 0.5) * cd), y: Y_FOOT + l * LEVEL_H, sx: cw * FOOT, sz: cd * FOOT });
+            }
+          }
+        }
+        return list;
+      });
+      var cap = slots.reduce(function (s, l2) { return s + l2.length; }, 0);
+      if (!baseMesh || cap !== capacity) allocPallets_(cap);
+
+      buildLabels_();
+      fit_ = null;
+    }
+
+    function allocPallets_(cap) {
+      if (baseMesh) {
+        scene.remove(baseMesh);
+        scene.remove(loadMesh);
+        baseMesh.dispose && baseMesh.dispose();
+        loadMesh.dispose && loadMesh.dispose();
+      }
+      capacity = cap;
+      var n = Math.max(1, cap);
+      baseMesh = new T.InstancedMesh(palletGeo, matBase, n);
+      loadMesh = new T.InstancedMesh(unitBox, matLoad, n);
+      // setColorAt allocates instanceColor for the current count: fill it before count drops to 0.
+      tmpC.setRGB(1, 1, 1);
+      for (var i = 0; i < n; i++) loadMesh.setColorAt(i, tmpC);
+      [baseMesh, loadMesh].forEach(function (m) {
+        m.instanceMatrix.setUsage(T.DynamicDrawUsage);
+        m.frustumCulled = false; // r128 culls instanced meshes on the base geometry bounds only
+        m.count = 0;
+        m.visible = false;
+        scene.add(m);
+      });
+      baseMesh.name = 'pallet-bases';
+      loadMesh.name = 'pallet-loads';
+    }
+
+    // --- labels -------------------------------------------------------------------------------------
+    function addLabel_(cls, x, y, z, title) {
+      var el = document.createElement('div');
+      el.className = 't3d-label ' + cls;
+      el.style.display = 'none';
+      if (title) el.title = title;
+      overlay.appendChild(el);
+      var lab = { el: el, pos: new T.Vector3(x, y, z), x: -1, y: -1, shown: false };
+      labels.push(lab);
+      return lab;
+    }
+
+    function buildLabels_() {
+      labels.forEach(function (l) { if (l.el.parentNode) l.el.parentNode.removeChild(l.el); });
+      labels = [];
+      blockLabels = L.blocks.map(function (b) {
+        var lab = addLabel_('t3d-block', wx_(b.x + b.w / 2), Y_FOOT + b.levels * LEVEL_H + 0.35, wz_(b.y + b.h / 2), b.label);
+        lab.el.innerHTML = '<b></b><span class="t3d-pct"></span>';
+        lab.idEl = lab.el.firstChild;
+        lab.pctEl = lab.el.lastChild;
+        lab.idEl.textContent = b.id;
+        return lab;
+      });
+      zoneLabel = null;
+      if (L.truckZone) {
+        var tz = L.truckZone;
+        var zy = C.truckDir < 0 ? tz.y + 0.9 : tz.y + tz.h - 0.9;
+        zoneLabel = addLabel_('t3d-zone', wx_(tz.x + tz.w / 2), 0.1, wz_(zy));
+        zoneLabel.el.textContent = 'Zone camion';
+      }
+      dockLabels = {};
+      dockSeq = [];
+      // opts.dockLabels false: no dock number badges (the TV lists the docks under the view).
+      (opts.dockLabels === false ? [] : L.quais.slice()).sort(function (a, b) { return a.x - b.x; }).forEach(function (q) {
+        // Bay number painted on the truck side of the dock edge, centered on its anchor.
+        var lab = addLabel_('t3d-dock', wx_(q.x + q.w / 2), 0.2, wz_(C.dockY + C.truckDir * 0.9));
+        lab.center = true;
+        lab.el.innerHTML = '<b></b><span class="t3d-sub"></span>';
+        lab.numEl = lab.el.firstChild;
+        lab.subEl = lab.el.lastChild;
+        var n = parseInt(q.id.replace(/\D/g, ''), 10);
+        lab.numEl.textContent = isNaN(n) ? q.id : String(n);
+        lab.quai = q;
+        dockLabels[q.id] = lab;
+        dockSeq.push(lab);
+      });
+      pendingLabel = null;
+      if (C.conv) {
+        var cv = C.conv;
+        pendingLabel = addLabel_('t3d-pending', wx_(cv.x + cv.w / 2), CONV_H + 1.7, wz_(cv.y + cv.h / 2));
+      }
+    }
+
+    function updateLabelTexts_() {
+      L.blocks.forEach(function (b, i) {
+        var lab = blockLabels[i], sb = stateBlocks[b.id];
+        var sat = sb ? sb.saturation : null;
+        lab.pctEl.textContent = pct_(sat);
+        // Same code as the side bars and the 2D plan tags: white below satWarn, amber from satWarn, red from satCrit.
+        var lvl = saturationLevel_(sat, thr);
+        lab.pctEl.style.color = lvl === 'critical' ? '#ff9a9a' : lvl === 'warning' ? '#fbd46a' : '#ffffff';
+        lab.el.style.borderLeft = '3px solid ' + (lvl === 'critical' ? '#d03b3b' : lvl === 'warning' ? '#fab219' : lvl ? '#5b9be0' : 'transparent');
+        lab.el.title = (b.label ? b.label + ' · ' : '') + (sb ? sb.pallets + ' / ' + sb.capacity + ' palettes' : '');
+      });
+      Object.keys(dockLabels).forEach(function (id) {
+        var lab = dockLabels[id], d = null;
+        (state.docks || []).forEach(function (x) { if (String(x.quai) === id) d = x; });
+        var busy = d && !isFreeDock_(d);
+        lab.el.classList.toggle('t3d-busy', !!busy);
+        var planned = d ? num_(d.planned, null) : null, loaded = d ? num_(d.loaded, 0) : 0;
+        lab.subEl.textContent = busy && planned ? loaded + '/' + planned : '';
+        lab.el.title = 'Quai ' + lab.numEl.textContent + (d && d.status ? ' · ' + d.status : '');
+      });
+      if (pendingLabel) {
+        var p = num_((state.kpi || {}).pendingPallets, 0);
+        pendingLabel.el.textContent = 'En attente PRD2 : ' + p + ' pal';
+        pendingLabel.hidden = !(p > 0);
+      }
+    }
+
+    // Docks are 1.8 m apart: drop the loaded/planned text when badges would touch, then every other badge.
+    function dockDensity_(w, h) {
+      var compact = false, sparse = false, prev = null;
+      dockSeq.forEach(function (lab) {
+        tmpV.copy(lab.pos).project(camera);
+        var p = [(tmpV.x + 1) / 2 * w, (1 - tmpV.y) / 2 * h];
+        if (prev && Math.abs(p[1] - prev[1]) < fontPx * 1.15) {
+          var dx = Math.abs(p[0] - prev[0]);
+          if (dx < fontPx * 4.1) compact = true;
+          if (dx < fontPx * 1.45) sparse = true;
+        }
+        prev = p;
+      });
+      if (compact !== isCompact) {
+        overlay.classList.toggle('t3d-compact', compact);
+        isCompact = compact;
+      }
+      dockSeq.forEach(function (lab, i) { lab.thin = sparse && i % 2 === 1; });
+    }
+
+    function updateLabelPositions_() {
+      var w = viewW, h = viewH;
+      dockDensity_(w, h);
+      for (var i = 0; i < labels.length; i++) {
+        var lab = labels[i];
+        tmpV.copy(lab.pos).project(camera);
+        var vis = !lab.hidden && !lab.thin && tmpV.z > -1 && tmpV.z < 1 && tmpV.x > -1.15 && tmpV.x < 1.15 && tmpV.y > -1.15 && tmpV.y < 1.15;
+        if (!vis) {
+          if (lab.shown) {
+            lab.el.style.display = 'none';
+            lab.shown = false;
+          }
+          continue;
+        }
+        var x = Math.round((tmpV.x + 1) / 2 * w), y = Math.round((1 - tmpV.y) / 2 * h);
+        if (!lab.shown) {
+          lab.el.style.display = '';
+          lab.shown = true;
+        }
+        if (x !== lab.x || y !== lab.y) {
+          lab.el.style.transform = 'translate(' + x + 'px,' + y + 'px) translate(-50%,' + (lab.center ? '-50%' : '-100%') + ')';
+          lab.x = x;
+          lab.y = y;
+        }
+      }
+    }
+
+    // --- dynamic content ------------------------------------------------------------------------------
+    function applyState_(s) {
+      state = s || {};
+      thr = thresholds_(state, opts);
+      stateBlocks = {};
+      (state.blocks || []).forEach(function (b) { stateBlocks[String(b.id)] = b; });
+      layoutPallets_();
+      applyColors_();
+      buildTrucks_();
+      buildGhosts_();
+      updateLabelTexts_();
+    }
+
+    function layoutPallets_() {
+      var contents = state.blockContents || {};
+      var idx = 0;
+      slotInfo = [];
+      L.blocks.forEach(function (b, bi) {
+        var sb = stateBlocks[b.id];
+        var list = contents[b.id] || [];
+        var n = sb ? num_(sb.pallets, 0) : list.reduce(function (s, e) { return s + num_(e.pallets, 0); }, 0);
+        n = Math.max(0, Math.min(Math.round(n), slots[bi].length));
+        var ei = 0, left = list.length ? num_(list[0].pallets, 0) : 0;
+        for (var k = 0; k < n; k++) {
+          while (ei < list.length && left <= 0) {
+            ei++;
+            left = ei < list.length ? num_(list[ei].pallets, 0) : 0;
+          }
+          var entry = ei < list.length ? list[ei] : null;
+          left--;
+          var sl = slots[bi][k];
+          var hf = entry ? 0.86 + 0.14 * hash_(entry.article) : 0.93;
+          tmpM.makeScale(sl.sx, BASE_H, sl.sz);
+          tmpM.setPosition(sl.x, sl.y, sl.z);
+          baseMesh.setMatrixAt(idx, tmpM);
+          tmpM.makeScale(sl.sx * 0.95, LOAD_H * hf, sl.sz * 0.95);
+          tmpM.setPosition(sl.x, sl.y + BASE_H, sl.z);
+          loadMesh.setMatrixAt(idx, tmpM);
+          slotInfo.push({ bi: bi, entry: entry });
+          idx++;
+        }
+      });
+      baseMesh.count = idx;
+      loadMesh.count = idx;
+      baseMesh.visible = loadMesh.visible = idx > 0;
+      baseMesh.instanceMatrix.needsUpdate = true;
+      loadMesh.instanceMatrix.needsUpdate = true;
+      counts.pallets = idx;
+    }
+
+    function blockFamily_(b) {
+      var sb = stateBlocks[b.id];
+      var fams = String((sb && sb.families) || b.families || '').split(/[,;\s]+/).filter(Boolean);
+      if (fams.length) return fams[0];
+      var map = colors_().familyByBlockColor || {};
+      return map[key_(b.color)] || null;
+    }
+
+    function palletRgb_(info) {
+      var b = L.blocks[info.bi], e = info.entry, rgb = null;
+      if (mode === 'age') {
+        rgb = ageRgb_(e ? e.ageMax : null, thr) || rgb_(theme.neutral);
+      } else if (mode === 'saturation') {
+        var sb = stateBlocks[b.id];
+        rgb = saturationRgb_(sb ? sb.saturation : null, thr) || rgb_(theme.neutral);
+      } else {
+        var fam = e && e.family ? e.family : blockFamily_(b);
+        rgb = rgb_(familyHex_(fam, state)) || rgb_(theme.neutral);
+        if (e) rgb = scale_(rgb, 0.9 + 0.16 * hash_(e.article + '#'));
+      }
+      if (highlightArticle !== null && !(e && String(e.article) === highlightArticle)) rgb = mix_(rgb, rgb_(theme.dim), 0.75);
+      return rgb;
+    }
+
+    function applyColors_() {
+      for (var i = 0; i < slotInfo.length; i++) {
+        var c = palletRgb_(slotInfo[i]);
+        tmpC.setRGB(c[0], c[1], c[2]);
+        loadMesh.setColorAt(i, tmpC);
+      }
+      if (loadMesh.instanceColor) loadMesh.instanceColor.needsUpdate = true;
+      // Footprint tints.
+      var floor = rgb_(theme.floor), attr = footMesh.geometry.getAttribute('color');
+      L.blocks.forEach(function (b, bi) {
+        var col = floor, sb = stateBlocks[b.id];
+        if (mode === 'saturation') {
+          var s = saturationRgb_(sb ? sb.saturation : null, thr);
+          if (s) col = mix_(floor, s, 0.5);
+        } else if (mode === 'family') {
+          var hex = blockHex_(b.color);
+          if (hex) col = mix_(floor, rgb_(hex), 0.4);
+        } else {
+          col = mix_(floor, [1, 1, 1], 0.12);
+        }
+        var rg = footRanges[bi];
+        for (var v = rg.start; v < rg.start + rg.count; v++) attr.setXYZ(v, col[0], col[1], col[2]);
+      });
+      attr.needsUpdate = true;
+    }
+
+    function buildTrucks_() {
+      if (truckGroup) disposeObject_(truckGroup);
+      truckGroup = new T.Group();
+      truckGroup.name = 'trucks';
+      scene.add(truckGroup);
+      var byId = {};
+      L.quais.forEach(function (q) { byId[q.id] = q; });
+      var xs = L.quais.map(function (q) { return q.x + q.w / 2; }).sort(function (a, b) { return a - b; });
+      var pitch = 3.6;
+      for (var i = 0; i + 1 < xs.length; i++) pitch = Math.min(pitch, xs[i + 1] - xs[i]);
+      var opaque = new GeoBuilder_(true), shell = new GeoBuilder_(false), edges = [];
+      var dir = C.truckDir, n = 0;
+      (state.docks || []).forEach(function (d) {
+        var q = byId[String(d.quai)];
+        if (!q || isFreeDock_(d) || !(d.truck || num_(d.planned, 0) > 0 || num_(d.loaded, 0) > 0)) return;
+        n++;
+        var tw = Math.min(q.w, pitch * 0.9, 2.5), cab = Math.max(1.2, tw), gap = 0.2;
+        var tl = Math.max(3, Math.min(tw * TRUCK_RATIO, C.truckRoom - 0.6 - cab - gap));
+        var cx = wx_(q.x + q.w / 2), x0 = cx - tw / 2, x1 = cx + tw / 2;
+        var rear = wz_(C.dockY) + dir * 0.3, front = rear + dir * tl;
+        var cabFront = front + dir * (gap + cab);
+        function zr(a, b) { return [Math.min(a, b), Math.max(a, b)]; }
+        var floorY = 0.62, bodyH = Math.max(1.2, tw * 1.08), topY = floorY + bodyH;
+        var zt = zr(rear, front), zc = zr(front + dir * gap, cabFront);
+        var dark = rgb_(theme.chassis), wheel = rgb_(theme.wheel);
+        // Chassis and wheels.
+        opaque.box(x0 + tw * 0.12, x1 - tw * 0.12, 0.28, floorY, zr(rear, cabFront)[0], zr(rear, cabFront)[1], dark);
+        var wz0 = zr(rear + dir * 0.6, rear + dir * 2.4);
+        opaque.box(x0 - 0.02, x1 + 0.02, 0, 0.5, wz0[0], wz0[1], wheel);
+        var wz1 = zr(cabFront - dir * 0.4, cabFront - dir * 1.0);
+        opaque.box(x0 - 0.02, x1 + 0.02, 0, 0.5, wz1[0], wz1[1], wheel);
+        // Trailer bed and front wall (shell sides are translucent, top open so the load is visible).
+        opaque.box(x0, x1, floorY - 0.06, floorY, zt[0], zt[1], rgb_('#9aa3ad'));
+        var fw = zr(front, front - dir * 0.06);
+        opaque.box(x0, x1, floorY, topY, fw[0], fw[1], rgb_('#e3e8ee'));
+        // Load: loaded pallets two across, from the nose, cells sized on the planned count.
+        var planned = Math.max(1, num_(d.planned, 0) || num_(d.capacity, 0) || 33);
+        var loaded = Math.max(0, Math.min(num_(d.loaded, 0), planned));
+        var rowsN = Math.ceil(planned / 2), inner = tl - 0.12, cellL = inner / rowsN, pw = (tw - 0.16) / 2;
+        for (var p = 0; p < loaded; p++) {
+          var row = Math.floor(p / 2), side = p % 2;
+          var za = front - dir * (0.06 + row * cellL + 0.04), zb = front - dir * (0.06 + (row + 1) * cellL - 0.04);
+          var zp = zr(za, zb), px0 = x0 + 0.08 + side * pw + 0.03, px1 = px0 + pw - 0.06;
+          opaque.box(px0, px1, floorY, floorY + 0.1, zp[0], zp[1], rgb_(theme.wood));
+          opaque.box(px0 + 0.02, px1 - 0.02, floorY + 0.1, floorY + Math.min(bodyH - 0.15, 1.05), zp[0], zp[1], rgb_(theme.cargo));
+        }
+        // Cab with windshield.
+        var cabCol = rgb_(cabHex_(d.color));
+        opaque.box(x0, x1, 0.28, 0.28 + bodyH * 1.05, zc[0], zc[1], cabCol);
+        var ws = zr(cabFront, cabFront + dir * 0.03);
+        opaque.box(x0 + tw * 0.06, x1 - tw * 0.06, 0.28 + bodyH * 0.55, 0.28 + bodyH * 0.95, ws[0], ws[1], rgb_(theme.glass));
+        // Translucent sides and their rim.
+        shell.box(x0, x0 + 0.04, floorY, topY, zt[0], zt[1]);
+        shell.box(x1 - 0.04, x1, floorY, topY, zt[0], zt[1]);
+        var rz0 = zt[0], rz1 = zt[1];
+        [[x0, topY, rz0, x1, topY, rz0], [x0, topY, rz1, x1, topY, rz1], [x0, topY, rz0, x0, topY, rz1], [x1, topY, rz0, x1, topY, rz1],
+          [x0, floorY, rear, x0, topY, rear], [x1, floorY, rear, x1, topY, rear]].forEach(function (e) {
+          edges.push(e[0], e[1], e[2], e[3], e[4], e[5]);
+        });
+      });
+      counts.trucks = n;
+      if (!n) return;
+      truckGroup.add(new T.Mesh(opaque.build(T), matVC));
+      var sh = new T.Mesh(shell.build(T), matShell);
+      sh.renderOrder = 2;
+      truckGroup.add(sh);
+      var eg = new T.BufferGeometry();
+      eg.setAttribute('position', new T.Float32BufferAttribute(edges, 3));
+      truckGroup.add(new T.LineSegments(eg, matShellLine));
+    }
+
+    // Ghost pallets for the pending (declared, not yet in EXP2) pallets: on the conveyor, then beside it.
+    function ghostSlots_(n) {
+      var out = [], cv = C.conv;
+      if (!cv) {
+        var B = L.building;
+        for (var i = 0; i < n; i++) out.push({ x: wx_(B.x + 2 + (i % 20) * 1.1), y: 0.02, z: wz_(B.y + B.h - 1.2 - Math.floor(i / 20) * 1.4), along: true });
+        return out;
+      }
+      var along = cv.w >= cv.h, len = along ? cv.w : cv.h, pitch = 1.05, per = Math.max(1, Math.floor((len - 0.2) / pitch));
+      var off = 0;
+      if (C.ech) off = along ? (C.ech.y + C.ech.h / 2) - (cv.y + cv.h / 2) : (C.ech.x + C.ech.w / 2) - (cv.x + cv.w / 2);
+      if (!off) off = 1.4;
+      for (var k = 0; k < n; k++) {
+        var row = Math.floor(k / per), j = k % per, t = (len - per * pitch) / 2 + (j + 0.5) * pitch;
+        var dx = along ? t : cv.w / 2 + row * off, dz = along ? cv.h / 2 + row * off : t;
+        out.push({ x: wx_(cv.x + dx), y: row ? 0.02 : CONV_H + 0.02, z: wz_(cv.y + dz), along: along });
+      }
+      return out;
+    }
+
+    function buildGhosts_() {
+      if (ghostGroup) disposeObject_(ghostGroup);
+      ghostGroup = new T.Group();
+      ghostGroup.name = 'ghosts';
+      scene.add(ghostGroup);
+      var n = Math.max(0, Math.min(MAX_GHOSTS, Math.round(num_((state.kpi || {}).pendingPallets, 0))));
+      counts.ghosts = n;
+      if (!n) return;
+      var g = new GeoBuilder_(false), lines = [];
+      ghostSlots_(n).forEach(function (s) {
+        var hx = s.along ? 0.4 : 0.6, hz = s.along ? 0.6 : 0.4, y0 = s.y, y1 = s.y + BASE_H + LOAD_H;
+        var x0 = s.x - hx, x1 = s.x + hx, z0 = s.z - hz, z1 = s.z + hz;
+        g.box(x0, x1, y0, y1, z0, z1);
+        var c = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+        for (var i = 0; i < 4; i++) {
+          var a = c[i], b = c[(i + 1) % 4];
+          lines.push(a[0], y0, a[1], b[0], y0, b[1], a[0], y1, a[1], b[0], y1, b[1], a[0], y0, a[1], a[0], y1, a[1]);
+        }
+      });
+      var m = new T.Mesh(g.build(T), matGhost);
+      m.renderOrder = 3;
+      ghostGroup.add(m);
+      var lg = new T.BufferGeometry();
+      lg.setAttribute('position', new T.Float32BufferAttribute(lines, 3));
+      var ls = new T.LineSegments(lg, matGhostLine);
+      ls.renderOrder = 4;
+      ghostGroup.add(ls);
+    }
+
+    // --- camera and orbit controls ---------------------------------------------------------------------
+    var HOME_PHI = num_(opts.phi, 0.92);
+    var view = { theta: 0.32, phi: HOME_PHI, radius: 70, target: new T.Vector3(0, 0.5, 0) };
+    var home = null;
+    var fit_ = null;
+    var userMoved = false;
+    var lastInteraction = -1e12;
+    var resumeTimer = 0;
+    var inertia = { vt: 0, vp: 0 };
+    var tween = null;
+    var autoRotate = !!opts.autoRotate;
+    var spin = opts.autoRotate === 'spin';
+    var SWAY_A = 0.55;                                  // swing amplitude (rad) of the default TV motion
+    var sway = { base: null, t: 0 };
+    var autoSpeed = num_(opts.autoRotateSpeed, spin ? 0.05 : 0.04);
+    var resumeMs = num_(opts.autoRotateResumeMs, 10000);
+    var PHI_MIN = 0.12, PHI_MAX = 1.36;
+
+    function placeCamera_(cam, v) {
+      var sp = Math.sin(v.phi);
+      cam.position.set(v.target.x + v.radius * sp * Math.sin(v.theta), v.target.y + v.radius * Math.cos(v.phi), v.target.z + v.radius * sp * Math.cos(v.theta));
+      cam.lookAt(v.target);
+      cam.updateMatrixWorld();
+    }
+
+    function homeTheta_() {
+      if (opts.theta !== undefined && opts.theta !== null && !isNaN(Number(opts.theta))) return Number(opts.theta);
+      return camera.aspect < 0.85 ? 1.25 : 0.32; // portrait: look along the 50 m side
+    }
+
+    // Home view: the whole building (all of it at every angle while auto-rotating) within 95 % of the view,
+    // centered on screen (auto-rotation keeps the building center as pivot).
+    function computeFit_() {
+      var B = L.building, hTop = 3, M = 0.95;
+      var pts = [];
+      [wx_(B.x), wx_(B.x + B.w)].forEach(function (x) {
+        [wz_(B.y), wz_(B.y + B.h)].forEach(function (z) {
+          pts.push(new T.Vector3(x, 0, z), new T.Vector3(x, hTop, z));
+        });
+      });
+      fitCam.aspect = camera.aspect;
+      fitCam.updateProjectionMatrix();
+      var phi = HOME_PHI, theta = homeTheta_();
+      function radiusFor(th, tx, tz) {
+        var lo = 5, hi = 600, tgt = new T.Vector3(tx, 0.5, tz);
+        for (var it = 0; it < 26; it++) {
+          var mid = (lo + hi) / 2, ok = true;
+          placeCamera_(fitCam, { theta: th, phi: phi, radius: mid, target: tgt });
+          for (var i = 0; i < pts.length && ok; i++) {
+            tmpV.copy(pts[i]).project(fitCam);
+            if (Math.abs(tmpV.x) > M || Math.abs(tmpV.y) > M || tmpV.z > 1) ok = false;
+          }
+          if (ok) hi = mid; else lo = mid;
+        }
+        return hi;
+      }
+      if (spin) {
+        var best = 10;
+        [0, 0.785, 1.571, 2.356, 3.142, 3.927, 4.712, 5.498].forEach(function (th) { best = Math.max(best, radiusFor(th, 0, 0)); });
+        return { radius: best, theta: theta, x: 0, z: 0 };
+      }
+      var tx = 0, tz = 0, r = radiusFor(theta, 0, 0);
+      var half = Math.tan(fitCam.fov * Math.PI / 360);
+      for (var k = 0; k < 4; k++) {
+        placeCamera_(fitCam, { theta: theta, phi: phi, radius: r, target: new T.Vector3(tx, 0.5, tz) });
+        var x0 = 9, x1 = -9, y0 = 9, y1 = -9;
+        pts.forEach(function (p) {
+          tmpV.copy(p).project(fitCam);
+          x0 = Math.min(x0, tmpV.x);
+          x1 = Math.max(x1, tmpV.x);
+          y0 = Math.min(y0, tmpV.y);
+          y1 = Math.max(y1, tmpV.y);
+        });
+        var xc = (x0 + x1) / 2, yc = (y0 + y1) / 2, hh = r * half, hw = hh * fitCam.aspect, gy = hh / Math.max(0.35, Math.cos(phi));
+        tx += Math.cos(theta) * xc * hw - Math.sin(theta) * yc * gy;
+        tz += -Math.sin(theta) * xc * hw - Math.cos(theta) * yc * gy;
+        r = radiusFor(theta, tx, tz);
+      }
+      if (autoRotate) r = Math.max(r, radiusFor(theta - SWAY_A, tx, tz), radiusFor(theta + SWAY_A, tx, tz));
+      return { radius: r, theta: theta, x: tx, z: tz };
+    }
+
+    function homeView_() {
+      if (fit_ === null) fit_ = computeFit_();
+      return { theta: fit_.theta, phi: HOME_PHI, radius: fit_.radius, target: new T.Vector3(fit_.x, 0.5, fit_.z) };
+    }
+
+    function clampView_() {
+      view.phi = Math.max(PHI_MIN, Math.min(PHI_MAX, view.phi));
+      var maxR = (fit_ ? fit_.radius : 80) * 2.6;
+      view.radius = Math.max(5, Math.min(maxR, view.radius));
+      var B = L.building, mx = B.w / 2 + 4, mz = B.h / 2 + 4;
+      view.target.x = Math.max(-mx, Math.min(mx, view.target.x));
+      view.target.z = Math.max(-mz, Math.min(mz, view.target.z));
+    }
+
+    function resetView(animate) {
+      fit_ = null;
+      home = homeView_();
+      userMoved = false;
+      sway.base = null;
+      inertia.vt = inertia.vp = 0;
+      if (animate) {
+        tween = { t0: performance.now(), dur: 450, from: { theta: view.theta, phi: view.phi, radius: view.radius, target: view.target.clone() }, to: home };
+        var d = tween.to.theta - tween.from.theta;
+        d = ((d + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+        tween.from.theta = tween.to.theta - d;
+      } else {
+        tween = null;
+        view.theta = home.theta;
+        view.phi = home.phi;
+        view.radius = home.radius;
+        view.target.copy(home.target);
+      }
+      requestRender();
+    }
+
+    function autoRotating_(now) {
+      return autoRotate && !drag && !tween && now - lastInteraction >= resumeMs;
+    }
+
+    // Advances auto-rotation, inertia and the reset tween; returns true while something still moves.
+    function step_(dt, now) {
+      var moving = false;
+      if (tween) {
+        var t = Math.min(1, (now - tween.t0) / tween.dur), e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        view.theta = tween.from.theta + (tween.to.theta - tween.from.theta) * e;
+        view.phi = tween.from.phi + (tween.to.phi - tween.from.phi) * e;
+        view.radius = tween.from.radius + (tween.to.radius - tween.from.radius) * e;
+        view.target.copy(tween.from.target).lerp(tween.to.target, e);
+        if (t >= 1) tween = null;
+        moving = true;
+      }
+      if (!drag && (Math.abs(inertia.vt) > 1e-3 || Math.abs(inertia.vp) > 1e-3)) {
+        view.theta += inertia.vt * dt;
+        view.phi += inertia.vp * dt;
+        var k = Math.pow(0.04, dt);
+        inertia.vt *= k;
+        inertia.vp *= k;
+        clampView_();
+        moving = true;
+      } else if (!drag) {
+        inertia.vt = inertia.vp = 0;
+      }
+      if (autoRotating_(now)) {
+        if (spin) {
+          view.theta += autoSpeed * dt;
+        } else {
+          if (sway.base === null) {
+            sway.base = view.theta;
+            sway.t = 0;
+          }
+          sway.t += dt;
+          view.theta = sway.base + SWAY_A * Math.sin(sway.t * autoSpeed / SWAY_A);
+        }
+        moving = true;
+      }
+      return moving;
+    }
+
+    // --- render loop: on demand, capped at 30 fps --------------------------------------------------------
+    var raf = window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : function (f) { return setTimeout(function () { f(performance.now()); }, 16); };
+    var caf = window.cancelAnimationFrame ? window.cancelAnimationFrame.bind(window) : clearTimeout;
+    var rafId = 0, dirty = false, lastRenderAt = -1e9, lastTick = 0, frames = 0;
+
+    function schedule_() {
+      if (!rafId && !destroyed && !lost) rafId = raf(frame_);
+    }
+
+    function requestRender() {
+      dirty = true;
+      schedule_();
+    }
+
+    function frame_(now) {
+      rafId = 0;
+      if (destroyed || lost) return;
+      if (now - lastRenderAt < FRAME_MS - 1) {
+        schedule_();
+        return;
+      }
+      var dt = lastTick ? Math.min(0.1, (now - lastTick) / 1000) : 0;
+      lastTick = now;
+      var moving = step_(dt, now);
+      if (moving) dirty = true;
+      if (dirty) {
+        dirty = false;
+        lastRenderAt = now;
+        renderFrame_();
+      }
+      if (moving) schedule_();
+      else lastTick = 0;
+    }
+
+    function renderFrame_() {
+      if (lost || destroyed) return;
+      placeCamera_(camera, view);
+      renderer.render(scene, camera);
+      updateLabelPositions_();
+      frames++;
+    }
+
+    // --- pointer input ---------------------------------------------------------------------------------------
+    var pointers = {};
+    var drag = null; // { mode: 'rotate'|'pan'|'pinch', ... }
+    var down = null; // first pointer, for click detection
+
+    function on_(target, type, fn, o) {
+      target.addEventListener(type, fn, o || false);
+      listeners.push([target, type, fn, o || false]);
+    }
+
+    // Auto-rotation pauses while the user interacts and resumes resumeMs after the last interaction.
+    function armResume_() {
+      if (!autoRotate) return;
+      if (resumeTimer) clearTimeout(resumeTimer);
+      resumeTimer = setTimeout(function () {
+        resumeTimer = 0;
+        schedule_();
+      }, resumeMs + 60);
+    }
+
+    // Any touch pauses auto-rotation; the swing then resumes around wherever the user left the view.
+    function paused_() {
+      sway.base = null;
+      lastInteraction = performance.now();
+      tween = null;
+      armResume_();
+    }
+
+    // The camera left the home view: resizes keep it instead of refitting.
+    function moved_() {
+      userMoved = true;
+      lastInteraction = performance.now();
+    }
+
+    function pointerList_() {
+      return Object.keys(pointers).map(function (k) { return pointers[k]; });
+    }
+
+    function startDrag_(e) {
+      var list = pointerList_();
+      if (list.length >= 2) {
+        var a = list[0], b = list[1];
+        drag = { mode: 'pinch', dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), radius: view.radius, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+      } else if (list.length === 1) {
+        var p = list[0];
+        var pan = (e && (e.button === 2 || e.shiftKey || e.ctrlKey || e.metaKey)) || p.button === 2;
+        drag = { mode: pan ? 'pan' : 'rotate', x: p.x, y: p.y, t: performance.now() };
+      } else {
+        drag = null;
+      }
+      canvas.classList.toggle('t3d-drag', !!drag);
+    }
+
+    function pan_(dx, dy) {
+      var h = canvas.clientHeight || 1;
+      var s = 2 * view.radius * Math.tan(camera.fov * Math.PI / 360) / h;
+      var ct = Math.cos(view.theta), st = Math.sin(view.theta);
+      var fy = 1 / Math.max(0.35, Math.cos(view.phi));
+      view.target.x += (-dx * ct - dy * st * fy) * s;
+      view.target.z += (dx * st - dy * ct * fy) * s;
+      clampView_();
+    }
+
+    function onPointerDown_(e) {
+      if (destroyed) return;
+      if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 2) return;
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      pointers[e.pointerId] = { x: e.clientX, y: e.clientY, button: e.button };
+      var n = pointerList_().length;
+      down = n === 1 ? { x: e.clientX, y: e.clientY, t: performance.now(), button: e.button, id: e.pointerId } : null;
+      inertia.vt = inertia.vp = 0;
+      startDrag_(e);
+      paused_();
+    }
+
+    function onPointerMove_(e) {
+      var p = pointers[e.pointerId];
+      if (!p || !drag) return;
+      var px = p.x, py = p.y;
+      p.x = e.clientX;
+      p.y = e.clientY;
+      var w = canvas.clientWidth || 1, h = canvas.clientHeight || 1;
+      if (drag.mode === 'rotate') {
+        var dTheta = -(p.x - px) / w * Math.PI * 1.6, dPhi = -(p.y - py) / h * Math.PI * 0.9;
+        view.theta += dTheta;
+        view.phi += dPhi;
+        clampView_();
+        var now = performance.now(), dt = Math.max(8, now - drag.t) / 1000;
+        inertia.vt = 0.6 * inertia.vt + 0.4 * dTheta / dt;
+        inertia.vp = 0.6 * inertia.vp + 0.4 * dPhi / dt;
+        drag.t = now;
+      } else if (drag.mode === 'pan') {
+        pan_(p.x - px, p.y - py);
+      } else if (drag.mode === 'pinch') {
+        var list = pointerList_();
+        if (list.length >= 2) {
+          var a = list[0], b = list[1];
+          var dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          view.radius = drag.radius * drag.dist / dist;
+          pan_(mx - drag.mx, my - drag.my);
+          drag.mx = mx;
+          drag.my = my;
+          clampView_();
+        }
+      }
+      moved_();
+      requestRender();
+    }
+
+    function onPointerUp_(e) {
+      var wasDown = down;
+      if (!pointers[e.pointerId]) return;
+      delete pointers[e.pointerId];
+      try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      var rotating = drag && drag.mode === 'rotate';
+      var idle = drag && drag.t && performance.now() - drag.t > 80;
+      startDrag_(null); // two fingers -> one: the remaining finger continues from its current position
+      if (!rotating || idle || e.type === 'pointercancel') inertia.vt = inertia.vp = 0;
+      lastInteraction = performance.now();
+      if (rotating && (inertia.vt || inertia.vp)) schedule_();
+      if (e.type === 'pointerup' && wasDown && wasDown.id === e.pointerId && wasDown.button === 0) {
+        var moved = Math.hypot(e.clientX - wasDown.x, e.clientY - wasDown.y);
+        if (moved < 6 && performance.now() - wasDown.t < 700) {
+          inertia.vt = inertia.vp = 0;
+          pick_(e.clientX, e.clientY);
+        }
+      }
+      down = null;
+      armResume_();
+      requestRender();
+    }
+
+    function onWheel_(e) {
+      e.preventDefault();
+      var dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+      view.radius *= Math.exp(Math.max(-300, Math.min(300, dy)) * 0.0012);
+      clampView_();
+      paused_();
+      moved_();
+      requestRender();
+    }
+
+    function onDblClick_(e) {
+      e.preventDefault();
+      resetView(true);
+    }
+
+    // --- picking -------------------------------------------------------------------------------------------
+    var raycaster = new T.Raycaster();
+    var ndc = new T.Vector2();
+
+    function pickAt_(clientX, clientY) {
+      var r = canvas.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      ndc.set((clientX - r.left) / r.width * 2 - 1, -(clientY - r.top) / r.height * 2 + 1);
+      placeCamera_(camera, view);
+      raycaster.setFromCamera(ndc, camera);
+      var targets = [];
+      if (loadMesh.visible) targets.push(loadMesh, baseMesh);
+      targets.push(footMesh);
+      var hits = raycaster.intersectObjects(targets, false);
+      for (var i = 0; i < hits.length; i++) {
+        var h = hits[i];
+        if ((h.object === loadMesh || h.object === baseMesh) && h.instanceId !== undefined && slotInfo[h.instanceId]) {
+          var info = slotInfo[h.instanceId];
+          return { bi: info.bi, entry: info.entry };
+        }
+        if (h.object === footMesh && h.faceIndex !== undefined && h.faceIndex !== null) {
+          return { bi: Math.floor(h.faceIndex / 2), entry: null };
+        }
+      }
+      return null;
+    }
+
+    function pick_(clientX, clientY) {
+      if (typeof opts.onPick !== 'function') return;
+      var hit = pickAt_(clientX, clientY);
+      if (!hit || !L.blocks[hit.bi]) return;
+      var b = L.blocks[hit.bi], sb = stateBlocks[b.id] || {};
+      var r = canvas.getBoundingClientRect();
+      opts.onPick({
+        blockId: b.id,
+        block: { id: b.id, label: sb.label || b.label, families: sb.families || b.families, capacity: num_(sb.capacity, b.cols * b.rows * b.levels),
+          pallets: num_(sb.pallets, 0), saturation: sb.saturation === undefined ? null : sb.saturation },
+        article: hit.entry ? { article: hit.entry.article, designation: hit.entry.designation, family: hit.entry.family,
+          pallets: hit.entry.pallets, ageMax: hit.entry.ageMax } : null,
+        x: clientX - r.left,
+        y: clientY - r.top
+      });
+    }
+
+    // --- context loss, resize ------------------------------------------------------------------------------
+    function onContextLost_(e) {
+      if (e && e.preventDefault) e.preventDefault();
+      lost = true;
+      if (rafId) caf(rafId);
+      rafId = 0;
+      if (typeof opts.onContextLost === 'function') opts.onContextLost(e);
+    }
+
+    function onContextRestored_() {
+      lost = false;
+      requestRender();
+    }
+
+    function resize() {
+      if (destroyed) return;
+      var w = container.clientWidth || 300, h = container.clientHeight || 150;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      viewW = w;
+      viewH = h;
+      fontPx = num_(opts.labelPx, 0) > 0 ? num_(opts.labelPx, 0) : Math.max(10, Math.min(20, w / 92));
+      overlay.style.fontSize = fontPx.toFixed(1) + 'px';
+      fit_ = null;
+      if (!userMoved) {
+        home = homeView_();
+        view.radius = home.radius;
+        view.target.copy(home.target);
+        if (!autoRotate || (!spin && sway.base === null)) view.theta = home.theta;
+        else if (!spin) sway.base = home.theta;
+      } else {
+        fit_ = computeFit_();
+      }
+      requestRender();
+    }
+
+    var ro = null;
+    var lastSize = '';
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(function () {
+        var s = container.clientWidth + 'x' + container.clientHeight;
+        if (s !== lastSize) {
+          lastSize = s;
+          resize();
+        }
+      });
+      ro.observe(container);
+    } else {
+      on_(window, 'resize', resize);
+    }
+
+    on_(canvas, 'pointerdown', onPointerDown_);
+    on_(canvas, 'pointermove', onPointerMove_);
+    on_(canvas, 'pointerup', onPointerUp_);
+    on_(canvas, 'pointercancel', onPointerUp_);
+    on_(canvas, 'wheel', onWheel_, { passive: false });
+    on_(canvas, 'dblclick', onDblClick_);
+    on_(canvas, 'contextmenu', function (e) { e.preventDefault(); });
+    on_(canvas, 'webglcontextlost', onContextLost_);
+    on_(canvas, 'webglcontextrestored', onContextRestored_);
+
+    // --- handle ------------------------------------------------------------------------------------------------
+    var handle = {
+      update: function (s) {
+        if (destroyed) return;
+        s = s || {};
+        if (s.layout && JSON.stringify(normLayout_(s.layout)) !== layoutSig) {
+          buildStatic_(s.layout);
+          if (!userMoved) resetView(false);
+        }
+        applyState_(s);
+        requestRender();
+      },
+      resize: resize,
+      setMode: function (m) {
+        if (destroyed || MODES.indexOf(m) < 0) return;
+        mode = m;
+        applyColors_();
+        requestRender();
+      },
+      getMode: function () { return mode; },
+      highlight: function (article) {
+        if (destroyed) return;
+        highlightArticle = article === null || article === undefined || article === '' ? null : String(article);
+        applyColors_();
+        requestRender();
+      },
+      resetView: function (animate) {
+        if (!destroyed) resetView(animate !== false);
+      },
+      project: function (xm, ym, hm) {
+        placeCamera_(camera, view);
+        tmpV.set(wx_(num_(xm, 0)), num_(hm, 0), wz_(num_(ym, 0))).project(camera);
+        var w = canvas.clientWidth, h = canvas.clientHeight;
+        return { x: (tmpV.x + 1) / 2 * w, y: (1 - tmpV.y) / 2 * h, visible: tmpV.z > -1 && tmpV.z < 1 && Math.abs(tmpV.x) <= 1 && Math.abs(tmpV.y) <= 1 };
+      },
+      info: function () {
+        return { mode: mode, pallets: counts.pallets, capacity: capacity, ghosts: counts.ghosts, trucks: counts.trucks,
+          frames: frames, drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles,
+          geometries: renderer.info.memory.geometries, programs: renderer.info.programs ? renderer.info.programs.length : null,
+          lost: lost, view: { theta: view.theta, phi: view.phi, radius: view.radius, x: view.target.x, z: view.target.z } };
+      },
+      renderNow: function () {
+        if (destroyed || lost) return;
+        lastRenderAt = performance.now();
+        dirty = false;
+        renderFrame_();
+      },
+      destroy: function () {
+        if (destroyed) return;
+        destroyed = true;
+        if (rafId) caf(rafId);
+        rafId = 0;
+        if (resumeTimer) clearTimeout(resumeTimer);
+        if (ro) ro.disconnect();
+        listeners.forEach(function (l) { l[0].removeEventListener(l[1], l[2], l[3]); });
+        listeners = [];
+        disposeObject_(staticGroup);
+        disposeObject_(truckGroup);
+        disposeObject_(ghostGroup);
+        if (footMesh && footMesh.material) footMesh.material.dispose();
+        [baseMesh, loadMesh].forEach(function (m) {
+          if (!m) return;
+          scene.remove(m);
+          if (m.dispose) m.dispose();
+        });
+        palletGeo.dispose();
+        unitBox.dispose();
+        [matVC, matBase, matLoad, matGhost, matGhostLine, matShell, matShellLine].forEach(function (m) { m.dispose(); });
+        renderer.dispose();
+        try { renderer.forceContextLoss(); } catch (err) { /* already lost */ }
+        if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        container.classList.remove('t3d-host');
+        if (restorePosition !== null) container.style.position = restorePosition;
+        labels = [];
+        slotInfo = [];
+        state = null;
+      }
+    };
+
+    // --- build (a failure releases the WebGL context before the caller falls back) -----------------------------
+    try {
+      buildStatic_(layout || state.layout);
+      applyState_(state);
+      lastSize = container.clientWidth + 'x' + container.clientHeight;
+      resize();
+      resetView(false);
+    } catch (err) {
+      try { handle.destroy(); } catch (e2) { /* keep the first error */ }
+      throw err;
+    }
+    return handle;
+  }
+
+  return { supported: supported, mount: mount, legend: legend, version: '1.0.0' };
+}
+
+window.Twin3D = Twin3dModule_();
+</script>

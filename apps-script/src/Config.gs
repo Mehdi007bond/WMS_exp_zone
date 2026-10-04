@@ -22,7 +22,8 @@ function ConfigModule_() {
     CALC_BLOCKS: 'CALC_BLOCS',
     CALC_KPI: 'CALC_KPI',
     IMPORT_LOG: 'IMPORT_LOG',
-    STATE: '_STATE'
+    STATE: '_STATE',
+    LOOKUP: '_LOOKUP'
   };
 
   // Headers of the tabs the app writes. CALC_* headers are identical to sample-data/csv.
@@ -119,7 +120,7 @@ function ConfigModule_() {
     "blocks": [
       {
         "id": "B1",
-        "label": "Allée 26 (?)",
+        "label": "Allée 26",
         "x": 19,
         "y": 2.9,
         "w": 10.4,
@@ -131,7 +132,7 @@ function ConfigModule_() {
       },
       {
         "id": "B2",
-        "label": "Allée 72 (?)",
+        "label": "Allée 72",
         "x": 32.9,
         "y": 3,
         "w": 4.1,
@@ -143,7 +144,7 @@ function ConfigModule_() {
       },
       {
         "id": "B3",
-        "label": "Allée 24 (?)",
+        "label": "Allée 24",
         "x": 37.1,
         "y": 3,
         "w": 4,
@@ -155,7 +156,7 @@ function ConfigModule_() {
       },
       {
         "id": "B4",
-        "label": "Allée 36 / 72 (?)",
+        "label": "Allée 36 / 72",
         "x": 41.2,
         "y": 3,
         "w": 5,
@@ -167,7 +168,7 @@ function ConfigModule_() {
       },
       {
         "id": "B5",
-        "label": "Allée 26 (?)",
+        "label": "Allée 26",
         "x": 3.9,
         "y": 17.3,
         "w": 9.5,
@@ -179,7 +180,7 @@ function ConfigModule_() {
       },
       {
         "id": "B6",
-        "label": "Allée 50 (?)",
+        "label": "Allée 50",
         "x": 16.5,
         "y": 16.6,
         "w": 3.9,
@@ -191,7 +192,7 @@ function ConfigModule_() {
       },
       {
         "id": "B7",
-        "label": "(sans libellé)",
+        "label": "",
         "x": 20.7,
         "y": 14.8,
         "w": 9.7,
@@ -203,7 +204,7 @@ function ConfigModule_() {
       },
       {
         "id": "B8",
-        "label": "Allée 72 (?)",
+        "label": "Allée 72",
         "x": 32.9,
         "y": 14.8,
         "w": 13.3,
@@ -216,7 +217,7 @@ function ConfigModule_() {
     ],
     "truck_zone": {
       "id": "ZC",
-      "label": "Zone Camion",
+      "label": "Zone camion",
       "x": 2.6,
       "y": 2,
       "w": 16.3,
@@ -301,7 +302,7 @@ function ConfigModule_() {
     "zones": [
       {
         "id": "G1",
-        "label": "G1 (?)",
+        "label": "G1",
         "x": 2.3,
         "y": 14.4,
         "w": 2.1,
@@ -311,7 +312,7 @@ function ConfigModule_() {
       },
       {
         "id": "G2",
-        "label": "G2 (?)",
+        "label": "G2",
         "x": 4.9,
         "y": 14.4,
         "w": 2.1,
@@ -321,7 +322,7 @@ function ConfigModule_() {
       },
       {
         "id": "G3",
-        "label": "G3 (?)",
+        "label": "G3",
         "x": 7.3,
         "y": 14.4,
         "w": 2.1,
@@ -331,7 +332,7 @@ function ConfigModule_() {
       },
       {
         "id": "G4",
-        "label": "G4 (?)",
+        "label": "G4",
         "x": 9.8,
         "y": 14.4,
         "w": 2.1,
@@ -341,32 +342,32 @@ function ConfigModule_() {
       },
       {
         "id": "GH1",
-        "label": "G? (?)",
+        "label": "",
         "x": 31.3,
         "y": 1.1,
         "w": 2.6,
         "h": 1.6,
         "color": "vert",
-        "short": "G?"
+        "short": ""
       },
       {
         "id": "GH2",
-        "label": "G? (?)",
+        "label": "",
         "x": 35,
         "y": 1.1,
         "w": 2.6,
         "h": 1.6,
         "color": "vert",
-        "short": "G?"
+        "short": ""
       },
       {
         "id": "ZM",
-        "label": "Zone M (?)",
+        "label": "Zone M",
         "x": 2.6,
         "y": 27.8,
         "w": 2.6,
         "h": 2.2,
-        "short": "M ?"
+        "short": "M"
       },
       {
         "id": "CONV",
@@ -416,12 +417,12 @@ function ConfigModule_() {
       },
       {
         "id": "CART",
-        "label": "Carton PF (?)",
+        "label": "Carton PF",
         "x": 29.8,
         "y": 28,
         "w": 2.6,
         "h": 2,
-        "short": "PF ?"
+        "short": "PF"
       },
       {
         "id": "BUR",
@@ -434,12 +435,12 @@ function ConfigModule_() {
       },
       {
         "id": "ZX",
-        "label": "Zone (?)",
+        "label": "Zone",
         "x": 39.6,
         "y": 28,
         "w": 6.3,
         "h": 2,
-        "short": "Zone ?"
+        "short": "Zone"
       }
     ],
     "trucks_sketch": [

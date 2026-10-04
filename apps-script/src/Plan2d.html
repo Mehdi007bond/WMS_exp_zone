@@ -1,0 +1,312 @@
+<script>
+/**
+ * EXP2 Digital Twin - 2D plan (SVG) drawn from the LAYOUT data, to scale (10 SVG units = 1 m).
+ *
+ *   Plan2D.build(svg, layout, opts) -> svg
+ *     layout: CFG.DEFAULT_LAYOUT shape (truck_zone, quai_common) or state.layout (truckZone, quaiLine)
+ *     opts: {
+ *       compact:      no margin labels, dimensions or scale bar (mini plans)
+ *       highlight:    ['B1', 'B7'] other blocks are dimmed
+ *       sat + ramp:   { B1: 0.63, ... } and fraction -> fill color (Plan2D.ramp by default); threshold tags
+ *       thresholds:   { satWarn, satCrit } for the orange / red tags (CFG.THRESHOLDS by default)
+ *       select:       block id drawn with the accent outline
+ *       onBlockClick: function (id) - blocks become buttons (click, Enter, Space)
+ *       ghosts:       number of pending pallets drawn as dashed squares at the conveyor
+ *       trucks:       state.docks - trucks drawn at their dock (free docks skipped)
+ *     }
+ *   Plan2D.normLayout(layout), Plan2D.ramp(v), Plan2D.RAMP, Plan2D.capacity(block)
+ *   Plan2D.legendHtml(thresholds, opts) -> legend of a saturation plan: fill ramp, tag colors, pending pallets
+ */
+(function () {
+  'use strict';
+  var NS = 'http://www.w3.org/2000/svg';
+  var K = 10;
+  var RAMP = [
+    [0.40, '#cde2fb', '< 40 %'], [0.60, '#9ec5f4', '40–60 %'], [0.75, '#6da7ec', '60–75 %'],
+    [0.90, '#3987e5', '75–90 %'], [Infinity, '#1c5cab', '≥ 90 %']
+  ];
+  var uid = 0;
+
+  function conf() {
+    return typeof CFG !== 'undefined' && CFG ? CFG : {};
+  }
+
+  function el(tag, attrs, parent) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) if (Object.prototype.hasOwnProperty.call(attrs, k) && attrs[k] !== null && attrs[k] !== undefined) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+
+  function tx(parent, x, y, str, cls, anchor) {
+    var t = el('text', { x: x, y: y, 'class': cls || '', 'text-anchor': anchor || 'start' }, parent);
+    t.textContent = str;
+    return t;
+  }
+
+  function n(v, def) {
+    var x = Number(v);
+    return isFinite(x) && v !== null && v !== '' ? x : (def === undefined ? 0 : def);
+  }
+
+  function fmtInt(v) {
+    return Number(v).toLocaleString('fr-FR', { maximumFractionDigits: 0 }).replace(/[\u202f\u2009]/g, '\u00a0');
+  }
+
+  function rect(o) {
+    return o && isFinite(Number(o.x)) && isFinite(Number(o.y)) && Number(o.w) > 0 && Number(o.h) > 0;
+  }
+
+  /** Same layout whatever its origin: sheet / state (camelCase) or CFG.DEFAULT_LAYOUT (snake_case). */
+  function normLayout(layout) {
+    var L = layout || {};
+    var D = conf().DEFAULT_LAYOUT || {};
+    var building = rect(L.building) ? L.building : (rect(D.building) ? D.building : { x: 0, y: 0, w: 50, h: 32 });
+    var blocks = (L.blocks && L.blocks.length ? L.blocks : D.blocks || []).filter(rect);
+    var truckZone = L.truckZone || L.truck_zone || null;
+    var quaiLine = L.quaiLine || L.quai_common || null;
+    return {
+      building: { x: n(building.x), y: n(building.y), w: n(building.w, 50), h: n(building.h, 32), label: building.label || '' },
+      blocks: blocks.map(function (b) {
+        return {
+          id: String(b.id), label: b.label || '', x: n(b.x), y: n(b.y), w: n(b.w), h: n(b.h),
+          cols: Math.max(1, n(b.cols, 1)), rows: Math.max(1, n(b.rows, 1)), levels: Math.max(1, n(b.levels, 1)),
+          color: b.color || '', capacity: b.capacity, families: b.families || ''
+        };
+      }),
+      truckZone: rect(truckZone) ? truckZone : null,
+      quais: (L.quais || []).filter(function (q) { return q && isFinite(Number(q.x)); }),
+      quaiLine: quaiLine && isFinite(Number(quaiLine.y)) ? { y: n(quaiLine.y), w: n(quaiLine.w, 1.6), h: n(quaiLine.h, 0.5) } : null,
+      roads: (L.roads || []).filter(rect),
+      zones: (L.zones || []).filter(rect),
+      trucksSketch: L.trucks_sketch || []
+    };
+  }
+
+  function capacity(b) {
+    var c = Number(b.capacity);
+    return c > 0 ? c : b.cols * b.rows * b.levels;
+  }
+
+  function ramp(v) {
+    for (var i = 0; i < RAMP.length; i++) if (v < RAMP[i][0]) return RAMP[i][1];
+    return RAMP[RAMP.length - 1][1];
+  }
+
+  function isFree(d) {
+    if (window.App && window.App.dockKind) return window.App.dockKind(d) === 'free';
+    return !d.truck || String(d.status || '').toLowerCase() === 'libre';
+  }
+
+  function cab(color) {
+    if (window.App && window.App.cabColor) return window.App.cabColor(color);
+    var c = (conf().COLORS || {}).cabs || {};
+    return c[color] || '#8a949e';
+  }
+
+  function build(svg, layout, opts) {
+    opts = opts || {};
+    var L = normLayout(layout);
+    var thr = opts.thresholds || conf().THRESHOLDS || { satWarn: 0.85, satCrit: 0.95 };
+    var warnC = '#fab219', critC = '#d03b3b';
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var B = L.building, W = B.w * K, H = B.h * K;
+    svg.setAttribute('viewBox', opts.compact ? [-6, -6, W + 12, H + 12].join(' ') : [-78, -40, W + 114, H + 80].join(' '));
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svg.classList.add('plan');
+    if (!svg.getAttribute('role')) svg.setAttribute('role', opts.onBlockClick ? 'group' : 'img');
+    var pid = 'pl' + (++uid);
+    var defs = el('defs', {}, svg);
+    var hatch = el('pattern', { id: pid + '-hatch', width: 5, height: 5, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
+    el('rect', { width: 2.5, height: 5, style: 'fill:var(--mark)' }, hatch);
+    el('rect', { x: 2.5, width: 2.5, height: 5, style: 'fill:var(--ink)' }, hatch);
+    var g = el('g', {}, svg);
+    var hl = opts.highlight && opts.highlight.length ? opts.highlight : null;
+
+    function R(o, cls, parent) {
+      return el('rect', { x: o.x * K, y: o.y * K, width: o.w * K, height: o.h * K, 'class': cls }, parent || g);
+    }
+
+    el('rect', { x: B.x * K, y: B.y * K, width: W, height: H, 'class': 'p-floor' }, g);
+
+    // Roads with their center line.
+    L.roads.forEach(function (r) {
+      R(r, 'p-road');
+      if (r.w >= r.h) el('line', { x1: r.x * K + 4, y1: (r.y + r.h / 2) * K, x2: (r.x + r.w) * K - 4, y2: (r.y + r.h / 2) * K, 'class': 'p-roadline' }, g);
+      else el('line', { x1: (r.x + r.w / 2) * K, y1: r.y * K + 4, x2: (r.x + r.w / 2) * K, y2: (r.y + r.h) * K - 4, 'class': 'p-roadline' }, g);
+    });
+
+    // Truck zone, docks, trucks.
+    var zc = L.truckZone, ql = L.quaiLine;
+    if (zc) {
+      R(zc, 'p-zc');
+      if (ql) {
+        L.quais.forEach(function (q, i) {
+          var x0 = (n(q.x) - 0.1) * K;
+          if (i > 0) el('line', { x1: x0, y1: zc.y * K + 6, x2: x0, y2: ql.y * K, 'class': 'p-bay' }, g);
+        });
+        el('rect', { x: zc.x * K, y: ql.y * K - 1.6, width: zc.w * K, height: 3.2, fill: 'url(#' + pid + '-hatch)' }, g);
+      }
+    }
+    if (ql) {
+      var trucks = opts.trucks ? opts.trucks.filter(function (t) { return !isFree(t); }) : L.trucksSketch;
+      trucks.forEach(function (t) {
+        var q = L.quais.filter(function (qq) { return qq.id === t.quai; })[0];
+        if (!q) return;
+        var cx = (n(q.x) + ql.w / 2) * K;
+        var trailer = el('rect', { x: cx - 6.5, y: (ql.y - 4.6) * K, width: 13, height: 44, rx: 1, 'class': 'p-trailer' }, g);
+        el('rect', { x: cx - 6.5, y: (ql.y - 5.6) * K, width: 13, height: 9, rx: 2, fill: cab(t.color) }, g);
+        if (t.truck) {
+          var tt = el('title', {}, trailer);
+          tt.textContent = String(t.quai) + ' · ' + t.truck + (t.planned ? ' · chargé ' + (t.loaded || 0) + ' / ' + t.planned : '');
+        }
+      });
+      L.quais.forEach(function (q) {
+        el('rect', { x: n(q.x) * K + 3, y: ql.y * K - 3, width: Math.max(4, ql.w * K - 6), height: 6, rx: 1, 'class': 'p-quai' }, g);
+        if (!opts.compact) tx(g, (n(q.x) + ql.w / 2) * K, ql.y * K + 11, String(q.id).replace(/^Q0(\d)$/, 'Q$1'), 't-sm t-halo', 'middle');
+      });
+    }
+
+    // Other zones (conveyor with rollers).
+    var conv = null;
+    L.zones.forEach(function (z) {
+      if (z.type === 'CONVOYEUR') {
+        conv = z;
+        R(z, 'p-conv');
+        for (var x = z.x * K + 3; x < (z.x + z.w) * K; x += 3) el('line', { x1: x, y1: z.y * K + 1, x2: x, y2: (z.y + z.h) * K - 1, 'class': 'p-rollers' }, g);
+      } else {
+        R(z, 'p-zone ' + (z.color ? 'b-' + z.color : 'b-none'));
+      }
+      if (!opts.compact && z.short) tx(g, (z.x + z.w / 2) * K, (z.y + z.h / 2) * K + 2.2, z.short, 't-sm t-halo', 'middle');
+    });
+
+    // Storage blocks.
+    // Tags and outlines are drawn above the blocks but must let clicks through to them.
+    var tagLayer = el('g', { 'pointer-events': 'none' });
+    var outline = el('g', { 'pointer-events': 'none' });
+    L.blocks.forEach(function (b) {
+      var dim = hl && hl.indexOf(b.id) < 0;
+      var v = opts.sat && opts.sat[b.id] !== undefined && opts.sat[b.id] !== null ? Number(opts.sat[b.id]) : null;
+      var cap = capacity(b);
+      var bg = el('g', { 'class': 'blk' + (dim ? ' p-dim' : '') + (opts.onBlockClick ? ' clickable' : ''), 'data-block': b.id }, g);
+      var bf = R(b, 'b-' + (b.color || 'none'), bg);
+      if (v !== null) {
+        bf.removeAttribute('class');
+        bf.setAttribute('fill', (opts.ramp || ramp)(v));
+      }
+      var cw = b.w / b.cols, ch = b.h / b.rows;
+      for (var c = 1; c < b.cols; c++) el('line', { x1: (b.x + c * cw) * K, y1: b.y * K, x2: (b.x + c * cw) * K, y2: (b.y + b.h) * K, 'class': 'p-grid' }, bg);
+      for (var r = 1; r < b.rows; r++) el('line', { x1: b.x * K, y1: (b.y + r * ch) * K, x2: (b.x + b.w) * K, y2: (b.y + r * ch) * K, 'class': 'p-grid' }, bg);
+      R(b, 'p-blockline', bg);
+      var cx = (b.x + b.w / 2) * K, cy = (b.y + b.h / 2) * K;
+      var capY = cy + 19;
+      if (v !== null) {
+        var tc = v >= thr.satCrit ? critC : v >= thr.satWarn ? warnC : null;
+        var lvl = tc === critC ? ' crit' : tc === warnC ? ' warn' : '';
+        var pct = Math.round(v * 100) + '\u00a0%';
+        var label = b.id + ' ' + pct;
+        var tw = Math.max(44, label.length * 5.4 + 8);
+        var inner = b.w * K - 4;
+        if (tw > inner) {
+          // Narrow block (B2, B6): two lines inside the block instead of a tag spilling over the aisles.
+          el('rect', { x: cx - inner / 2, y: cy - 18, width: inner, height: 36, rx: 3, 'class': 'p-tag' + lvl }, tagLayer);
+          tx(tagLayer, cx, cy - 4, b.id, 't-tag' + (tc === critC ? ' crit' : ''), 'middle');
+          tx(tagLayer, cx, cy + 11, pct, 't-tag' + (tc === critC ? ' crit' : ''), 'middle');
+          capY = cy + 29;
+        } else {
+          el('rect', { x: cx - tw / 2, y: cy - 11, width: tw, height: 22, rx: 3, 'class': 'p-tag' + lvl }, tagLayer);
+          tx(tagLayer, cx, cy + 4, label, 't-tag' + (tc === critC ? ' crit' : ''), 'middle');
+        }
+      } else {
+        el('rect', { x: cx - 15, y: cy - 11, width: 30, height: 22, rx: 3, 'class': 'p-tag' }, bg);
+        tx(bg, cx, cy + 4.2, b.id, 't-id', 'middle');
+      }
+      if (!opts.compact) tx(bg, cx, capY, fmtInt(cap) + ' pal', 't-sm t-halo', 'middle');
+      if (hl && !dim) R(b, 'p-hl', outline);
+      if (opts.select === b.id) R(b, 'p-hl', outline);
+      var title = el('title', {}, bg);
+      title.textContent = 'Bloc ' + b.id + (b.label ? ' · ' + b.label : '') + ' · ' + fmtInt(cap) + ' emplacements' +
+        (v !== null ? ' · saturation ' + Math.round(v * 100) + '\u00a0%' : '');
+      if (opts.onBlockClick) {
+        bg.setAttribute('tabindex', '0');
+        bg.setAttribute('role', 'button');
+        bg.setAttribute('aria-label', title.textContent);
+        if (opts.select === b.id) bg.setAttribute('aria-pressed', 'true');
+        bg.addEventListener('click', function () { opts.onBlockClick(b.id); });
+        bg.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            opts.onBlockClick(b.id);
+          }
+        });
+      }
+    });
+    g.appendChild(outline);
+    g.appendChild(tagLayer);
+
+    // Pending pallets as ghosts at the conveyor.
+    if (opts.ghosts > 0) {
+      var gx = conv ? conv.x + 0.7 : B.x + 1, gy = conv ? conv.y - 1.4 : B.y + B.h - 2;
+      var maxG = conv ? Math.max(1, Math.floor((conv.w - 0.7) / 1.05)) : 16;
+      var ng = Math.min(opts.ghosts, maxG);
+      for (var i = 0; i < ng; i++) el('rect', { x: (gx + i * 1.05) * K, y: gy * K - 4, width: 8, height: 8, rx: 1, 'class': 'p-ghost' }, g);
+    }
+    el('rect', { x: B.x * K, y: B.y * K, width: W, height: H, 'class': 'p-wall' }, g);
+    if (opts.compact) return svg;
+
+    // Margin labels with leaders, dimensions, scale bar.
+    function side(yM, text, x0, y0) {
+      el('polyline', { points: '-6,' + yM + ' ' + x0 + ',' + y0, 'class': 'p-leader' }, g);
+      tx(g, -9, yM + 2.5, text, 't-side', 'end');
+    }
+    if (zc) tx(g, zc.x * K + 6, zc.y * K + 12, 'Zone camion', 't-lbl');
+    if (zc && ql && L.quais.length) {
+      side(ql.y * K, 'Quais ' + String(L.quais[0].id).replace(/^Q0/, 'Q') + '–' + String(L.quais[L.quais.length - 1].id).replace(/^Q0/, 'Q'), zc.x * K, ql.y * K);
+    }
+    var gz = L.zones.filter(function (z) { return /^G\d+$/.test(String(z.id)); });
+    if (gz.length) {
+      var gyc = (gz[0].y + gz[0].h / 2) * K;
+      side(gyc, gz[0].id + (gz.length > 1 ? '–' + gz[gz.length - 1].id : ''), gz[0].x * K, gyc);
+    }
+    if (conv) side((conv.y + conv.h / 2) * K, 'Convoyeur', conv.x * K, (conv.y + conv.h / 2) * K);
+    el('line', { x1: 0, y1: -18, x2: W, y2: -18, 'class': 'p-dimline' }, g);
+    el('line', { x1: 0, y1: -24, x2: 0, y2: -12, 'class': 'p-dimline' }, g);
+    el('line', { x1: W, y1: -24, x2: W, y2: -12, 'class': 'p-dimline' }, g);
+    tx(g, W / 2, -22, fmtInt(B.w) + ' m (supposé)', 't-dim t-halo', 'middle');
+    el('line', { x1: W + 10, y1: 0, x2: W + 10, y2: H, 'class': 'p-dimline' }, g);
+    el('line', { x1: W + 4, y1: 0, x2: W + 16, y2: 0, 'class': 'p-dimline' }, g);
+    el('line', { x1: W + 4, y1: H, x2: W + 16, y2: H, 'class': 'p-dimline' }, g);
+    var th = tx(g, 0, 0, fmtInt(B.h) + ' m (supposé)', 't-dim t-halo', 'middle');
+    th.setAttribute('transform', 'translate(' + (W + 22) + ',' + (H / 2) + ') rotate(90)');
+    var sb = el('g', { transform: 'translate(0,' + (H + 18) + ')' }, g);
+    el('rect', { x: 0, y: 0, width: 50, height: 4, style: 'fill:var(--ink)' }, sb);
+    el('rect', { x: 50, y: 0, width: 50, height: 4, style: 'fill:var(--paper);stroke:var(--ink);stroke-width:.8' }, sb);
+    tx(sb, 0, 14, '0', 't-dim', 'middle');
+    tx(sb, 50, 14, '5', 't-dim', 'middle');
+    tx(sb, 100, 14, '10 m', 't-dim', 'middle');
+    var capTotal = L.blocks.reduce(function (s, b) { return s + capacity(b); }, 0);
+    tx(g, W, H + 32, fmtInt(B.w * B.h) + ' m² · ' + fmtInt(capTotal) + ' emplacements palette (niveaux supposés)', 't-dim', 'end');
+    return svg;
+  }
+
+  /**
+   * Legend of a saturation plan (TV and PC): what the fill means, what the tag color means, the pending ghosts.
+   * opts.ghosts: false to leave out the pending pallets entry.
+   */
+  function legendHtml(thr, opts) {
+    thr = thr || conf().THRESHOLDS || { satWarn: 0.85, satCrit: 0.95 };
+    opts = opts || {};
+    function esc(x) {
+      return String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    return '<span class="ramp">Remplissage (saturation)&nbsp;: ' + RAMP.map(function (r) {
+      return '<i style="background:' + r[1] + '"></i>' + esc(r[2]) + '&nbsp;';
+    }).join('') + '</span>' +
+      '<span class="ramp">Étiquette&nbsp;: <i style="background:#fab219"></i>orange ≥ ' + Math.round(thr.satWarn * 100) + '&nbsp;%, ' +
+      '<i style="background:#d03b3b"></i>rouge ≥ ' + Math.round(thr.satCrit * 100) + '&nbsp;%' +
+      (opts.ghosts === false ? '' : '&nbsp;&nbsp;<i class="ghost"></i>palettes en attente PRD2 (convoyeur)') + '</span>';
+  }
+
+  window.Plan2D = { build: build, normLayout: normLayout, ramp: ramp, RAMP: RAMP, capacity: capacity, legendHtml: legendHtml };
+})();
+</script>

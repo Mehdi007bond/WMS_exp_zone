@@ -1,0 +1,1173 @@
+<script>
+/**
+ * EXP2 Digital Twin - client data layer (window.App).
+ *
+ *   App.call(fn, ...args)        Promise around google.script.run (French error messages)
+ *   App.start()                  reads the location, mounts the TV page or the PC pages, starts polling
+ *   App.refresh(force)           api_getVersion, then api_getState only when a version changed
+ *   App.onState(fn) / onTick(fn) state changes / 30 s clock (freshness ages)
+ *   App.freshness(state)         { level: ok|warn|crit|none, label, ... } from importedAt / computedAt
+ *   App.withKey(scope, fn)       asks the key once in an in-page modal, keeps it in sessionStorage
+ *   App.modal(opts), App.toast() in-page dialogs and notices (no alert / confirm / prompt)
+ *   App.go(page, params)         in-app navigation (google.script.history or history.pushState), no reload
+ *   App.fmt                      fr-FR numbers, dd.mm.yyyy dates, times, ages and durations
+ *
+ * The page runs inside the Apps Script iframe: the top-level URL is read with google.script.url and changed with
+ * google.script.history; window.location / window.history are the fallbacks (local harness).
+ */
+(function () {
+  'use strict';
+
+  var CONF = typeof CFG !== 'undefined' && CFG ? CFG : {};
+  var THR_DEFAULT = {
+    satWarn: 0.85, satCrit: 0.95, pendingDaysWarn: 3, pendingDaysCrit: 6, dockStagingWarn: 0.85,
+    freshWarnH: 4, freshCritH: 24, tvRefreshS: 60, tvSceneS: 45
+  };
+  var THR = assign({}, THR_DEFAULT, CONF.THRESHOLDS || {});
+  var CABS = (CONF.COLORS && CONF.COLORS.cabs) || { bleu: '#2a78d6', rouge: '#e34948', vert: '#1baf7a', gris: '#8a949e', jaune: '#eda100' };
+  var STATUS = (CONF.COLORS && CONF.COLORS.status) || { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b' };
+
+  var App = window.App = {};
+  App.CFG = CONF;
+  App.THR = THR;
+  App.mode = document.body.getAttribute('data-mode') === 'tv' ? 'tv' : 'pc';
+  App.initialPage = document.body.getAttribute('data-page') || '';
+
+  function assign(target) {
+    for (var i = 1; i < arguments.length; i++) {
+      var src = arguments[i];
+      if (!src) continue;
+      for (var k in src) if (Object.prototype.hasOwnProperty.call(src, k) && src[k] !== undefined && src[k] !== null) target[k] = src[k];
+    }
+    return target;
+  }
+  App.assign = assign;
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Formatting (fr-FR)
+  // ---------------------------------------------------------------------------------------------------------------
+  function isNum(n) {
+    return n !== null && n !== undefined && n !== '' && isFinite(Number(n));
+  }
+
+  function pad2(n) {
+    return (n < 10 ? '0' : '') + n;
+  }
+
+  var fmt = {
+    /** Number with fr-FR grouping; dec = fixed decimals (default: up to 2 when needed). */
+    num: function (n, dec) {
+      if (!isNum(n)) return '–';
+      var o = dec === undefined ? { maximumFractionDigits: 2 } : { minimumFractionDigits: dec, maximumFractionDigits: dec };
+      // fr-FR groups with a narrow no-break space, missing from some fonts: use a regular no-break space.
+      return Number(n).toLocaleString('fr-FR', o).replace(/[\u202f\u2009]/g, '\u00a0');
+    },
+    /** Fraction 0.6919 -> '69,2 %' (one decimal unless whole). */
+    pct: function (x, dec) {
+      if (!isNum(x)) return '–';
+      var p = Number(x) * 100;
+      if (dec === undefined) dec = Math.round(p * 10) / 10 === Math.round(p) ? 0 : 1;
+      return p.toLocaleString('fr-FR', { minimumFractionDigits: dec, maximumFractionDigits: dec }) + ' %';
+    },
+    /** Fraction rounded to a whole percent: '63 %'. */
+    pctInt: function (x) {
+      return isNum(x) ? Math.round(Number(x) * 100) + ' %' : '–';
+    },
+    /** Signed number with a real minus sign: '−7,6'. */
+    signed: function (n, dec) {
+      return fmt.num(n, dec).replace(/^-/, '\u2212');
+    },
+    /** 'yyyy-mm-dd' (engine date) or ISO time stamp -> 'dd.mm.yyyy'. */
+    date: function (v) {
+      if (!v) return '–';
+      var s = String(v);
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+      if (m) return m[3] + '.' + m[2] + '.' + m[1];
+      var d = new Date(s);
+      if (isNaN(d.getTime())) return s;
+      return pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + '.' + d.getFullYear();
+    },
+    /** 'yyyy-mm-dd' -> 'dd.mm'. */
+    dateShort: function (v) {
+      var s = fmt.date(v);
+      return s.length === 10 ? s.slice(0, 5) : s;
+    },
+    /** ISO time stamp -> local 'HH:MM'. */
+    time: function (v) {
+      if (!v) return '–';
+      var d = v instanceof Date ? v : new Date(v);
+      if (isNaN(d.getTime())) return String(v);
+      return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    },
+    /** ISO time stamp -> 'dd.mm.yyyy à HH:MM'. */
+    dateTime: function (v) {
+      if (!v) return '–';
+      var d = new Date(v);
+      if (isNaN(d.getTime())) return String(v);
+      return pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + '.' + d.getFullYear() + ' à ' + fmt.time(d);
+    },
+    /** Duration in ms -> '45 s', '12 min', '3 h 05', '2 j 4 h'. */
+    duration: function (ms) {
+      if (!isNum(ms)) return '–';
+      ms = Math.max(0, Number(ms));
+      var s = Math.round(ms / 1000);
+      if (s < 60) return s + ' s';
+      var min = Math.floor(s / 60);
+      if (min < 60) return min + ' min';
+      var h = Math.floor(min / 60);
+      if (h < 48) return h + ' h ' + pad2(min % 60);
+      var d = Math.floor(h / 24);
+      return d + ' j' + (h % 24 ? ' ' + (h % 24) + ' h' : '');
+    },
+    /** Age in ms -> 'à l'instant', 'il y a 12 min', 'il y a 3 h 05', 'il y a 2 j'. */
+    ago: function (ms) {
+      if (!isNum(ms)) return '';
+      if (ms < 60000) return 'à l’instant';
+      return 'il y a ' + fmt.duration(ms);
+    },
+    days: function (n) {
+      return isNum(n) ? fmt.num(n, 0) + ' j' : '–';
+    },
+    /** French plural: 0 and 1 take the singular. */
+    plural: function (n, one, many) {
+      return fmt.num(n, 0) + ' ' + (Math.abs(Number(n)) > 1 ? many : one);
+    },
+    quai: function (id) {
+      return String(id || '').replace(/^Q0(\d)$/, 'Q$1');
+    },
+    esc: function (s) {
+      return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c];
+      });
+    }
+  };
+  App.fmt = fmt;
+  var esc = fmt.esc;
+
+  App.isoToday = function () {
+    var d = new Date();
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Server calls
+  // ---------------------------------------------------------------------------------------------------------------
+  function hasRun() {
+    return typeof google !== 'undefined' && google && google.script && google.script.run;
+  }
+
+  /** Server error -> short French message. */
+  function cleanMessage(err) {
+    var m = err && err.message ? String(err.message) : String(err || '');
+    m = m.replace(/^(Uncaught\s+)?(Exception|Error|ScriptError|TypeError|ReferenceError)\s*:\s*/i, '').trim();
+    if (!m) m = 'Erreur inconnue du serveur.';
+    if (/NetworkError|HTTP 0|Failed to fetch|connection failure|network/i.test(m)) {
+      m = 'Connexion au serveur impossible (réseau coupé ou session Google expirée).';
+    } else if (/authori[sz]ation|autoris|permission/i.test(m) && !/cl[ée]/i.test(m)) {
+      m = 'Accès refusé par Google : ' + m;
+    } else if (/timed? ?out|temps d.ex[ée]cution|maximum execution time|exceeded maximum/i.test(m)) {
+      m = 'Le serveur n’a pas répondu à temps (limite Google de 6 minutes). Réessayez avec moins de données.';
+    }
+    return m;
+  }
+  App.errorText = cleanMessage;
+
+  App.isKeyError = function (err) {
+    return /cl[ée]\s+(incorrecte|invalide|manquante)/i.test(err && err.message ? err.message : String(err || ''));
+  };
+
+  /** google.script.run as a Promise: App.call('api_getState').then(...). */
+  App.call = function (fnName) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      if (!hasRun()) {
+        reject(new Error('Service Google indisponible : ouvrez cette page depuis le lien de l’application Web.'));
+        return;
+      }
+      var runner = google.script.run
+        .withSuccessHandler(function (res) { resolve(res); })
+        .withFailureHandler(function (err) {
+          var e = new Error(cleanMessage(err));
+          e.raw = err;
+          reject(e);
+        });
+      if (typeof runner[fnName] !== 'function') {
+        reject(new Error('Fonction serveur inconnue : ' + fnName + '.'));
+        return;
+      }
+      try {
+        runner[fnName].apply(runner, args);
+      } catch (e) {
+        reject(new Error(cleanMessage(e)));
+      }
+    });
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // State store, polling, freshness
+  // ---------------------------------------------------------------------------------------------------------------
+  var store = {
+    state: null,          // last good compact state (never dropped on a failed refresh)
+    versions: null,       // { data, docks } of that state
+    status: 'loading',    // loading | ok | empty | notInstalled | error
+    message: '',          // French message for notInstalled / error
+    fetchedAt: 0,         // Date.now() when the state was downloaded
+    lastOkAt: 0,          // last successful exchange with the server
+    lastError: null,      // { message, at } of the last failed refresh, cleared on success
+    changed: false        // true when the last emit carries a new state
+  };
+  App.store = store;
+
+  var stateListeners = [], tickListeners = [];
+  App.onState = function (fn) {
+    stateListeners.push(fn);
+    return function () {
+      var i = stateListeners.indexOf(fn);
+      if (i >= 0) stateListeners.splice(i, 1);
+    };
+  };
+  App.onTick = function (fn) {
+    tickListeners.push(fn);
+    return function () {
+      var i = tickListeners.indexOf(fn);
+      if (i >= 0) tickListeners.splice(i, 1);
+    };
+  };
+
+  function emit(changed) {
+    store.changed = !!changed;
+    stateListeners.slice().forEach(function (fn) {
+      try {
+        fn(store);
+      } catch (e) {
+        if (window.console) console.error(e);
+      }
+    });
+  }
+
+  /** True when the sheet holds no data yet (installed, nothing simulated or imported). */
+  App.isEmpty = function (state) {
+    if (!state) return true;
+    var k = state.kpi || {};
+    var moves = state.stats && isNum(state.stats.movements) ? Number(state.stats.movements) : null;
+    var anyStock = (k.exp2Pallets || 0) + (k.pendingPallets || 0) + (k.emrtPallets || 0) > 0;
+    if (anyStock) return false;
+    if (moves !== null) return moves === 0 && !state.importedAt;
+    return !(state.daily && state.daily.length > 1) && !state.importedAt;
+  };
+
+  // The versions stored with a state are its own (state.version, state.docksVersion), never those of a separate
+  // api_getVersion call: a write between the two calls would otherwise pair version N+1 with state N for good.
+  function applyState(s) {
+    store.state = s;
+    store.versions = { data: s.version, docks: s.docksVersion };
+    store.fetchedAt = Date.now();
+    store.lastOkAt = store.fetchedAt;
+    store.lastError = null;
+    store.status = App.isEmpty(s) ? 'empty' : 'ok';
+    store.message = '';
+  }
+
+  function applyError(err) {
+    var msg = cleanMessage(err);
+    if (/non install/i.test(msg)) {
+      store.state = null;
+      store.versions = null;
+      store.status = 'notInstalled';
+      store.message = msg;
+      store.lastError = null;
+      return;
+    }
+    store.lastError = { message: msg, at: Date.now() };
+    if (!store.state) {
+      store.status = 'error';
+      store.message = msg;
+    }
+  }
+
+  var inflight = null, inflightAt = 0;
+
+  /**
+   * Polls api_getVersion and downloads the state only when a version changed (force: always download).
+   * Resolves to true when a new state arrived. Never rejects: errors are kept in store.lastError.
+   */
+  App.refresh = function (force) {
+    if (inflight && Date.now() - inflightAt < 90000) {
+      if (!force) return inflight;
+      return inflight.then(function () { return App.refresh(true); });
+    }
+    inflightAt = Date.now();
+    var p;
+    if (force || !store.state) {
+      p = App.call('api_getState').then(function (s) {
+        applyState(s);
+        return true;
+      });
+    } else {
+      p = App.call('api_getVersion').then(function (v) {
+        var cur = store.versions || {};
+        if (v && v.data === cur.data && v.docks === cur.docks) {
+          var wasError = !!store.lastError;
+          store.lastOkAt = Date.now();
+          store.lastError = null;
+          return wasError ? 'recovered' : false;
+        }
+        return App.call('api_getState').then(function (s) {
+          applyState(s);
+          return true;
+        });
+      });
+    }
+    inflight = p.then(function (changed) {
+      inflight = null;
+      if (changed) emit(changed === true);
+      return changed === true;
+    }, function (err) {
+      inflight = null;
+      applyError(err);
+      emit(store.status === 'notInstalled');
+      return false;
+    });
+    return inflight;
+  };
+
+  /**
+   * Version polling period: tvRefreshS of PARAM_SEUILS (state thresholds, else CFG), at least 15 s. Only the local
+   * harness (tests/harness, ?poll=S) defines window.EXP2_HARNESS.pollMs, to test the TV update quickly.
+   */
+  App.pollPeriodMs = function () {
+    var harness = window.EXP2_HARNESS;
+    if (harness && Number(harness.pollMs) > 0) return Number(harness.pollMs);
+    return Math.max(15, Number(App.thresholds(store.state).tvRefreshS) || 60) * 1000;
+  };
+
+  var pollTimer = null, pollPeriod = 0, tickTimer = null;
+  // (Re)arms the polling timer when the period changed (first state, PARAM_SEUILS edited).
+  function schedulePoll() {
+    var period = App.pollPeriodMs();
+    if (pollTimer && period === pollPeriod) return;
+    if (pollTimer) clearInterval(pollTimer);
+    pollPeriod = period;
+    pollTimer = setInterval(function () { App.refresh(false).then(schedulePoll); }, period);
+  }
+
+  App.startPolling = function () {
+    if (pollTimer) return;
+    App.refresh(true).then(schedulePoll);
+    schedulePoll();
+    tickTimer = setInterval(function () {
+      tickListeners.slice().forEach(function (fn) {
+        try {
+          fn(store);
+        } catch (e) {
+          if (window.console) console.error(e);
+        }
+      });
+    }, 30000);
+  };
+
+  /** Thresholds of a state (sheet PARAM_SEUILS when present), with the CFG defaults. */
+  App.thresholds = function (state) {
+    return assign({}, THR, state && state.thresholds ? state.thresholds : {});
+  };
+
+  /** Freshness of the SAP data from the time of the last import (or calculation). */
+  App.freshness = function (state, now) {
+    now = now || Date.now();
+    if (!state) return { level: 'none', label: 'Aucune donnée', hours: null, text: '' };
+    var thr = App.thresholds(state);
+    var ref = state.importedAt || state.computedAt || null;
+    var t = ref ? new Date(ref).getTime() : NaN;
+    var age = isNaN(t) ? null : Math.max(0, now - t);
+    var hours = age === null ? null : age / 3600000;
+    var level = hours === null ? 'warn' : hours >= thr.freshCritH ? 'crit' : hours >= thr.freshWarnH ? 'warn' : 'ok';
+    var label = { ok: 'À jour', warn: 'À rafraîchir', crit: 'Données anciennes' }[level];
+    var sameDay = !isNaN(t) && fmt.date(new Date(t).toISOString()) === fmt.date(new Date(now).toISOString());
+    var imported = isNaN(t) ? '' : (sameDay ? 'à ' + fmt.time(t) : 'le ' + fmt.dateShort(new Date(t).toISOString()) + ' à ' + fmt.time(t));
+    var sim = state.source === 'SIMULATION';
+    var verb = sim ? 'générées' : 'importées';
+    return {
+      level: level,
+      label: label,
+      hours: hours,
+      age: age,
+      ago: age === null ? '' : fmt.ago(age),
+      asOf: fmt.date(state.asOf),
+      imported: imported,
+      simulated: sim,
+      verb: verb,
+      // 'Données SAP du 03.10.2026 · importées à 07:42' / 'Données simulées au 03.10.2026 · générées à 21:10'
+      lead: sim ? 'Données simulées au' : 'Données SAP du',
+      text: (sim ? 'Données simulées au ' : 'Données SAP du ') + fmt.date(state.asOf) + (imported ? ' · ' + verb + ' ' + imported : '')
+    };
+  };
+
+  /** Connection state for the badges: null when the last refresh worked. */
+  App.connection = function () {
+    if (!store.lastError) return null;
+    return {
+      message: store.lastError.message,
+      stateAge: store.fetchedAt ? Date.now() - store.fetchedAt : null,
+      text: 'Connexion perdue' + (store.fetchedAt ? ' · état affiché ' + fmt.ago(Date.now() - store.fetchedAt) : '')
+    };
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Session storage (keys) with an in-memory fallback (blocked storage in some iframes)
+  // ---------------------------------------------------------------------------------------------------------------
+  var memStore = {};
+  App.session = {
+    get: function (k) {
+      try {
+        var v = window.sessionStorage.getItem(k);
+        if (v !== null) return v;
+      } catch (e) { /* storage blocked */ }
+      return Object.prototype.hasOwnProperty.call(memStore, k) ? memStore[k] : null;
+    },
+    set: function (k, v) {
+      memStore[k] = v;
+      try {
+        window.sessionStorage.setItem(k, v);
+      } catch (e) { /* storage blocked */ }
+    },
+    remove: function (k) {
+      delete memStore[k];
+      try {
+        window.sessionStorage.removeItem(k);
+      } catch (e) { /* storage blocked */ }
+    }
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // DOM helpers
+  // ---------------------------------------------------------------------------------------------------------------
+  App.$ = function (sel, root) {
+    return (root || document).querySelector(sel);
+  };
+  App.$$ = function (sel, root) {
+    return Array.prototype.slice.call((root || document).querySelectorAll(sel));
+  };
+  /** App.h('div', { class: 'x', onclick: fn }, 'text' | Node | [children]) */
+  App.h = function (tag, attrs, children) {
+    var e = document.createElement(tag);
+    attrs = attrs || {};
+    Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (v === null || v === undefined || v === false) return;
+      if (k === 'html') e.innerHTML = v;
+      else if (k === 'text') e.textContent = v;
+      else if (k.slice(0, 2) === 'on' && typeof v === 'function') e.addEventListener(k.slice(2), v);
+      else e.setAttribute(k === 'className' ? 'class' : k, v === true ? '' : v);
+    });
+    (Array.isArray(children) ? children : children === undefined ? [] : [children]).forEach(function (c) {
+      if (c === null || c === undefined || c === false) return;
+      e.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
+    });
+    return e;
+  };
+  App.debounce = function (fn, ms) {
+    var t = null;
+    return function () {
+      var self = this, args = arguments;
+      clearTimeout(t);
+      t = setTimeout(function () { fn.apply(self, args); }, ms);
+    };
+  };
+  var uidN = 0;
+  App.uid = function (p) {
+    uidN++;
+    return (p || 'u') + uidN;
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Modal dialog (in-page, focus trapped, Escape closes)
+  // ---------------------------------------------------------------------------------------------------------------
+  var openModals = [];
+
+  /**
+   * opts: { title, body: Node | html string, actions: [{ label, kind: 'primary'|'ghost'|'danger', value, close: true }],
+   *         onAction(value, modal) -> false to keep open | Promise, dismissible (default true), wide, initialFocus }
+   * -> { root, body, close(value), setBusy(bool), setError(text), done: Promise<value|null> }
+   */
+  App.modal = function (opts) {
+    opts = opts || {};
+    var prevFocus = document.activeElement;
+    var titleId = App.uid('mt');
+    var resolveDone;
+    var done = new Promise(function (r) { resolveDone = r; });
+    var backdrop = App.h('div', { 'class': 'modal-backdrop' });
+    var box = App.h('div', { 'class': 'modal' + (opts.wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId });
+    var head = App.h('div', { 'class': 'modal-head' }, [App.h('h2', { id: titleId, text: opts.title || '' })]);
+    var dismissible = opts.dismissible !== false;
+    if (dismissible) {
+      head.appendChild(App.h('button', { type: 'button', 'class': 'modal-x', 'aria-label': 'Fermer', html: '&times;', onclick: function () { close(null); } }));
+    }
+    var body = App.h('div', { 'class': 'modal-body' });
+    if (typeof opts.body === 'string') body.innerHTML = opts.body;
+    else if (opts.body) body.appendChild(opts.body);
+    var err = App.h('div', { 'class': 'modal-error', role: 'alert', hidden: true });
+    var foot = App.h('div', { 'class': 'modal-foot' });
+    var buttons = [];
+    (opts.actions || [{ label: 'Fermer', kind: 'ghost', value: null }]).forEach(function (a) {
+      var b = App.h('button', { type: a.submit ? 'submit' : 'button', 'class': 'btn' + (a.kind === 'primary' ? ' p' : a.kind === 'danger' ? ' d' : ''), text: a.label });
+      b.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        act(a);
+      });
+      buttons.push(b);
+      foot.appendChild(b);
+    });
+    box.appendChild(head);
+    box.appendChild(body);
+    box.appendChild(err);
+    box.appendChild(foot);
+    backdrop.appendChild(box);
+    // One dialog visible at a time: the one below (e.g. a form waiting for the key) comes back when this one closes.
+    var below = openModals.length ? openModals[openModals.length - 1] : null;
+    if (below) below.backdrop.classList.add('under');
+    document.body.appendChild(backdrop);
+    var closed = false;
+    var modal = {
+      root: box,
+      backdrop: backdrop,
+      body: body,
+      done: done,
+      close: close,
+      setError: function (t) {
+        err.textContent = t || '';
+        err.hidden = !t;
+      },
+      setBusy: function (busy) {
+        buttons.forEach(function (b) { b.disabled = !!busy; });
+        box.classList.toggle('busy', !!busy);
+      }
+    };
+    openModals.push(modal);
+
+    function act(a) {
+      if (a.value === null || a.value === undefined || !opts.onAction) {
+        close(a.value === undefined ? null : a.value);
+        return;
+      }
+      modal.setError('');
+      var r = opts.onAction(a.value, modal);
+      if (r === false) return;
+      if (r && typeof r.then === 'function') {
+        modal.setBusy(true);
+        r.then(function (keep) {
+          modal.setBusy(false);
+          if (keep !== false) close(a.value);
+        }, function (e) {
+          modal.setBusy(false);
+          modal.setError(e && e.message ? e.message : String(e));
+        });
+        return;
+      }
+      close(a.value);
+    }
+
+    function focusables() {
+      return App.$$('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])', box)
+        .filter(function (x) { return x.offsetParent !== null; });
+    }
+
+    function onKey(ev) {
+      if (openModals[openModals.length - 1] !== modal) return;
+      if (ev.key === 'Escape' && dismissible) {
+        ev.preventDefault();
+        close(null);
+      } else if (ev.key === 'Tab') {
+        var f = focusables();
+        if (!f.length) return;
+        var first = f[0], last = f[f.length - 1];
+        if (ev.shiftKey && document.activeElement === first) {
+          ev.preventDefault();
+          last.focus();
+        } else if (!ev.shiftKey && document.activeElement === last) {
+          ev.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    document.addEventListener('keydown', onKey, true);
+    if (dismissible) {
+      backdrop.addEventListener('mousedown', function (ev) {
+        if (ev.target === backdrop) close(null);
+      });
+    }
+
+    function close(value) {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey, true);
+      if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+      openModals.splice(openModals.indexOf(modal), 1);
+      if (below && openModals.indexOf(below) >= 0) below.backdrop.classList.remove('under');
+      if (prevFocus && prevFocus.focus && document.body.contains(prevFocus)) prevFocus.focus();
+      resolveDone(value === undefined ? null : value);
+    }
+
+    setTimeout(function () {
+      var target = opts.initialFocus ? App.$(opts.initialFocus, box) : null;
+      if (!target) target = App.$('input, select, textarea', body) || buttons[buttons.length - 1] || box;
+      if (target && target.focus) target.focus();
+    }, 0);
+    return modal;
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Keys for write actions: asked once in a modal, kept in sessionStorage for the session
+  // ---------------------------------------------------------------------------------------------------------------
+  var KEY_PREFIX = 'exp2.key.';
+  var KEY_LABELS = {
+    admin: { title: 'Clé administrateur', what: 'importer, simuler ou recalculer' },
+    docks: { title: 'Clé quais', what: 'modifier les quais (la clé administrateur convient aussi)' }
+  };
+
+  App.storedKey = function (scope) {
+    return App.session.get(KEY_PREFIX + scope) || (scope === 'docks' ? App.session.get(KEY_PREFIX + 'admin') : null);
+  };
+  App.forgetKey = function (scope) {
+    App.session.remove(KEY_PREFIX + scope);
+    if (scope === 'docks') App.session.remove(KEY_PREFIX + 'admin');
+  };
+
+  /** Modal asking for the key. Resolves to the key text, or null when cancelled. */
+  App.askKey = function (scope, errorText) {
+    var L = KEY_LABELS[scope] || KEY_LABELS.admin;
+    var id = App.uid('key');
+    var body = App.h('form', { 'class': 'form', autocomplete: 'off' });
+    body.innerHTML =
+      '<p class="muted">Pour ' + esc(L.what) + ', saisissez la clé donnée par le classeur ' +
+      '(menu <b>EXP2 Jumeau › Ouvrir le jumeau</b>, réservé aux éditeurs). Elle est gardée pour cette session seulement.</p>' +
+      '<label class="field"><span>' + esc(L.title) + '</span><input id="' + id + '" class="mono key-input" type="password" ' +
+      'autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX" required></label>';
+    var result = null;
+    var m = App.modal({
+      title: L.title,
+      body: body,
+      actions: [{ label: 'Annuler', kind: 'ghost', value: null }, { label: 'Valider', kind: 'primary', value: 'ok', submit: true }],
+      onAction: function (v) {
+        var val = App.$('#' + id, body).value.trim();
+        if (!val) {
+          m.setError('Saisissez la clé.');
+          return false;
+        }
+        result = val;
+        return true;
+      },
+      initialFocus: '#' + id
+    });
+    body.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var val = App.$('#' + id, body).value.trim();
+      if (!val) {
+        m.setError('Saisissez la clé.');
+        return;
+      }
+      result = val;
+      m.close('ok');
+    });
+    if (errorText) m.setError(errorText);
+    return m.done.then(function (v) { return v === 'ok' ? result : null; });
+  };
+
+  /**
+   * Runs fn(key) with the stored key, asking for it first when needed. A wrong key is forgotten and asked again
+   * (twice at most). Rejects with err.cancelled = true when the user cancels.
+   */
+  App.withKey = function (scope, fn) {
+    function attempt(n, errorText) {
+      var stored = n === 0 ? App.storedKey(scope) : null;
+      var p = stored ? Promise.resolve(stored) : App.askKey(scope, errorText);
+      return p.then(function (key) {
+        if (!key) {
+          var c = new Error('Action annulée.');
+          c.cancelled = true;
+          throw c;
+        }
+        return Promise.resolve(fn(key)).then(function (res) {
+          App.session.set(KEY_PREFIX + scope, key);
+          return res;
+        }, function (err) {
+          if (App.isKeyError(err)) {
+            App.forgetKey(scope);
+            if (n < 3) return attempt(n + 1, 'Clé incorrecte : vérifiez-la dans le classeur et réessayez.');
+          }
+          throw err;
+        });
+      });
+    }
+    return attempt(0, '');
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Toasts (aria-live)
+  // ---------------------------------------------------------------------------------------------------------------
+  var toastBox = null;
+  App.toast = function (text, kind, ms) {
+    if (!toastBox) {
+      toastBox = App.h('div', { 'class': 'toasts', role: 'status', 'aria-live': 'polite' });
+      document.body.appendChild(toastBox);
+    }
+    var t = App.h('div', { 'class': 'toast ' + (kind || 'info') }, [App.h('span', { text: text })]);
+    var x = App.h('button', { type: 'button', 'class': 'toast-x', 'aria-label': 'Fermer', html: '&times;' });
+    t.appendChild(x);
+    toastBox.appendChild(t);
+    function remove() {
+      if (t.parentNode) t.parentNode.removeChild(t);
+    }
+    x.addEventListener('click', remove);
+    setTimeout(remove, ms || (kind === 'error' ? 12000 : 6000));
+    return remove;
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Location and router (?page=..., in-app navigation without reload)
+  // ---------------------------------------------------------------------------------------------------------------
+  function parseQuery(search) {
+    var out = {};
+    String(search || '').replace(/^\?/, '').split('&').forEach(function (part) {
+      if (!part) return;
+      var i = part.indexOf('=');
+      var k = decodeURIComponent((i < 0 ? part : part.slice(0, i)).replace(/\+/g, ' '));
+      var v = i < 0 ? '' : decodeURIComponent(part.slice(i + 1).replace(/\+/g, ' '));
+      if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = v;
+    });
+    return out;
+  }
+  App.parseQuery = parseQuery;
+
+  /** cb({ parameter: {...}, hash }) with the top-level URL parameters (google.script.url in Apps Script). */
+  App.readLocation = function (cb) {
+    var called = false;
+    function done(loc) {
+      if (called) return;
+      called = true;
+      cb(loc);
+    }
+    var fallback = { parameter: parseQuery(window.location.search), hash: String(window.location.hash || '').replace(/^#/, '') };
+    try {
+      if (typeof google !== 'undefined' && google.script && google.script.url && google.script.url.getLocation) {
+        google.script.url.getLocation(function (loc) {
+          done({ parameter: (loc && loc.parameter) || {}, hash: (loc && loc.hash) || '' });
+        });
+        setTimeout(function () { done(fallback); }, 2500);
+        return;
+      }
+    } catch (e) { /* fall back */ }
+    done(fallback);
+  };
+
+  App.route = { page: '', params: {} };
+  var routeListeners = [];
+  App.onRoute = function (fn) {
+    routeListeners.push(fn);
+  };
+
+  function routeQuery(page, params) {
+    var q = { page: page };
+    Object.keys(params || {}).forEach(function (k) {
+      if (params[k] !== null && params[k] !== undefined && params[k] !== '') q[k] = String(params[k]);
+    });
+    return q;
+  }
+
+  function setRoute(page, params, how) {
+    App.route = { page: page, params: params || {} };
+    routeListeners.slice().forEach(function (fn) {
+      try {
+        fn(App.route, how);
+      } catch (e) {
+        if (window.console) console.error(e);
+      }
+    });
+  }
+
+  /** In-app navigation: updates the top-level URL (history entry) and notifies the router, never reloads. */
+  App.go = function (page, params, opts) {
+    opts = opts || {};
+    params = params || {};
+    var q = routeQuery(page, params);
+    try {
+      if (typeof google !== 'undefined' && google.script && google.script.history && google.script.history.push) {
+        if (opts.replace && google.script.history.replace) google.script.history.replace({ page: page, params: params }, q, '');
+        else google.script.history.push({ page: page, params: params }, q, '');
+      } else if (window.history && window.history.pushState) {
+        var search = '?' + Object.keys(q).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(q[k]); }).join('&');
+        var keep = parseQuery(window.location.search);
+        // Keep the harness / deployment parameters that are not part of the route.
+        Object.keys(keep).forEach(function (k) {
+          if (k !== 'page' && k !== 'article' && k !== 'block' && !Object.prototype.hasOwnProperty.call(q, k) && /^(h|harness|data|fresh|lat)$/.test(k)) {
+            search += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(keep[k]);
+          }
+        });
+        if (opts.replace) window.history.replaceState({ page: page, params: params }, '', search);
+        else window.history.pushState({ page: page, params: params }, '', search);
+      }
+    } catch (e) { /* history is cosmetic: navigation still happens in the page */ }
+    setRoute(page, params, opts.replace ? 'replace' : 'push');
+  };
+
+  App.listenHistory = function () {
+    function fromParams(p) {
+      p = p || {};
+      var params = {};
+      Object.keys(p).forEach(function (k) {
+        if (k !== 'page' && k !== 'mode') params[k] = p[k];
+      });
+      return { page: p.page || '', params: params };
+    }
+    try {
+      if (typeof google !== 'undefined' && google.script && google.script.history && google.script.history.setChangeHandler) {
+        google.script.history.setChangeHandler(function (e) {
+          var r = e && e.state && e.state.page ? { page: e.state.page, params: e.state.params || {} } : fromParams(e && e.location && e.location.parameter);
+          setRoute(r.page, r.params, 'pop');
+        });
+        return;
+      }
+    } catch (e) { /* fall back */ }
+    window.addEventListener('popstate', function (ev) {
+      var r = ev.state && ev.state.page ? { page: ev.state.page, params: ev.state.params || {} } : fromParams(parseQuery(window.location.search));
+      setRoute(r.page, r.params, 'pop');
+    });
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // External scripts (SheetJS on the import page)
+  // ---------------------------------------------------------------------------------------------------------------
+  var scriptCache = {};
+  /**
+   * Loads a script once; resolves when globalName exists. Rejects after timeoutMs (default 20 s). integrity: Subresource
+   * Integrity hash ('sha384-…'): the browser refuses a file that does not match (hijacked or altered CDN).
+   */
+  App.loadScript = function (url, globalName, timeoutMs, integrity) {
+    if (globalName && window[globalName]) return Promise.resolve(window[globalName]);
+    if (scriptCache[url]) return scriptCache[url];
+    scriptCache[url] = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      var timer = setTimeout(function () { fail('délai dépassé'); }, timeoutMs || 20000);
+      function fail(why) {
+        clearTimeout(timer);
+        delete scriptCache[url];
+        if (s.parentNode) s.parentNode.removeChild(s);
+        reject(new Error('Bibliothèque non chargée (' + why + ') : ' + url));
+      }
+      if (integrity) {
+        s.integrity = integrity;
+        s.crossOrigin = 'anonymous';
+      }
+      s.src = url;
+      s.async = true;
+      s.onload = function () {
+        clearTimeout(timer);
+        if (globalName && !window[globalName]) fail('contenu inattendu');
+        else resolve(globalName ? window[globalName] : true);
+      };
+      s.onerror = function () { fail('réseau ou adresse bloquée'); };
+      document.head.appendChild(s);
+    });
+    return scriptCache[url];
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Shared domain helpers (docks, colors, small SVGs)
+  // ---------------------------------------------------------------------------------------------------------------
+  function fold(s) {
+    s = String(s === null || s === undefined ? '' : s);
+    if (s.normalize) s = s.normalize('NFD');
+    return s.replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+  }
+  App.fold = fold;
+
+  /** Dock status -> free | waiting | loading | loaded | busy. */
+  App.dockKind = function (d) {
+    var s = fold(d && d.status);
+    if (!s || s === 'libre') return d && d.truck && s !== 'libre' ? 'busy' : 'free';
+    if (s.indexOf('attente') >= 0) return 'waiting';
+    if (s.indexOf('chargement') >= 0 || s.indexOf('en cours') >= 0) return 'loading';
+    if (s.indexOf('charge') >= 0 || s.indexOf('depart') >= 0) return 'loaded';
+    return 'busy';
+  };
+  App.dockChip = function (d) {
+    return { free: 'n', waiting: 'w', loading: 'b', loaded: 'g', busy: 'n' }[App.dockKind(d)];
+  };
+  /**
+   * Words shown for a dock status (the stored values stay 'En attente', 'Chargement', 'Chargé'): three distinct words,
+   * and a waiting truck no longer reads like 'En attente PRD2' (pallets).
+   */
+  App.DOCK_LABELS = { free: 'Libre', waiting: 'Camion arrivé', loading: 'En chargement', loaded: 'Prêt à partir' };
+  App.dockLabel = function (d) {
+    return App.DOCK_LABELS[App.dockKind(d)] || String((d && d.status) || '');
+  };
+  /** Label of a stored status value (dock form options). */
+  App.statusLabel = function (status) {
+    var free = /^libre$/i.test(String(status || '').trim());
+    return App.dockLabel({ status: status, truck: free ? '' : '-' });
+  };
+  App.cabColor = function (name) {
+    return CABS[fold(name)] || '#8a949e';
+  };
+  App.CABS = CABS;
+  App.STATUS = STATUS;
+
+  /** Saturation color: red over satCrit, amber over satWarn, else the info blue. */
+  App.satColor = function (v, thr) {
+    thr = thr || THR;
+    if (!isNum(v)) return '#5b9be0';
+    return v >= thr.satCrit ? STATUS.critical : v >= thr.satWarn ? STATUS.warning : '#5b9be0';
+  };
+  App.satLevel = function (v, thr) {
+    thr = thr || THR;
+    if (!isNum(v)) return 'n';
+    return v >= thr.satCrit ? 'c' : v >= thr.satWarn ? 'w' : 'n';
+  };
+
+  /** Truck at a dock (side view). dark: TV palette. Free dock: dashed outline. */
+  App.truckSvg = function (d, dark) {
+    var cap = Number(CONF.TRUCK_CAPACITY) || 33;
+    var busy = d && App.dockKind(d) !== 'free';
+    if (!busy) {
+      return '<svg class="truck" viewBox="0 0 150 40" aria-hidden="true"><rect x="2" y="6" width="146" height="24" rx="4" fill="none" stroke="' +
+        (dark ? '#3a4552' : '#b8c3ce') + '" stroke-dasharray="5 4"/>' +
+        '<text x="75" y="22" text-anchor="middle" font-size="11" fill="' + (dark ? '#a8b4c0' : '#5d6873') + '" font-family="IBM Plex Sans, sans-serif">quai libre</text></svg>';
+    }
+    var loaded = Math.max(0, Number(d.loaded) || 0);
+    var fw = Math.round(98 * Math.min(1, loaded / cap));
+    var lines = '';
+    for (var i = 1; i * 9 < fw; i++) lines += '<line x1="' + (5 + i * 9) + '" y1="7" x2="' + (5 + i * 9) + '" y2="27" stroke="#a8861d" stroke-width=".8"/>';
+    var wheel = dark ? '#0b1016' : '#17212b';
+    var wheelStroke = dark ? ' stroke="#4a5562"' : '';
+    return '<svg class="truck" viewBox="0 0 150 40" aria-hidden="true">' +
+      '<rect x="2" y="4" width="104" height="26" rx="2" fill="' + (dark ? '#d9dfe5' : '#eef1f4') + '" stroke="' + (dark ? '#d9dfe5' : '#9aa5b1') + '"/>' +
+      '<rect x="5" y="7" width="' + fw + '" height="20" fill="#c9a227"/>' + lines +
+      '<rect x="110" y="10" width="36" height="20" rx="4" fill="' + App.cabColor(d.color) + '"/>' +
+      '<rect x="132" y="13" width="11" height="7" rx="1.5" fill="#0b1016" opacity=".5"/>' +
+      '<circle cx="18" cy="33" r="5" fill="' + wheel + '"' + wheelStroke + '/><circle cx="32" cy="33" r="5" fill="' + wheel + '"' + wheelStroke + '/>' +
+      '<circle cx="92" cy="33" r="5" fill="' + wheel + '"' + wheelStroke + '/><circle cx="134" cy="33" r="5" fill="' + wheel + '"' + wheelStroke + '/></svg>';
+  };
+
+  /** Sparkline of a series (e.g. daily saturation). */
+  App.sparkline = function (values, opts) {
+    opts = opts || {};
+    var v = (values || []).filter(isNum).map(Number);
+    if (v.length < 2) return '';
+    var W = opts.w || 180, H = opts.h || 22;
+    var lo = Math.min.apply(null, v), hi = Math.max.apply(null, v);
+    if (hi - lo < 0.02) {
+      lo -= 0.01;
+      hi += 0.01;
+    }
+    var pts = v.map(function (x, i) {
+      return [i * (W - 8) / (v.length - 1) + 4, H - 4 - (x - lo) / (hi - lo) * (H - 8)];
+    });
+    var line = pts.map(function (p) { return p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
+    var area = '4,' + (H - 1) + ' ' + line + ' ' + pts[pts.length - 1][0].toFixed(1) + ',' + (H - 1);
+    var e = pts[pts.length - 1];
+    var col = opts.color || '#5b9be0';
+    return '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="' + esc(opts.label || 'Évolution') + '">' +
+      '<polygon points="' + area + '" fill="' + col + '" opacity=".14"/>' +
+      '<polyline points="' + line + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>' +
+      '<circle cx="' + e[0].toFixed(1) + '" cy="' + e[1].toFixed(1) + '" r="3.5" fill="' + (opts.dot || '#eef2f6') + '" stroke="' + (opts.dotStroke || '#0b1016') + '" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>';
+  };
+
+  /** Pending pallets grouped by declaration date (oldest first): [{ date, pallets, lines, unknown }]. */
+  App.pendingByDate = function (state) {
+    var by = {}, out = [];
+    ((state && state.pending) || []).forEach(function (p) {
+      if (!by[p.date]) {
+        by[p.date] = { date: p.date, pallets: 0, lines: 0, unknown: 0 };
+        out.push(by[p.date]);
+      }
+      by[p.date].lines++;
+      if (isNum(p.pallets)) by[p.date].pallets += Number(p.pallets);
+      else by[p.date].unknown++;
+    });
+    out.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    return out;
+  };
+
+  /**
+   * Vertical bar chart (SVG string) of [{ label, value, title, hot }].
+   * opts: { w, h, dark, ariaLabel }.
+   */
+  App.barChart = function (rows, opts) {
+    opts = opts || {};
+    var W = opts.w || 360, H = opts.h || 200, dark = !!opts.dark;
+    var grid = dark ? '#24303c' : '#e6ebf0', axis = dark ? '#3a4552' : '#b8c3ce';
+    var txt = dark ? '#a8b4c0' : '#4e5b68', ink = dark ? '#eef2f6' : '#17212b';
+    var cold = dark ? '#3c5a78' : '#9fb7cf', hot = dark ? '#5b9be0' : '#2a78d6';
+    var fs = opts.fontSize || 10;
+    var max = Math.max.apply(null, rows.map(function (r) { return r.value || 0; }).concat([1]));
+    var top = fs + 8, bottom = H - fs - 10, left = fs * 2.6, n = Math.max(rows.length, 1);
+    var slot = (W - left - 4) / n, barW = Math.min(fs * 2.6, slot * 0.62);
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" class="bars" role="img" aria-label="' + esc(opts.ariaLabel || '') + '">';
+    [0, Math.ceil(max / 2), max].forEach(function (t, i) {
+      if (i === 1 && (t === 0 || t === max)) return;
+      var y = bottom - t / max * (bottom - top);
+      s += '<line x1="' + left + '" x2="' + W + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '" stroke="' + grid + '"/>' +
+        '<text x="' + (left - 6) + '" y="' + (y + fs * 0.35).toFixed(1) + '" font-size="' + fs + '" text-anchor="end" fill="' + txt + '" font-family="IBM Plex Mono, monospace">' + t + '</text>';
+    });
+    rows.forEach(function (r, i) {
+      var h = (r.value || 0) / max * (bottom - top), cx = left + slot * i + slot / 2, y = bottom - h;
+      var col = r.hot ? hot : cold;
+      var rr = Math.min(4, barW / 4, h / 2);
+      s += '<g><title>' + esc(r.title || (r.label + ' : ' + r.value)) + '</title>';
+      if (h > 0) {
+        s += '<path d="M' + (cx - barW / 2).toFixed(1) + ',' + bottom + ' V' + (y + rr).toFixed(1) + ' q0,-' + rr + ' ' + rr + ',-' + rr +
+          ' H' + (cx + barW / 2 - rr).toFixed(1) + ' q' + rr + ',0 ' + rr + ',' + rr + ' V' + bottom + ' Z" fill="' + col + '"/>';
+      }
+      s += '<text x="' + cx.toFixed(1) + '" y="' + (y - 5).toFixed(1) + '" font-size="' + (fs * 1.05).toFixed(1) + '" text-anchor="middle" fill="' + ink +
+        '" font-family="IBM Plex Sans, sans-serif" font-weight="600">' + esc(r.valueText !== undefined ? r.valueText : r.value) + '</text>' +
+        '<text x="' + cx.toFixed(1) + '" y="' + (H - 4) + '" font-size="' + fs + '" text-anchor="middle" fill="' + txt + '" font-family="IBM Plex Mono, monospace">' + esc(r.label) + '</text></g>';
+    });
+    s += '<line x1="' + left + '" x2="' + W + '" y1="' + bottom + '" y2="' + bottom + '" stroke="' + axis + '"/></svg>';
+    return s;
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // 3D / isometric view of the warehouse with automatic fallback
+  // ---------------------------------------------------------------------------------------------------------------
+  /**
+   * Mounts the three.js twin (window.Twin3D) when supported, else the isometric canvas (window.IsoView).
+   * A lost WebGL context switches to the isometric view for good.
+   * opts: { autoRotate, mode: 'family'|'age'|'saturation', theme: 'dark'|'light', boost, labelPx, dockLabels, onPick(info), onSwitch(kind) }
+   * -> { kind: '3d'|'iso', update(state), resize(), setMode(mode), legend(state), highlight(article), destroy() }
+   */
+  App.mountTwin = function (container, state, opts) {
+    opts = opts || {};
+    var mode = opts.mode || 'family';
+    var current = state;
+    var impl = null;
+    var api = { kind: 'iso' };
+
+    function layoutOf(s) {
+      return (s && s.layout) || CONF.DEFAULT_LAYOUT;
+    }
+
+    function mount3d() {
+      if (!window.Twin3D || typeof window.Twin3D.supported !== 'function') return null;
+      var ok = false;
+      try {
+        ok = !!window.Twin3D.supported();
+      } catch (e) {
+        ok = false;
+      }
+      if (!ok) return null;
+      try {
+        var handle = window.Twin3D.mount(container, layoutOf(current), current, {
+          autoRotate: !!opts.autoRotate, mode: mode, theme: opts.theme || 'dark', labelPx: opts.labelPx, dockLabels: opts.dockLabels,
+          thresholds: current && current.thresholds ? current.thresholds : THR,
+          onPick: opts.onPick,
+          onContextLost: function () {
+            // The GPU dropped the context (driver reset, sleeping TV box): continue with the canvas view.
+            setTimeout(function () {
+              if (api.kind !== '3d') return;
+              try {
+                handle.destroy();
+              } catch (e) { /* already gone */ }
+              impl = mountIso();
+              api.kind = 'iso';
+              if (opts.onSwitch) opts.onSwitch('iso');
+            }, 0);
+          }
+        });
+        return handle ? {
+          kind: '3d',
+          update: function (s) { if (handle.update) handle.update(s); },
+          resize: function () { if (handle.resize) handle.resize(); },
+          setMode: function (m) { if (handle.setMode) handle.setMode(m); },
+          highlight: function (a) { if (handle.highlight) handle.highlight(a); },
+          legend: function (s) {
+            return window.Twin3D.legend ? window.Twin3D.legend(mode, s) : (window.IsoView ? window.IsoView.legend(mode, s) : []);
+          },
+          destroy: function () { if (handle.destroy) handle.destroy(); }
+        } : null;
+      } catch (e) {
+        if (window.console) console.warn('Vue 3D indisponible, vue isométrique utilisée :', e);
+        container.innerHTML = '';
+        return null;
+      }
+    }
+
+    function mountIso() {
+      var canvas = document.createElement('canvas');
+      canvas.className = 'iso-canvas';
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', 'Vue isométrique de l’entrepôt EXP2 : palettes par bloc, camions à quai, palettes en attente');
+      container.appendChild(canvas);
+      function draw() {
+        if (!window.IsoView || !current) return;
+        try {
+          window.IsoView.draw(canvas, layoutOf(current), current, { mode: mode, boost: opts.boost || 1.5 });
+        } catch (e) {
+          if (window.console) console.error(e);
+        }
+      }
+      var redraw = App.debounce(draw, 120);
+      var ro = null;
+      if (window.ResizeObserver) {
+        ro = new ResizeObserver(function () { redraw(); });
+        ro.observe(container);
+      } else {
+        window.addEventListener('resize', redraw);
+      }
+      draw();
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
+      return {
+        kind: 'iso',
+        canvas: canvas,
+        update: draw,
+        resize: draw,
+        setMode: draw,
+        highlight: function () { /* not supported by the canvas view */ },
+        legend: function (s) { return window.IsoView ? window.IsoView.legend(mode, s) : []; },
+        destroy: function () {
+          if (ro) ro.disconnect();
+          else window.removeEventListener('resize', redraw);
+          if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+        }
+      };
+    }
+
+    impl = (opts.force3d === false ? null : mount3d()) || mountIso();
+    api.kind = impl.kind;
+    api.update = function (s) {
+      current = s;
+      impl.update(s);
+    };
+    api.resize = function () { impl.resize(); };
+    api.setMode = function (m) {
+      mode = m;
+      impl.setMode(m);
+    };
+    api.legend = function (s) { return impl.legend(s || current); };
+    api.highlight = function (a) { impl.highlight(a); };
+    api.destroy = function () { impl.destroy(); };
+    return api;
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Start
+  // ---------------------------------------------------------------------------------------------------------------
+  App.start = function () {
+    var root = document.getElementById('app');
+    App.readLocation(function (loc) {
+      App.location = loc;
+      var p = loc.parameter || {};
+      if (App.mode === 'tv') {
+        if (window.PageTv) window.PageTv.mount(root, { rotate: p.rotate === '1', scene: p.scene || '' });
+      } else if (window.PagesPc) {
+        App.listenHistory();
+        var page = window.PagesPc.has(p.page) ? p.page : (window.PagesPc.has(App.initialPage) ? App.initialPage : 'lookup');
+        var params = {};
+        Object.keys(p).forEach(function (k) {
+          if (k !== 'page' && k !== 'mode') params[k] = p[k];
+        });
+        window.PagesPc.mount(root, page, params);
+      }
+      App.startPolling();
+    });
+  };
+})();
+</script>

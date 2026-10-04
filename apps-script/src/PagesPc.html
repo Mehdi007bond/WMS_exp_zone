@@ -1,0 +1,1403 @@
+<script>
+/**
+ * EXP2 Digital Twin - PC pages (light theme).
+ *
+ *   PagesPc.mount(root, page, params)   app bar + the page; in-app navigation through App.go / App.onRoute
+ *   PagesPc.has(page)
+ *
+ * Pages (?page=...): twin (Jumeau 3D), plan (Plan 2D), lookup (Recherche article), pending (En attente),
+ * docks (Quais & camions), import (Import SAP MB51), simulation (Simulation). Each page implementation is
+ * function (el, params) -> { route(params)?, update(store)?, destroy()? }.
+ * Write actions go through App.withKey (key asked once per session in a modal).
+ */
+(function () {
+  'use strict';
+  var App = window.App, f = App.fmt, esc = f.esc, h = App.h;
+  var SHEETJS_URL = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+  // Subresource Integrity of that exact file (sha384, base64): the browser refuses a file that does not match. Empty =
+  // not checked. Compute it on a PC that can reach the CDN, and paste it here:
+  //   curl -s https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js | openssl dgst -sha384 -binary | openssl base64 -A
+  var SHEETJS_SRI = '';
+  var CHUNK = 500;
+  var PAGES = [
+    { id: 'twin', label: 'Jumeau 3D' },
+    { id: 'plan', label: 'Plan 2D' },
+    { id: 'lookup', label: 'Recherche article' },
+    { id: 'pending', label: 'En attente' },
+    { id: 'docks', label: 'Quais & camions' },
+    { id: 'import', label: 'Import' },
+    { id: 'simulation', label: 'Simulation' }
+  ];
+  var P = {};
+
+  function has(id) {
+    return PAGES.some(function (p) { return p.id === id; });
+  }
+
+  function pageLabel(id) {
+    var p = PAGES.filter(function (x) { return x.id === id; })[0];
+    return p ? p.label : '';
+  }
+
+  // num(n): whole number; num(n, dec): dec decimals; num(n, undefined): up to 2 decimals when needed (quantities in KG).
+  function num(n, dec) {
+    return arguments.length > 1 ? f.num(n, dec) : f.num(n, 0);
+  }
+
+  var NO_QPP_HINT = 'Article absent de l’onglet ARTICLES : ajoutez sa quantité par palette dans ARTICLES, puis « Recalculer » (onglet ACCUEIL)';
+
+  function pal(n) {
+    return n === null || n === undefined ? '<span class="chipd c" title="' + esc(NO_QPP_HINT) + '">?</span>' : num(n);
+  }
+
+  // Note under the tables whose « Pal* » column comes from Engine.layerPallets (pallets counted per article).
+  var PAL_NOTE = '<div class="panel-note">* Palettes comptées par article (quantité ÷ quantité par palette, arrondie au-dessus) ; ' +
+    'la palette entamée est rattachée à la ligne la plus ancienne, une ligne peut donc afficher 0 ou 2.</div>';
+
+  // Server message without the title already shown above it ('Base non installée : …').
+  function bodyMessage(m) {
+    var t = String(m || '').replace(/^Base non installée\s*:\s*/, '');
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  }
+
+  function stat(l, v, s) {
+    return '<div class="stat"><div class="l">' + esc(l) + '</div><div class="v">' + v + '</div>' + (s ? '<div class="s">' + s + '</div>' : '') + '</div>';
+  }
+
+  /** Notice for pages that need data. Returns true when the page cannot render the state. */
+  function needData(el, store) {
+    if (store.state && store.status === 'ok') return false;
+    var html;
+    if (store.status === 'loading') {
+      html = '<div class="empty-card"><div class="marking"></div><h2>Chargement…</h2><p>Lecture de l’état de l’entrepôt dans Google Sheets.</p></div>';
+    } else if (store.status === 'notInstalled') {
+      html = '<div class="empty-card"><div class="marking"></div><h2>Base non installée</h2><p>' + esc(bodyMessage(store.message)) + '</p>' +
+        '<p>Ensuite, générez une simulation (page <b>Simulation</b> ou bouton <b>Générer 14 jours</b> de l’onglet ACCUEIL) ou importez les extractions SAP (page <b>Import</b>).</p></div>';
+    } else if (store.status === 'error') {
+      html = '<div class="empty-card"><div class="marking"></div><h2>Connexion impossible</h2><p>' + esc(store.message) + '</p>' +
+        '<p>Nouvel essai automatique dans la minute. <button type="button" class="btn" data-retry>Réessayer maintenant</button></p></div>';
+    } else {
+      html = '<div class="empty-card"><div class="marking"></div><h2>Aucune donnée pour l’instant</h2>' +
+        '<p>La base est installée mais ne contient encore aucun mouvement SAP. Pour une démonstration, ouvrez la page <b>Simulation</b> ' +
+        '(ou cliquez sur <b>Générer 14 jours</b> dans l’onglet ACCUEIL du classeur). Pour les données réelles, déposez les extractions MB51 sur la page <b>Import</b>.</p>' +
+        '<p><button type="button" class="btn p" data-go="simulation">Ouvrir la page Simulation</button> <button type="button" class="btn" data-go="import">Ouvrir la page Import</button></p></div>';
+    }
+    el.innerHTML = html;
+    App.$$('[data-go]', el).forEach(function (b) {
+      b.addEventListener('click', function () { App.go(b.getAttribute('data-go'), {}); });
+    });
+    var r = App.$('[data-retry]', el);
+    if (r) r.addEventListener('click', function () { App.refresh(true); });
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Shell: app bar, notices, router
+  // ---------------------------------------------------------------------------------------------------------------
+  function mount(root, page, params) {
+    root.innerHTML =
+      '<div class="pc-app">' +
+      '<header class="pc-bar"><div class="pc-brand">EXP2 <span>·</span> Jumeau</div>' +
+      '<nav class="pc-nav" aria-label="Pages">' + PAGES.map(function (p) {
+        return '<button type="button" data-page="' + p.id + '">' + esc(p.label) + '</button>';
+      }).join('') + '</nav>' +
+      '<div class="pc-fresh" data-r="fresh"><span class="dot none"></span><span class="lbl">Données SAP du</span><b>—</b></div></header>' +
+      '<div class="pc-notice sim" data-r="sim" hidden><b>DONNÉES SIMULÉES</b><span>Base d’exemple générée dans le classeur : ne pas utiliser pour décider.</span></div>' +
+      '<div class="pc-notice" data-r="notice" hidden></div>' +
+      '<main class="pc-body" data-r="body" tabindex="-1"></main>' +
+      '</div>';
+    var R = {};
+    App.$$('[data-r]', root).forEach(function (e) { R[e.getAttribute('data-r')] = e; });
+    App.$$('.pc-nav button', root).forEach(function (b) {
+      b.addEventListener('click', function () { App.go(b.getAttribute('data-page'), {}); });
+    });
+    var cur = null;
+
+    function header(store) {
+      var s = store.status === 'empty' ? null : store.state;
+      var fr = App.freshness(s);
+      var conn = App.connection();
+      var sim = !!(s && s.source === 'SIMULATION');
+      R.fresh.innerHTML = '<span class="dot ' + (conn ? 'crit' : sim ? 'ok' : fr.level) + '"></span><span class="lbl">' + (s ? esc(fr.lead) : 'Données SAP du') + '</span><b>' +
+        esc(s ? f.date(s.asOf) : '—') + '</b>' + (s && fr.imported ? '<span class="lbl"> · ' + esc(fr.verb + ' ' + fr.imported) + '</span>' : '') +
+        (sim ? '<span class="tag sim">SIMULÉES</span>' : '');
+      R.fresh.title = s ? fr.text + (fr.ago ? ' (' + fr.ago + ')' : '') + ' · ' + fr.label : 'Aucune donnée';
+      R.sim.hidden = !sim;
+      var notice = '', cls = '';
+      var thr = App.thresholds(s);
+      if (conn) {
+        cls = 'crit';
+        notice = 'Connexion au serveur perdue (' + esc(conn.message) + '). Les chiffres affichés datent de ' + esc(f.time(store.fetchedAt)) + ' ; nouvel essai automatique.';
+      } else if (s && !sim && fr.level === 'crit') {
+        cls = 'crit';
+        notice = 'Données SAP anciennes : dernier import ' + esc(fr.ago) + '. Importez les extractions du jour (page Import).';
+      } else if (s && !sim && fr.level === 'warn') {
+        cls = 'warn';
+        notice = 'Données SAP de plus de ' + esc(thr.freshWarnH) + ' h : importez les extractions du jour (page Import).';
+      }
+      R.notice.className = 'pc-notice ' + cls;
+      R.notice.innerHTML = notice;
+      R.notice.hidden = !notice;
+    }
+
+    function open(route, how) {
+      var id = has(route.page) ? route.page : 'lookup';
+      App.$$('.pc-nav button', root).forEach(function (b) {
+        if (b.getAttribute('data-page') === id) b.setAttribute('aria-current', 'page');
+        else b.removeAttribute('aria-current');
+      });
+      if (cur && cur.id === id && cur.inst.route) {
+        cur.inst.route(route.params || {});
+        return;
+      }
+      if (cur && cur.inst.destroy) cur.inst.destroy();
+      R.body.innerHTML = '';
+      document.title = pageLabel(id) + ' · EXP2 Jumeau';
+      cur = { id: id, inst: P[id](R.body, route.params || {}) || {} };
+      if (cur.inst.update) cur.inst.update(App.store);
+      if (how === 'push' || how === 'pop') {
+        try {
+          R.body.focus({ preventScroll: true });
+        } catch (e) {
+          R.body.focus();
+        }
+        window.scrollTo(0, 0);
+      }
+    }
+
+    App.onRoute(open);
+    App.onState(function (store) {
+      header(store);
+      if (cur && cur.inst.update) cur.inst.update(store);
+    });
+    App.onTick(header);
+    header(App.store);
+    App.route = { page: page, params: params || {} };
+    open(App.route, 'init');
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Jumeau 3D
+  // ---------------------------------------------------------------------------------------------------------------
+  P.twin = function (el) {
+    var MODES = [['family', 'Famille'], ['age', 'Âge'], ['saturation', 'Saturation']];
+    var mode = App.session.get('exp2.twinMode') || 'family';
+    if (!MODES.some(function (m) { return m[0] === mode; })) mode = 'family';
+    var twin = null, shown = null, picked = null;
+    el.innerHTML = '<div class="page-head"><h1>Jumeau 3D</h1><p>Palettes par bloc (position théorique, placement par famille), camions à quai, palettes en attente au convoyeur.</p></div>' +
+      '<div data-r="body"></div>';
+    var body = App.$('[data-r="body"]', el);
+
+    function legendHtml(s) {
+      var items = twin ? twin.legend(s) : (window.IsoView ? window.IsoView.legend(mode, s) : []);
+      return '<div class="legend">' + items.map(function (x) { return '<span><i style="background:' + esc(x.color) + '"></i>' + esc(x.label) + '</span>'; }).join('') +
+        '<span><i class="ghost"></i>en attente PRD2</span></div>';
+    }
+
+    function pickHtml() {
+      if (!picked) return '<p class="small">' + (twin && twin.kind === '3d' ? 'Cliquez sur une palette ou un bloc pour l\u2019identifier.' : 'Les blocs sont détaillés sur la page Plan 2D.') + '</p>';
+      var b = picked.block || {}, a = picked.article;
+      return '<dl class="kv"><dt>Bloc</dt><dd>' + esc(b.id || picked.blockId) + (b.label ? ' · ' + esc(b.label) : '') + '</dd>' +
+        '<dt>Occupation</dt><dd>' + num(b.pallets) + ' / ' + num(b.capacity) + ' pal · ' + f.pctInt(b.saturation) + '</dd>' +
+        (a ? '<dt>Article</dt><dd class="mono">' + esc(a.article) + '</dd><dt>Désignation</dt><dd>' + esc(a.designation || '') + '</dd>' +
+          '<dt>Palettes</dt><dd>' + num(a.pallets) + ' · âge max ' + f.days(a.ageMax) + '</dd>' : '') + '</dl>' +
+        '<div class="actions">' + (a ? '<button type="button" class="btn" data-go-article="' + esc(a.article) + '">Fiche article</button>' : '') +
+        '<button type="button" class="btn" data-go-block="' + esc(b.id || picked.blockId) + '">Voir le bloc sur le plan</button></div>';
+    }
+
+    function bindPick(t) {
+      App.$$('[data-go-article]', t).forEach(function (x) {
+        x.addEventListener('click', function () { App.go('lookup', { article: x.getAttribute('data-go-article') }); });
+      });
+      App.$$('[data-go-block]', t).forEach(function (x) {
+        x.addEventListener('click', function () { App.go('plan', { block: x.getAttribute('data-go-block') }); });
+      });
+    }
+
+    function side(s) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
+      var t = App.$('[data-r="side"]', body);
+      if (!t) return;
+      var docks = s.docks || [];
+      t.innerHTML = '<div class="panel"><h2>Légende<small>' + esc({ family: 'famille de produit', age: 'âge de la palette la plus ancienne', saturation: 'saturation du bloc' }[mode]) + '</small></h2>' + legendHtml(s) + '</div>' +
+        '<div class="panel" data-r="pick"><h2>Sélection</h2>' + pickHtml() + '</div>' +
+        '<div class="panel"><h2>Chiffres clés</h2><dl class="kv">' +
+        '<dt>Stock EXP2</dt><dd>' + num(k.exp2Pallets) + ' / ' + num(k.capacity) + ' pal</dd>' +
+        '<dt>Saturation</dt><dd><span class="chipd ' + App.satLevel(k.saturation, thr) + '">' + f.pct(k.saturation) + '</span></dd>' +
+        '<dt>En attente PRD2</dt><dd>' + num(k.pendingPallets) + ' pal · ' + f.days(k.oldestPendingDays) + '</dd>' +
+        '<dt>EMRT</dt><dd>' + num(k.emrtPallets) + ' pal</dd>' +
+        '<dt>Quais occupés</dt><dd>' + num(k.docksOccupied) + ' / ' + num(k.docksTotal || docks.length) + '</dd>' +
+        '<dt>Plus ancienne palette</dt><dd>' + f.days(k.oldestExp2Days) + '</dd></dl></div>' +
+        '<div class="panel"><h2>Blocs</h2><table class="tbl"><tbody>' + (s.blocks || []).map(function (b) {
+          return '<tr><td><b>' + esc(b.id) + '</b> <span class="small">' + esc(b.families || '') + '</span></td><td class="num">' + num(b.pallets) + ' / ' + num(b.capacity) +
+            '</td><td class="num"><span class="chipd ' + App.satLevel(b.saturation, thr) + '">' + f.pctInt(b.saturation) + '</span></td></tr>';
+        }).join('') + '</tbody></table></div>';
+      bindPick(t);
+    }
+
+    function setKind() {
+      var note = App.$('.twin-note', body), kind = App.$('[data-r="kind"]', body);
+      if (note) note.textContent = twin.kind === '3d' ? 'Glisser pour tourner · clic droit pour déplacer · molette pour zoomer · double-clic pour recentrer' : 'Vue isométrique (3D indisponible sur ce poste)';
+      if (kind) kind.textContent = twin.kind === '3d' ? 'Vue 3D' : 'Vue isométrique';
+    }
+
+    function build(s) {
+      body.innerHTML = '<div class="actions" style="margin-bottom:12px"><span class="small">Couleur des palettes :</span><div class="seg" role="group" aria-label="Couleur des palettes">' +
+        MODES.map(function (m) { return '<button type="button" data-mode="' + m[0] + '" aria-pressed="' + (m[0] === mode) + '">' + m[1] + '</button>'; }).join('') +
+        '</div><span class="small" data-r="kind"></span></div>' +
+        '<div class="twin-grid"><div class="twin-stage" data-r="stage"></div><div class="col" data-r="side"></div></div>';
+      var stage = App.$('[data-r="stage"]', body);
+      twin = App.mountTwin(stage, s, {
+        autoRotate: false, theme: 'dark', mode: mode, boost: 1.3,
+        onPick: function (info) {
+          picked = info;
+          if (twin) twin.highlight(info && info.article ? info.article.article : null);
+          var t = App.$('[data-r="pick"]', body);
+          if (t) {
+            t.innerHTML = '<h2>Sélection</h2>' + pickHtml();
+            bindPick(t);
+          }
+        },
+        onSwitch: function () {
+          setKind();
+          side(shown);
+        }
+      });
+      stage.appendChild(h('div', { 'class': 'twin-note' }));
+      setKind();
+      App.$$('.seg button', body).forEach(function (b) {
+        b.addEventListener('click', function () {
+          mode = b.getAttribute('data-mode');
+          App.session.set('exp2.twinMode', mode);
+          App.$$('.seg button', body).forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+          twin.setMode(mode);
+          side(shown);
+        });
+      });
+      side(s);
+    }
+
+    return {
+      update: function (store) {
+        if (needData(body, store)) {
+          if (twin) twin.destroy();
+          twin = null;
+          shown = null;
+          return;
+        }
+        if (store.state === shown) return;
+        shown = store.state;
+        if (!twin) build(shown);
+        else {
+          twin.update(shown);
+          side(shown);
+        }
+      },
+      destroy: function () {
+        if (twin) twin.destroy();
+      }
+    };
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Plan 2D
+  // ---------------------------------------------------------------------------------------------------------------
+  P.plan = function (el, params) {
+    var selected = params.block || '';
+    var shown = null;
+    el.innerHTML = '<div class="page-head"><h1>Plan 2D</h1><p>Blocs colorés selon leur saturation. Cliquez sur un bloc pour voir son contenu. Positions théoriques (placement par famille).</p></div><div data-r="body"></div>';
+    var body = App.$('[data-r="body"]', el);
+
+    function render(s) {
+      var thr = App.thresholds(s);
+      var blocks = s.blocks || [];
+      if (!selected || !blocks.some(function (b) { return b.id === selected; })) {
+        selected = blocks.slice().sort(function (a, b) { return (b.saturation || 0) - (a.saturation || 0); })[0];
+        selected = selected ? selected.id : '';
+      }
+      var sat = {};
+      blocks.forEach(function (b) { sat[b.id] = b.saturation; });
+      body.innerHTML = '<div class="plan-grid"><div class="panel plan-panel"><h2>Plan 2D · saturation par bloc<small>placement théorique par famille</small></h2>' +
+        '<svg data-r="svg" aria-label="Plan 2D de l’entrepôt EXP2, blocs colorés selon leur saturation"></svg>' +
+        '<div class="actions">' + window.Plan2D.legendHtml(thr) + '</div>' +
+        '<div class="panel-note">Seuils réglables dans le classeur. Libellés d’allée à confirmer (relevé terrain).</div></div>' +
+        '<div class="col" data-r="side"></div></div>';
+      // Full plan (dock numbers, Zone camion, zones, conveyor, dimensions): the panel is wide enough.
+      window.Plan2D.build(App.$('[data-r="svg"]', body), s.layout, {
+        compact: false, sat: sat, thresholds: thr, select: selected, trucks: s.docks || [], ghosts: (s.kpi || {}).pendingPallets || 0,
+        onBlockClick: function (id) { App.go('plan', { block: id }, { replace: true }); }
+      });
+      side(s);
+    }
+
+    function side(s) {
+      var thr = App.thresholds(s);
+      var b = (s.blocks || []).filter(function (x) { return x.id === selected; })[0];
+      var t = App.$('[data-r="side"]', body);
+      var html = '';
+      if (b) {
+        var rows = ((s.blockContents || {})[b.id] || []).slice().sort(function (x, y) { return (y.pallets - x.pallets) || ((y.ageMax || 0) - (x.ageMax || 0)); });
+        var lvl = App.satLevel(b.saturation, thr);
+        html += '<div class="panel"><h2>Bloc ' + esc(b.id) + (b.label ? ' · ' + esc(b.label) : '') + '</h2>' +
+          '<div class="blk-head"><span class="big">' + num(b.pallets) + '</span><span class="muted">/ ' + num(b.capacity) + ' emplacements</span><span class="chipd ' + lvl + '">' + f.pct(b.saturation) + '</span></div>' +
+          '<div class="bar2"><i style="width:' + Math.min(100, (b.saturation || 0) * 100) + '%;background:' + App.satColor(b.saturation, thr) + '"></i></div>' +
+          '<div class="small">Famille(s) prévue(s) : ' + esc(b.families || '—') + ' · ' + f.plural(rows.length, 'article', 'articles') + '</div>' +
+          (rows.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Article</th><th class="num">Pal</th><th class="num">Âge max</th></tr></thead><tbody>' +
+            rows.map(function (r) {
+              return '<tr class="link" data-article="' + esc(r.article) + '" tabindex="0"><td>' + esc(r.designation || '—') + '<span class="sub">' + esc(r.article) + ' · ' + esc(r.family || '') + '</span></td>' +
+                '<td class="num">' + num(r.pallets) + '</td><td class="num">' + f.days(r.ageMax) + '</td></tr>';
+            }).join('') + '</tbody></table></div>' : '<div class="empty-note">Bloc vide.</div>') + '</div>';
+      }
+      var k = s.kpi || {};
+      var tp = (s.blockContents || {})['À PLACER'] || [];
+      if (k.toPlacePallets) {
+        html += '<div class="alert-box"><b>' + f.plural(k.toPlacePallets, 'palette à placer', 'palettes à placer') + '</b> : la capacité des blocs de leur famille est dépassée' +
+          (tp.length ? ' (' + tp.slice(0, 4).map(function (x) { return esc(x.article) + ' · ' + num(x.pallets) + ' pal'; }).join(', ') + (tp.length > 4 ? '…' : '') + ')' : '') + '.</div>';
+      }
+      html += '<div class="panel"><h2>Tous les blocs</h2><table class="tbl"><tbody>' + (s.blocks || []).map(function (x) {
+        return '<tr class="link" data-block="' + esc(x.id) + '" tabindex="0"' + (x.id === selected ? ' aria-current="true"' : '') + '><td><b>' + esc(x.id) + '</b> <span class="small">' + esc(x.label || '') + '</span></td>' +
+          '<td class="num">' + num(x.pallets) + ' / ' + num(x.capacity) + '</td><td class="num"><span class="chipd ' + App.satLevel(x.saturation, thr) + '">' + f.pctInt(x.saturation) + '</span></td></tr>';
+      }).join('') + '</tbody></table></div>';
+      t.innerHTML = html;
+      App.$$('tr[data-article]', t).forEach(function (tr) {
+        function go() { App.go('lookup', { article: tr.getAttribute('data-article') }); }
+        tr.addEventListener('click', go);
+        tr.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go(); });
+      });
+      App.$$('tr[data-block]', t).forEach(function (tr) {
+        function go() { App.go('plan', { block: tr.getAttribute('data-block') }, { replace: true }); }
+        tr.addEventListener('click', go);
+        tr.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go(); });
+      });
+    }
+
+    return {
+      route: function (p) {
+        selected = p.block || selected;
+        if (shown) render(shown);
+      },
+      update: function (store) {
+        if (needData(body, store)) {
+          shown = null;
+          return;
+        }
+        if (store.state === shown) return;
+        shown = store.state;
+        render(shown);
+      }
+    };
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Recherche article
+  // ---------------------------------------------------------------------------------------------------------------
+  P.lookup = function (el, params) {
+    el.innerHTML = '<div class="page-head"><h1>Recherche article</h1><p>Stock EXP2, en attente PRD2 et EMRT, dates d’entrée (FIFO), sorties et lignes SAP d’un article.</p></div>' +
+      '<div class="search"><div class="combo"><label class="sr-only" for="lk-q">Numéro d’article ou désignation</label>' +
+      '<input id="lk-q" type="search" autocomplete="off" spellcheck="false" placeholder="N° d’article ou désignation" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="lk-sugg">' +
+      '<ul id="lk-sugg" role="listbox" aria-label="Suggestions" hidden></ul></div>' +
+      '<button type="button" class="btn p lg" data-r="go">Rechercher</button><div class="desc" data-r="desc"></div></div>' +
+      '<div data-r="out"></div>';
+    var input = App.$('#lk-q', el), list = App.$('#lk-sugg', el), out = App.$('[data-r="out"]', el), desc = App.$('[data-r="desc"]', el);
+    var items = [], active = -1, sugSeq = 0, seq = 0, current = null, article = '';
+    var picked = '';      // article just opened: no suggestion list for it (late debounced suggestions included)
+
+    function closeList() {
+      list.hidden = true;
+      input.setAttribute('aria-expanded', 'false');
+      input.removeAttribute('aria-activedescendant');
+      active = -1;
+    }
+
+    function renderList() {
+      if (!items.length) {
+        list.innerHTML = '<li class="none" role="option" aria-disabled="true">Aucun article trouvé</li>';
+      } else {
+        list.innerHTML = items.map(function (it, i) {
+          return '<li role="option" id="lk-opt-' + i + '" data-i="' + i + '" aria-selected="' + (i === active) + '"><b>' + esc(it.article) + '</b><span>' + esc(it.designation || '') + '</span></li>';
+        }).join('');
+      }
+      list.hidden = false;
+      input.setAttribute('aria-expanded', 'true');
+      if (active >= 0) input.setAttribute('aria-activedescendant', 'lk-opt-' + active);
+      else input.removeAttribute('aria-activedescendant');
+    }
+
+    var suggest = App.debounce(function () {
+      var q = input.value.trim();
+      if (q.length < 2 || q === picked) {
+        closeList();
+        return;
+      }
+      var my = ++sugSeq;
+      App.call('api_searchArticles', q).then(function (res) {
+        if (my !== sugSeq || document.activeElement !== input || input.value.trim() === picked) return;
+        items = res || [];
+        active = -1;
+        renderList();
+      }, function () { /* suggestions are optional */ });
+    }, 200);
+
+    function pick(a) {
+      picked = a;
+      sugSeq++;
+      closeList();
+      input.value = a;
+      App.go('lookup', { article: a });
+    }
+
+    function search() {
+      var q = input.value.trim();
+      if (!q) return;
+      if (active >= 0 && items[active]) {
+        pick(items[active].article);
+        return;
+      }
+      if (/^[0-9]{3,}$/.test(q.replace(/\s/g, ''))) {
+        pick(q.replace(/\s/g, ''));
+        return;
+      }
+      App.call('api_searchArticles', q).then(function (res) {
+        if (res && res.length === 1) pick(res[0].article);
+        else {
+          items = res || [];
+          active = items.length ? 0 : -1;
+          input.focus();
+          renderList();
+        }
+      }, function (err) {
+        out.innerHTML = '<div class="alert-box">' + esc(err.message) + '</div>';
+      });
+    }
+
+    input.addEventListener('input', suggest);
+    input.addEventListener('keydown', function (ev) {
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        if (list.hidden || !items.length) return;
+        ev.preventDefault();
+        active = ev.key === 'ArrowDown' ? Math.min(items.length - 1, active + 1) : Math.max(0, active - 1);
+        renderList();
+        var opt = App.$('#lk-opt-' + active, list);
+        if (opt && opt.scrollIntoView) opt.scrollIntoView({ block: 'nearest' });
+      } else if (ev.key === 'Enter') {
+        ev.preventDefault();
+        search();
+      } else if (ev.key === 'Escape') {
+        closeList();
+      }
+    });
+    input.addEventListener('blur', function () { setTimeout(closeList, 150); });
+    list.addEventListener('mousedown', function (ev) {
+      var li = ev.target.closest ? ev.target.closest('li[data-i]') : null;
+      if (!li) return;
+      ev.preventDefault();
+      pick(items[Number(li.getAttribute('data-i'))].article);
+    });
+    App.$('[data-r="go"]', el).addEventListener('click', search);
+
+    function hint() {
+      desc.innerHTML = '';
+      var s = App.store.state;
+      var oldest = [];
+      if (s && s.blockContents) {
+        var seen = {};
+        Object.keys(s.blockContents).forEach(function (b) {
+          (s.blockContents[b] || []).forEach(function (e) {
+            if (!seen[e.article] || seen[e.article].ageMax < e.ageMax) seen[e.article] = e;
+          });
+        });
+        oldest = Object.keys(seen).map(function (a) { return seen[a]; }).sort(function (a, b) { return (b.ageMax || 0) - (a.ageMax || 0); }).slice(0, 8);
+      }
+      out.innerHTML = '<div class="panel"><h2>Saisissez un numéro d’article ou un mot de la désignation</h2>' +
+        '<p class="small">Les suggestions apparaissent dès 2 caractères. Entrée ou « Rechercher » ouvre la fiche.</p>' +
+        (oldest.length ? '<p class="small">Articles avec les palettes les plus anciennes en EXP2 :</p><div class="hint-list">' + oldest.map(function (e) {
+          return '<button type="button" data-a="' + esc(e.article) + '" title="' + esc(e.designation || '') + '">' + esc(e.article) + ' · ' + f.days(e.ageMax) + '</button>';
+        }).join('') + '</div>' : '') + '</div>';
+      App.$$('[data-a]', out).forEach(function (b) {
+        b.addEventListener('click', function () { pick(b.getAttribute('data-a')); });
+      });
+    }
+
+    function load(a) {
+      var my = ++seq;
+      article = a;
+      out.innerHTML = '<div class="panel"><p class="muted"><span class="spinner"></span> Recherche de l’article ' + esc(a) + '…</p></div>';
+      App.call('api_lookup', a).then(function (res) {
+        if (my !== seq) return;
+        current = res;
+        renderResult(res);
+      }, function (err) {
+        if (my !== seq) return;
+        current = null;
+        desc.innerHTML = '';
+        out.innerHTML = '<div class="alert-box">' + esc(err.message) + '</div>';
+      });
+    }
+
+    function renderResult(res) {
+      var s = App.store.state;
+      var thr = App.thresholds(s);
+      if (!res.found) {
+        desc.innerHTML = '';
+        out.innerHTML = '<div class="empty-card"><h2>Article introuvable</h2><p>Aucune ligne SAP ni fiche ARTICLES pour « ' + esc(res.article) + ' ». Vérifiez le numéro ou cherchez par la désignation.</p></div>';
+        return;
+      }
+      var st = res.stock || {};
+      var uqs = st.uqs || ((res.movements || [])[0] || {}).uqs || '';
+      var E = st.EXP2 || { qty: 0, pallets: 0 }, Pd = st.PRD2 || { qty: 0, pallets: 0 }, M = st.EMRT || { qty: 0, pallets: 0 };
+      var fifo = (res.fifo || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.doc) < String(b.doc) ? -1 : 1; });
+      var pend = (res.pending || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+      var exits = (res.exits || []).slice().sort(function (a, b) { return a.dateOut < b.dateOut ? 1 : a.dateOut > b.dateOut ? -1 : 0; });
+      var locs = (res.locations || []).filter(function (l) { return l.block !== 'À PLACER'; });
+      var toPlace = (res.locations || []).filter(function (l) { return l.block === 'À PLACER'; })[0];
+      var blocksTxt = locs.map(function (l) { return l.block; }).join(' / ');
+      desc.innerHTML = esc(res.designation || '—') + '<small>' + (uqs ? 'UQS ' + esc(uqs) + ' · ' : '') +
+        (st.qpp ? num(st.qpp, undefined) + ' ' + esc(uqs) + ' / palette' : '<span class="bad-t">absent de l’onglet ARTICLES : ajoutez sa quantité par palette dans ARTICLES, puis « Recalculer » (onglet ACCUEIL)</span>') +
+        (st.family ? ' · famille ' + esc(st.family) : '') + '</small>';
+      var oldest = fifo[0];
+      var html = '<div class="stats">' +
+        stat('EXP2 · notre entrepôt', pal(E.pallets) + ' <small>pal</small>', num(E.qty, undefined) + ' ' + esc(uqs)) +
+        stat('En attente · PRD2', pal(Pd.pallets) + ' <small>pal</small>', num(Pd.qty, undefined) + ' ' + esc(uqs) + (pend[0] ? ' · depuis le ' + f.date(pend[0].date) : '')) +
+        stat('EMRT · externe', pal(M.pallets) + ' <small>pal</small>', num(M.qty, undefined) + ' ' + esc(uqs)) +
+        stat('Plus ancienne entrée EXP2', oldest ? num(oldest.age) + ' <small>jours</small>' : '—', oldest ? 'entrée le ' + f.date(oldest.date) : 'aucun stock en EXP2') +
+        '</div>';
+      html += '<div class="cols"><div class="col">';
+      html += '<div class="panel"><h2>Stock EXP2 par date d’entrée<small>FIFO · ' + f.plural(fifo.length, 'ligne', 'lignes') + '</small></h2>' +
+        (fifo.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date entrée</th><th>Doc.article</th><th>Origine</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Âge (j)</th><th>Emplacement</th></tr></thead><tbody>' +
+          fifo.map(function (r) {
+            return '<tr><td>' + esc(f.date(r.date)) + '</td><td class="mono">' + esc(r.doc || '—') + '</td><td>' + esc(r.origin || '') + '</td><td class="num">' + num(r.qty, undefined) +
+              '</td><td class="num">' + pal(r.pallets) + '</td><td class="num">' + num(r.age) + '</td><td>' +
+              (blocksTxt ? '<span class="tag tbd">' + esc(blocksTxt) + ' · théorique</span>' : toPlace ? '<span class="tag warn">à placer</span>' : '—') + '</td></tr>';
+          }).join('') + '</tbody></table></div>' + PAL_NOTE : '<div class="empty-note">Aucun stock de cet article en EXP2.</div>') + '</div>';
+      if (pend.length) {
+        html += '<div class="panel"><h2>En attente en PRD2<small>déclaré, pas encore transféré en EXP2</small></h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Déclarée le</th><th>Doc.article</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Attente</th></tr></thead><tbody>' +
+          pend.map(function (p) {
+            var c = p.days >= thr.pendingDaysCrit ? 'c' : p.days >= thr.pendingDaysWarn ? 'w' : 'n';
+            return '<tr><td>' + esc(f.date(p.date)) + '</td><td class="mono">' + esc(p.doc || '') + '</td><td class="num">' + num(p.qty, undefined) + '</td><td class="num">' + pal(p.pallets) +
+              '</td><td class="num"><span class="chipd ' + c + '">' + f.days(p.days) + '</span></td></tr>';
+          }).join('') + '</tbody></table></div>' + PAL_NOTE + '</div>';
+      }
+      html += '<div class="panel"><h2>Sorties d’EXP2<small>date d’entrée → date de sortie · ' + f.plural(exits.length, 'ligne', 'lignes') + '</small></h2>' +
+        (exits.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Entrée</th><th>Sortie</th><th class="num">Qté</th><th class="num">Pal (équiv.)</th><th>Destination</th><th class="num">Séjour (j)</th><th>Doc.article</th></tr></thead><tbody>' +
+          exits.map(function (r) {
+            return '<tr><td>' + esc(f.date(r.dateIn)) + '</td><td>' + esc(f.date(r.dateOut)) + '</td><td class="num">' + num(r.qty, undefined) + '</td><td class="num">' +
+              (r.pallets === null || r.pallets === undefined ? '?' : num(r.pallets, 1)) + '</td><td>' + esc(r.destination || '') + '</td><td class="num">' + num(r.stay) +
+              '</td><td class="mono">' + esc(r.doc || '') + '</td></tr>';
+          }).join('') + '</tbody></table></div><div class="panel-note">Pal (équiv.) : quantité sortie ÷ quantité par palette (0,4 = 40 % d’une palette).</div>' :
+          '<div class="empty-note">Aucune sortie d’EXP2 sur la période.</div>') + '</div>';
+      html += '</div><div class="col">';
+      html += '<div class="panel mini"><h2>Où est-il ?<small>position théorique</small></h2><svg data-r="mini" role="img" aria-label="Plan miniature : blocs de l’article en surbrillance"></svg>' +
+        '<div class="small">' + (locs.length ? locs.map(function (l) { return 'Bloc <b>' + esc(l.block) + '</b> : ' + f.plural(l.pallets, 'palette', 'palettes') + ' (âge max ' + f.days(l.ageMax) + ')'; }).join('<br>') :
+          'Aucune palette placée dans un bloc.') + (toPlace ? '<br><span class="bad-t">' + f.plural(toPlace.pallets, 'palette', 'palettes') + ' à placer (blocs de la famille pleins).</span>' : '') +
+        '<br>Position exacte dès que les règles de placement seront fournies.</div></div>';
+      var mv = res.movements || [];
+      html += '<div class="panel"><h2>Lignes SAP<small>MB51 · ' + f.plural(res.movementsTotal || mv.length, 'ligne', 'lignes') + (mv.length < (res.movementsTotal || 0) ? ', ' + mv.length + ' affichées' : '') + '</small></h2>' +
+        (mv.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date cpt. · Doc.</th><th>MvT</th><th>Mag.</th><th class="num">Qté</th><th>Saisie</th></tr></thead><tbody>' +
+          mv.map(function (m) {
+            return '<tr><td>' + esc(f.date(m.date)) + '<span class="sub">' + esc(m.doc) + '</span></td><td class="mono" title="' + esc(m.text || '') + '">' + esc(m.mvt) + (m.s ? ' ' + esc(m.s) : '') +
+              '</td><td>' + esc(m.magasin) + '</td><td class="num">' + num(m.qty, undefined) + '</td><td>' + esc(m.user || '') + '</td></tr>';
+          }).join('') + '</tbody></table></div>' : '<div class="empty-note">Aucune ligne SAP.</div>') + '</div>';
+      html += '</div></div>';
+      out.innerHTML = html;
+      var mini = App.$('[data-r="mini"]', out);
+      var layout = (s && s.layout) || App.CFG.DEFAULT_LAYOUT;
+      var hl = locs.map(function (l) { return l.block; });
+      if (!hl.length && st.family && s) {
+        hl = (s.blocks || []).filter(function (b) { return String(b.families || '').split(/[,\s]+/).indexOf(st.family) >= 0; }).map(function (b) { return b.id; });
+      }
+      window.Plan2D.build(mini, layout, { compact: true, highlight: hl.length ? hl : ['__none__'], trucks: s ? s.docks : undefined });
+    }
+
+    function route(p) {
+      var a = p.article ? String(p.article) : '';
+      if (!a) {
+        article = '';
+        picked = '';
+        current = null;
+        hint();
+        input.focus();
+        return;
+      }
+      input.value = a;
+      picked = a;
+      sugSeq++;
+      closeList();
+      load(a);
+    }
+
+    route(params || {});
+    if (!params || !params.article) setTimeout(function () { input.focus(); }, 0);
+
+    return {
+      route: route,
+      update: function (store) {
+        if (!article) {
+          if (store.changed) hint();
+          return;
+        }
+        if (store.changed && current && store.versions && current.version !== store.versions.data) load(article);
+      }
+    };
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // En attente
+  // ---------------------------------------------------------------------------------------------------------------
+  P.pending = function (el) {
+    var shown = null;
+    el.innerHTML = '<div class="page-head"><h1>En attente</h1><p>Déclarées en production (PRD2), pas encore transférées en EXP2. La plus ancienne d’abord.</p></div><div data-r="body"></div>';
+    var body = App.$('[data-r="body"]', el);
+
+    function render(s) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
+      var rows = (s.pending || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : (b.days - a.days); });
+      var arts = {};
+      rows.forEach(function (p) { arts[p.article] = true; });
+      var byDate = App.pendingByDate(s);
+      var today = byDate.filter(function (d) { return d.date === s.asOf; })[0];
+      var unknown = rows.filter(function (p) { return p.pallets === null || p.pallets === undefined; }).length;
+      var html = '<div class="stats">' +
+        stat('Palettes en attente (PRD2)', num(k.pendingPallets) + ' <small>pal</small>', f.plural(rows.length, 'ligne', 'lignes') + ' · ' + f.plural(Object.keys(arts).length, 'article', 'articles')) +
+        stat('Plus ancienne attente', num(k.oldestPendingDays) + ' <small>jours</small>', rows[0] ? 'déclarée le ' + f.date(rows[0].date) : '—') +
+        stat('En attente depuis ≥ ' + thr.pendingDaysWarn + ' jours', num(k.stuckPendingLines) + ' <small>lignes</small>', 'seuil : ' + thr.pendingDaysWarn + ' jours') +
+        stat('Déclarées le ' + f.date(s.asOf) + ', pas encore en EXP2', num(today ? today.pallets : 0) + ' <small>pal</small>', 'normal en fin de journée') +
+        '</div>';
+      var chart = byDate.map(function (d) {
+        return { label: f.dateShort(d.date), value: d.pallets, hot: d.date === s.asOf, title: f.date(d.date) + ' : ' + d.pallets + ' pal en attente (' + f.plural(d.lines, 'ligne', 'lignes') + ')' };
+      });
+      html += '<div class="cols side-400"><div class="panel"><h2>Déclarées en PRD2, pas encore transférées en EXP2<small>la plus ancienne d’abord · cliquez sur une ligne pour ouvrir la fiche article</small></h2>' +
+        (rows.length ? '<div class="tbl-wrap tall"><table class="tbl"><thead><tr><th>Article</th><th>Désignation</th><th>Déclarée le</th><th>Doc.article</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Attente</th></tr></thead><tbody>' +
+          rows.map(function (p) {
+            var c = p.days >= thr.pendingDaysCrit ? 'c' : p.days >= thr.pendingDaysWarn ? 'w' : 'n';
+            return '<tr class="link" tabindex="0" data-article="' + esc(p.article) + '"><td class="mono">' + esc(p.article) + '</td><td>' + esc(p.designation || '') + '</td><td>' + esc(f.date(p.date)) +
+              '</td><td class="mono">' + esc(p.doc || '') + '</td><td class="num">' + num(p.qty, undefined) + '</td><td class="num">' + pal(p.pallets) + '</td><td class="num"><span class="chipd ' + c + '">' + f.days(p.days) + '</span></td></tr>';
+          }).join('') + '</tbody></table></div>' + PAL_NOTE : '<div class="empty-note">Aucune palette en attente : tout ce qui a été déclaré est transféré en EXP2.</div>') +
+        (unknown ? '<div class="panel-note">« ? » = ' + esc(NO_QPP_HINT.charAt(0).toLowerCase() + NO_QPP_HINT.slice(1)) + ' (' + f.plural(unknown, 'ligne', 'lignes') + ').</div>' : '') + '</div>' +
+        '<div class="panel"><h2>Palettes en attente par date de déclaration</h2>' +
+        (chart.length ? App.barChart(chart, { w: 360, h: 220, ariaLabel: 'Palettes en attente par date de déclaration' }) : '<div class="empty-note">—</div>') +
+        '<div class="panel-note">La barre bleue est la journée en cours : ces palettes sont normalement transférées dans les heures qui suivent. Les autres méritent un contrôle.</div></div></div>';
+      body.innerHTML = html;
+      App.$$('tr[data-article]', body).forEach(function (tr) {
+        function go() { App.go('lookup', { article: tr.getAttribute('data-article') }); }
+        tr.addEventListener('click', go);
+        tr.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go(); });
+      });
+    }
+
+    return {
+      update: function (store) {
+        if (needData(body, store)) {
+          shown = null;
+          return;
+        }
+        if (store.state === shown) return;
+        shown = store.state;
+        render(shown);
+      }
+    };
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Quais & camions
+  // ---------------------------------------------------------------------------------------------------------------
+  // Stored values (QUAIS_CAMIONS); the form and the screens show App.statusLabel / App.dockLabel.
+  var DOCK_STATUSES = ['Libre', 'En attente', 'Chargement', 'Chargé'];
+  var TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+  P.docks = function (el) {
+    var shown = null;
+    el.innerHTML = '<div class="page-head"><h1>Quais &amp; camions</h1><p>Mis à jour par l’équipe expédition. La TV affiche le changement dans la minute.</p></div><div data-r="body"></div>';
+    var body = App.$('[data-r="body"]', el);
+
+    function render(s) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
+      var docks = s.docks || [];
+      var loaded = 0, planned = 0;
+      docks.forEach(function (d) {
+        if (App.dockKind(d) === 'free') return;
+        loaded += Number(d.loaded) || 0;
+        planned += Number(d.planned) || 0;
+      });
+      var total = k.docksTotal || docks.length;
+      var html = '<div class="stats">' +
+        stat('Quais occupés', num(k.docksOccupied) + ' <small>/ ' + num(total) + '</small>', f.plural(total - (k.docksOccupied || 0), 'quai libre', 'quais libres')) +
+        stat('Saturation zone quai', f.pct(k.dockSaturation || 0), num(k.docksStaged) + ' / ' + num(k.docksCapacity) + ' pal préparées devant les quais') +
+        stat('Chargement en cours', num(loaded) + ' <small>/ ' + num(planned) + ' pal</small>', 'chargées / prévues, camions à quai') +
+        stat('Capacité d’une semi-remorque', num(App.CFG.TRUCK_CAPACITY || 33) + ' <small>pal EUR</small>', 'remorque de 13,6 m') +
+        '</div>';
+      html += '<div class="panel"><h2>Quais d’expédition<small>Modifier : statut, camion, palettes chargées, zone quai</small></h2><div class="docks-list">' +
+        docks.map(function (d, i) {
+          var kind = App.dockKind(d), free = kind === 'free';
+          var cap = Number(d.capacity) || 0, st = Number(d.staged) || 0;
+          var lp = !free && d.planned ? Math.min(100, (Number(d.loaded) || 0) / d.planned * 100) : 0;
+          var sp = cap ? Math.min(100, st / cap * 100) : 0;
+          var times = [];
+          if (!free && d.arrival) times.push('arrivé ' + esc(d.arrival));
+          if (!free && d.departure) times.push('départ prévu ' + esc(d.departure));
+          return '<div class="dock"><div class="q">' + esc(f.quai(d.quai)) + '</div>' + App.truckSvg(d, false) +
+            '<div>' + (free ? '<span class="muted">—</span>' : '<b>' + esc(d.truck || 'Camion') + '</b>' + (d.carrier ? ' · ' + esc(d.carrier) : '') +
+              (times.length ? '<small>' + times.join(' · ') + '</small>' : '')) + '</div>' +
+            '<div><span class="chipd ' + App.dockChip(d) + '" title="' + esc(d.status || 'Libre') + '">' + esc(App.dockLabel(d)) + '</span></div>' +
+            '<div>Palettes <b>' + (free ? '—' : num(d.loaded || 0) + ' / ' + num(d.planned || 0)) + '</b><div class="bar2"><i style="width:' + lp + '%;background:#2a78d6"></i></div></div>' +
+            '<div>Zone quai <b>' + num(st) + ' / ' + num(cap) + '</b><div class="bar2"><i style="width:' + sp + '%;background:' +
+              App.satColor(cap ? st / cap : 0, { satWarn: thr.dockStagingWarn, satCrit: 1 }) + '"></i></div></div>' +
+            '<button type="button" class="btn' + (free ? ' p' : '') + '" data-i="' + i + '" aria-label="' + (free ? 'Affecter un camion au quai ' : 'Modifier le quai ') + esc(f.quai(d.quai)) + '">' +
+              (free ? 'Affecter' : 'Modifier') + '</button></div>';
+        }).join('') + '</div></div>';
+      body.innerHTML = html;
+      App.$$('button[data-i]', body).forEach(function (b) {
+        b.addEventListener('click', function () { open(docks[Number(b.getAttribute('data-i'))]); });
+      });
+    }
+
+    // The key is checked before the form is filled in (one dialog at a time); save() asks again only if it changed.
+    function open(d) {
+      App.withKey('docks', function (key) { return App.call('api_checkKey', key, 'docks'); }).then(function () {
+        edit(d);
+      }, function (err) {
+        if (err && !err.cancelled) App.toast(err.message, 'error');
+      });
+    }
+
+    function edit(d) {
+      var free = App.dockKind(d) === 'free';
+      var statuses = DOCK_STATUSES.slice();
+      if (d.status && statuses.indexOf(d.status) < 0) statuses.push(d.status);
+      var current = free ? (DOCK_STATUSES[1]) : d.status;
+      var form = h('form', { 'class': 'form', autocomplete: 'off', novalidate: true });
+      var cabs = Object.keys(App.CABS);
+      form.innerHTML =
+        '<div class="grid2">' +
+        '<label class="field"><span>Statut du quai</span><select name="status">' + statuses.map(function (x) {
+          return '<option value="' + esc(x) + '"' + (x === current ? ' selected' : '') + '>' + esc(App.statusLabel(x)) + '</option>';
+        }).join('') + '</select></label>' +
+        '<label class="field"><span>Couleur cabine</span><select name="color" data-truck><option value="">—</option>' + cabs.map(function (c) {
+          return '<option value="' + esc(c) + '"' + (c === d.color ? ' selected' : '') + '>' + esc(c.charAt(0).toUpperCase() + c.slice(1)) + '</option>';
+        }).join('') + '</select></label>' +
+        '<label class="field"><span>Camion (immatriculation ou n°)</span><input name="truck" maxlength="30" data-truck value="' + esc(d.truck || '') + '"></label>' +
+        '<label class="field"><span>Transporteur</span><input name="carrier" maxlength="60" data-truck value="' + esc(d.carrier || '') + '"></label>' +
+        // Plain text hh:mm: a time input shows « 09:30 AM » on a Chrome set to English.
+        '<label class="field"><span>Arrivée (hh:mm)</span><input name="arrival" inputmode="numeric" pattern="([01]\\d|2[0-3]):[0-5]\\d" placeholder="hh:mm" maxlength="5" data-truck value="' + esc(d.arrival || '') + '"></label>' +
+        '<label class="field"><span>Départ prévu (hh:mm)</span><input name="departure" inputmode="numeric" pattern="([01]\\d|2[0-3]):[0-5]\\d" placeholder="hh:mm" maxlength="5" data-truck value="' + esc(d.departure || '') + '"></label>' +
+        '<label class="field"><span>Palettes prévues</span><input name="planned" type="number" min="0" max="99" step="1" data-truck value="' + esc(d.planned === null || d.planned === undefined ? '' : d.planned) + '"></label>' +
+        '<label class="field"><span>Palettes chargées</span><input name="loaded" type="number" min="0" max="99" step="1" data-truck value="' + esc(d.loaded === null || d.loaded === undefined ? '' : d.loaded) + '"></label>' +
+        '<label class="field"><span>Palettes en zone quai</span><input name="staged" type="number" min="0" max="999" step="1" value="' + esc(d.staged || 0) + '"></label>' +
+        '<label class="field"><span>Capacité zone quai (pal)</span><input name="capacity" type="number" min="0" max="999" step="1" value="' + esc(d.capacity || '') + '"></label>' +
+        '</div><p class="small">Statut « Libre » : le camion est retiré du quai. Une ligne est ajoutée à l’historique des visites camions.</p>';
+      function sync() {
+        var isFree = form.elements.status.value === 'Libre';
+        App.$$('[data-truck]', form).forEach(function (x) { x.disabled = isFree; });
+      }
+      form.elements.status.addEventListener('change', sync);
+      sync();
+      // An error message goes away as soon as the field is corrected.
+      form.addEventListener('input', function () { m.setError(''); });
+      function read() {
+        var e = form.elements;
+        return {
+          quai: d.quai, status: e.status.value, truck: e.truck.value.trim(), carrier: e.carrier.value.trim(), color: e.color.value,
+          arrival: e.arrival.value.trim(), departure: e.departure.value.trim(), planned: e.planned.value, loaded: e.loaded.value,
+          staged: e.staged.value, capacity: e.capacity.value
+        };
+      }
+      function check(x) {
+        if (x.status !== 'Libre' && !x.truck) return 'Indiquez le camion (ou choisissez le statut « Libre »).';
+        if (x.status !== 'Libre' && x.arrival && !TIME_RE.test(x.arrival)) return 'Heure d’arrivée au format hh:mm (ex. 09:30).';
+        if (x.status !== 'Libre' && x.departure && !TIME_RE.test(x.departure)) return 'Heure de départ au format hh:mm (ex. 11:00).';
+        var pl = x.planned === '' ? null : Number(x.planned), lo = x.loaded === '' ? null : Number(x.loaded);
+        if (x.status !== 'Libre' && pl !== null && lo !== null && lo > pl) return 'Palettes chargées (' + lo + ') supérieures aux palettes prévues (' + pl + ').';
+        return '';
+      }
+      var m = App.modal({
+        title: 'Quai ' + f.quai(d.quai) + (free ? ' · affecter un camion' : ' · modifier'),
+        body: form,
+        wide: true,
+        actions: [{ label: 'Annuler', kind: 'ghost', value: null }, { label: 'Enregistrer', kind: 'primary', value: 'save', submit: true }],
+        onAction: function () { return save(); }
+      });
+      function save() {
+        var dock = read();
+        var problem = check(dock);
+        if (problem) {
+          m.setError(problem);
+          return false;
+        }
+        return App.withKey('docks', function (key) { return App.call('api_saveDock', key, dock); }).then(function (res) {
+          App.toast((res && res.message) || 'Quai enregistré.', 'ok');
+          App.refresh(true);
+          return true;
+        }, function (err) {
+          if (err && err.cancelled) return false;
+          throw err;
+        });
+      }
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var r = save();
+        if (r && r.then) {
+          m.setBusy(true);
+          r.then(function (ok) {
+            m.setBusy(false);
+            if (ok) m.close('save');
+          }, function (err) {
+            m.setBusy(false);
+            m.setError(err.message);
+          });
+        }
+      });
+    }
+
+    return {
+      update: function (store) {
+        if (needData(body, store)) {
+          shown = null;
+          return;
+        }
+        if (store.state === shown) return;
+        shown = store.state;
+        render(shown);
+      }
+    };
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Import SAP (MB51)
+  // ---------------------------------------------------------------------------------------------------------------
+  var LINE_FIELDS = ['article', 'division', 'magasin', 'mvt', 'text', 's', 'doc', 'poste', 'date', 'qty', 'uqs', 'designation', 'user', 'row', 'rank'];
+
+  function decodeText(buf) {
+    var bytes = new Uint8Array(buf);
+    if (window.TextDecoder) {
+      try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } catch (e) {
+        try {
+          return new TextDecoder('windows-1252').decode(bytes);
+        } catch (e2) { /* fall through */ }
+      }
+    }
+    var s = '';
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return s;
+  }
+
+  function readFileBuffer(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.onerror = function () { reject(new Error('Lecture du fichier impossible : ' + file.name)); };
+      r.readAsArrayBuffer(file);
+    });
+  }
+
+  function isTextFile(name) {
+    return /\.(txt|csv|tsv|prn|dat)$/i.test(name);
+  }
+
+  P['import'] = function (el) {
+    var files = [];       // [{ name, size, status: reading|ok|error, rows, sheet, error }]
+    var batch = null;     // Norm.normalizeBatch result
+    var sending = false;
+    var result = null;
+    var libState = window.XLSX ? 'ready' : 'loading';
+    var libError = '';
+    var gone = false;
+
+    el.innerHTML = '<div class="page-head"><h1>Import des extractions SAP</h1><p>Déposez les fichiers MB51 exportés de SAP. Le type est reconnu par les colonnes ; rien n’est enregistré avant « Enregistrer dans la base ».</p></div>' +
+      '<div class="small" data-r="lib"></div>' +
+      '<div data-r="simwarn"></div>' +
+      '<label class="drop" data-r="drop" tabindex="0"><input type="file" data-r="input" multiple accept=".xlsx,.xls,.xlsm,.txt,.csv,.tsv" class="sr-only">' +
+      '<b>Glissez les fichiers ici ou cliquez pour les choisir</b><span>MB51 : déclarations (101), transferts (311 / 312), sorties (601) · .xlsx, .xls, .txt (texte avec tabulations), .csv</span></label>' +
+      '<div class="files" data-r="files"></div><div data-r="result"></div><div data-r="preview"></div>';
+    var R = {};
+    App.$$('[data-r]', el).forEach(function (e) { R[e.getAttribute('data-r')] = e; });
+
+    function libLine() {
+      if (libState === 'ready') R.lib.innerHTML = '<span class="ok-t">●</span> Lecture des fichiers Excel prête.';
+      else if (libState === 'loading') R.lib.innerHTML = '<span class="spinner"></span> Chargement de la bibliothèque de lecture Excel (SheetJS)…';
+      else {
+        R.lib.innerHTML = '<div class="alert-box"><b>Lecture Excel indisponible</b> : la bibliothèque SheetJS n’a pas pu être chargée (' + esc(libError) + '). ' +
+          'Solution : dans SAP, exportez la liste en <b>Fichier local › Texte avec tabulations</b> (.txt), ou enregistrez le fichier Excel en <b>CSV</b>, puis déposez-le ici. ' +
+          '<button type="button" class="btn" data-retry-lib>Réessayer</button></div>';
+        var b = App.$('[data-retry-lib]', R.lib);
+        if (b) b.addEventListener('click', loadLib);
+      }
+    }
+
+    function loadLib() {
+      if (window.XLSX) {
+        libState = 'ready';
+        libLine();
+        return Promise.resolve(window.XLSX);
+      }
+      libState = 'loading';
+      libLine();
+      return App.loadScript(SHEETJS_URL, 'XLSX', 20000, SHEETJS_SRI).then(function (x) {
+        libState = 'ready';
+        libLine();
+        return x;
+      }, function (err) {
+        libState = 'error';
+        libError = err.message.replace(/^Bibliothèque non chargée \(([^)]*)\).*$/, '$1');
+        libLine();
+        throw err;
+      });
+    }
+    loadLib().then(function () {
+      // Files dropped while the library was loading.
+      files.filter(function (x) { return x.status === 'waitlib'; }).forEach(function (x) { parse(x); });
+    }, function () {
+      files.filter(function (x) { return x.status === 'waitlib'; }).forEach(function (x) {
+        x.status = 'error';
+        x.error = 'Fichier Excel illisible sans la bibliothèque SheetJS : exportez-le en texte avec tabulations ou en CSV.';
+      });
+      renderFiles();
+    });
+
+    function renderFiles() {
+      R.files.innerHTML = files.map(function (x, i) {
+        var cls = x.status === 'ok' ? 'ok' : x.status === 'error' ? 'err' : 'busy';
+        var r = batch && x.status === 'ok' ? batch.files[x.batchIndex] : null;
+        var info;
+        if (x.status === 'reading' || x.status === 'waitlib') info = '<span><span class="spinner"></span> lecture…</span>';
+        else if (x.status === 'error') info = '<span class="bad-t">' + esc(x.error) + '</span>';
+        else if (r && !r.ok) info = '<span class="bad-t">✗ ' + esc(r.error) + '</span>';
+        else if (r) {
+          var sm = r.summary || {};
+          var per = sm.dateMin ? (sm.dateMin === sm.dateMax ? f.date(sm.dateMin) : f.date(sm.dateMin) + ' → ' + f.date(sm.dateMax)) : '';
+          info = '<span class="ok-t">✓ MB51 reconnu · en-tête ligne ' + (r.headerRow + 1) + (x.sheet ? ' · feuille « ' + esc(x.sheet) + ' »' : '') + '</span>' +
+            '<span>' + f.plural(sm.read || 0, 'ligne lue', 'lignes lues') + ' · ' + f.plural(r.fresh ? r.fresh.length : sm.valid, 'valide', 'valides') +
+            (sm.rejected ? ' · <b class="bad-t">' + f.plural(sm.rejected, 'rejetée', 'rejetées') + '</b>' : '') + '</span>' +
+            (per ? '<span>' + esc(per) + '</span>' : '');
+        } else info = '<span>' + f.plural(x.rows ? x.rows.length : 0, 'ligne', 'lignes') + '</span>';
+        return '<div class="file ' + (r && !r.ok ? 'err' : cls) + '"><b>' + esc(x.name) + '</b><span>' + esc(f.num(Math.round(x.size / 1024), 0)) + ' Ko</span>' + info +
+          (sending ? '' : '<div><button type="button" class="btn" data-del="' + i + '" aria-label="Retirer ' + esc(x.name) + '">Retirer</button></div>') + '</div>';
+      }).join('');
+      App.$$('[data-del]', R.files).forEach(function (b) {
+        b.addEventListener('click', function () {
+          files.splice(Number(b.getAttribute('data-del')), 1);
+          analyse();
+        });
+      });
+    }
+
+    function addFiles(list) {
+      if (sending) return;
+      result = null;
+      R.result.innerHTML = '';
+      Array.prototype.forEach.call(list || [], function (file) {
+        var x = { file: file, name: file.name, size: file.size, status: 'reading', rows: null, sheet: '', error: '' };
+        files.push(x);
+        parse(x);
+      });
+      renderFiles();
+    }
+
+    function parse(x) {
+      var text = isTextFile(x.name);
+      if (!text && !window.XLSX) {
+        x.status = libState === 'error' ? 'error' : 'waitlib';
+        if (x.status === 'error') x.error = 'Fichier Excel illisible sans la bibliothèque SheetJS : exportez-le en texte avec tabulations ou en CSV.';
+        renderFiles();
+        return;
+      }
+      x.status = 'reading';
+      readFileBuffer(x.file).then(function (buf) {
+        if (text) {
+          x.rows = Norm.textToRows(decodeText(buf));
+        } else {
+          var wb = window.XLSX.read(new Uint8Array(buf), { type: 'array', cellDates: false, dense: false });
+          var pickName = wb.SheetNames[0], rows = null;
+          for (var i = 0; i < wb.SheetNames.length; i++) {
+            var rr = window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[i]], Norm.SHEETJS_OPTIONS || { header: 1, raw: true, defval: null, blankrows: true });
+            if (Norm.detectHeaderRow(rr) >= 0) {
+              pickName = wb.SheetNames[i];
+              rows = rr;
+              break;
+            }
+            if (!rows) rows = rr;
+          }
+          x.rows = rows || [];
+          x.sheet = wb.SheetNames.length > 1 ? pickName : '';
+        }
+        x.status = 'ok';
+      }).catch(function (err) {
+        x.status = 'error';
+        x.error = 'Fichier illisible : ' + (err && err.message ? err.message : String(err));
+      }).then(function () {
+        if (!gone) analyse();
+      });
+    }
+
+    // Normalises every readable file with the same Norm code as the server (header synonyms, numbers, dates,
+    // duplicates inside the batch, 311/312 legs that do not cancel out).
+    function analyse() {
+      var ready = files.filter(function (x) { return x.status === 'ok'; });
+      var waiting = files.some(function (x) { return x.status === 'reading' || x.status === 'waitlib'; });
+      batch = null;
+      if (ready.length && !waiting) {
+        ready.forEach(function (x, i) { x.batchIndex = i; });
+        try {
+          batch = Norm.normalizeBatch(ready.map(function (x) { return { name: x.name, rows: x.rows }; }), { plant: App.CFG.PLANT || 'TA11' });
+        } catch (e) {
+          batch = null;
+          R.preview.innerHTML = '<div class="alert-box">Analyse impossible : ' + esc(e.message) + '</div>';
+          renderFiles();
+          return;
+        }
+      }
+      renderFiles();
+      renderPreview(waiting);
+    }
+
+    function flagLabel(code) {
+      return { TRANSFERT_ORPHELIN: 'Transfert orphelin (311/312 sans ligne opposée)', ANTIDATE: 'Saisie antidatée' }[code] || code;
+    }
+
+    function renderPreview(waiting) {
+      if (!batch) {
+        R.preview.innerHTML = waiting ? '<div class="panel"><p class="muted"><span class="spinner"></span> Lecture des fichiers…</p></div>' : '';
+        return;
+      }
+      var S = batch.summary;
+      var lines = batch.lines || [];
+      var html = '<div class="row2"><div class="panel"><h2>Résultat de l’analyse<small>rien n’est encore enregistré</small></h2>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Fichier</th><th>Période</th><th class="num">Lues</th><th class="num">Valides</th><th class="num">Doublons</th><th class="num">Rejetées</th><th class="num">Ignorées</th><th class="num">Alertes</th></tr></thead><tbody>' +
+        batch.files.map(function (r) {
+          var s = r.summary || {};
+          var period = s.dateMin ? (s.dateMin === s.dateMax ? f.date(s.dateMin) : f.date(s.dateMin) + ' → ' + f.date(s.dateMax)) : '—';
+          return '<tr><td>' + esc(r.file) + (r.ok ? '' : '<span class="sub bad-t">' + esc(r.error) + '</span>') + '</td><td>' + esc(period) + '</td><td class="num">' + num(s.read) +
+            '</td><td class="num">' + num(r.fresh ? r.fresh.length : s.valid) + '</td><td class="num">' + num(r.duplicates ? r.duplicates.length : 0) + '</td><td class="num">' + num(s.rejected) +
+            '</td><td class="num">' + num(s.skipped ? s.skipped.total : 0) + '</td><td class="num">' + num(s.flags) + '</td></tr>';
+        }).join('') +
+        '<tr><td><b>Total</b></td><td>' + esc(S.dateMin ? f.date(S.dateMin) + ' → ' + f.date(S.dateMax) : '—') + '</td><td class="num"><b>' + num(S.read) + '</b></td><td class="num"><b>' + num(lines.length) +
+        '</b></td><td class="num">' + num((batch.duplicates || []).length) + '</td><td class="num">' + num(S.rejected) + '</td><td class="num">' + num(S.skipped.total) + '</td><td class="num">' + num(S.flags) + '</td></tr>' +
+        '</tbody></table></div>' +
+        '<div class="panel-note">Les lignes déjà présentes dans la base sont reconnues par le serveur et ignorées : réimporter un fichier est sans risque.</div>' +
+        '<div class="actions"><button type="button" class="btn p lg" data-save' + (lines.length && !sending ? '' : ' disabled') + '>Enregistrer dans la base (' + f.plural(lines.length, 'ligne', 'lignes') + ')</button>' +
+        '<button type="button" class="btn" data-clear' + (sending ? ' disabled' : '') + '>Tout retirer</button></div>' +
+        '<div data-r="progress"></div></div>';
+      // Checks
+      var checks = [];
+      var bad = batch.files.filter(function (r) { return !r.ok; });
+      checks.push(bad.length ? { l: 'c', t: f.plural(bad.length, 'fichier non reconnu', 'fichiers non reconnus') + ' : ' + bad.map(function (r) { return esc(r.error); }).join(' ') }
+        : { l: '', t: 'Colonnes MB51 reconnues dans ' + f.plural(batch.files.length, 'fichier', 'fichiers') + ' (Article, Magasin, MvT, Doc.article, Date cpt., Qté).' });
+      checks.push(S.rejected ? { l: 'w', t: f.plural(S.rejected, 'ligne rejetée', 'lignes rejetées') + ' (autre division que ' + esc(App.CFG.PLANT || 'TA11') + ', valeur illisible) : détail ci-dessous.' }
+        : { l: '', t: 'Aucune ligne rejetée (division ' + esc(App.CFG.PLANT || 'TA11') + ', dates et quantités lisibles).' });
+      checks.push(S.skipped.total ? { l: '', t: f.plural(S.skipped.total, 'ligne ignorée', 'lignes ignorées') + ' : sous-totaux, en-têtes répétés, lignes vides.' } : null);
+      checks.push((batch.duplicates || []).length ? { l: '', t: f.plural(batch.duplicates.length, 'ligne en double', 'lignes en double') + ' entre les fichiers déposés : comptée(s) une seule fois.' } : null);
+      var codes = S.flagCodes || {};
+      Object.keys(codes).forEach(function (c) {
+        checks.push({ l: 'w', t: f.plural(codes[c], 'ligne', 'lignes') + ' : ' + esc(flagLabel(c)) + '. Lignes acceptées, à vérifier.' });
+      });
+      checks.push({ l: '', t: f.plural(S.auto, 'saisie automatique', 'saisies automatiques') + ' (Auto) · ' + f.plural(S.manual, 'saisie manuelle', 'saisies manuelles') + ' (Manuel).' });
+      (S.warnings || []).forEach(function (w) { checks.push({ l: 'w', t: esc(w) }); });
+      html += '<div class="panel"><h2>Contrôles</h2><div class="checks">' + checks.filter(Boolean).map(function (c) {
+        return '<div class="check"><span class="ic ' + c.l + '">' + (c.l ? '!' : '✓') + '</span><span>' + c.t + '</span></div>';
+      }).join('') + '</div></div></div>';
+      // Details
+      if (batch.rejected && batch.rejected.length) {
+        html += '<div class="panel"><h2>Lignes rejetées<small>' + f.plural(batch.rejected.length, 'ligne', 'lignes') + '</small></h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Fichier</th><th class="num">Ligne</th><th>Doc.article</th><th>Article</th><th>Raison</th></tr></thead><tbody>' +
+          batch.rejected.slice(0, 100).map(function (r) {
+            return '<tr><td>' + esc(r.file || '') + '</td><td class="num">' + num(r.row) + '</td><td class="mono">' + esc(r.doc || '') + '</td><td class="mono">' + esc(r.article || '') + '</td><td>' + esc(r.reason) + '</td></tr>';
+          }).join('') + '</tbody></table></div></div>';
+      }
+      if (batch.flags && batch.flags.length) {
+        html += '<div class="panel"><h2>Alertes<small>lignes acceptées</small></h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Fichier</th><th class="num">Ligne</th><th>Contrôle</th><th>Détail</th></tr></thead><tbody>' +
+          batch.flags.slice(0, 100).map(function (r) {
+            return '<tr><td>' + esc(r.file || '') + '</td><td class="num">' + num(r.row) + '</td><td>' + esc(flagLabel(r.code)) + '</td><td>' + esc(r.text) + '</td></tr>';
+          }).join('') + '</tbody></table></div></div>';
+      }
+      if (lines.length) {
+        html += '<div class="panel"><h2>Aperçu des lignes<small>' + (lines.length > 20 ? '20 premières sur ' + num(lines.length) : f.plural(lines.length, 'ligne', 'lignes')) + '</small></h2>' +
+          '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date cpt.</th><th>Article</th><th>Désignation</th><th>Mag.</th><th>MvT</th><th>Doc.article</th><th class="num">Qté</th><th>UQS</th><th>Saisie</th></tr></thead><tbody>' +
+          lines.slice(0, 20).map(function (l) {
+            return '<tr><td>' + esc(f.date(l.date)) + '</td><td class="mono">' + esc(l.article) + '</td><td>' + esc(l.designation || '') + '</td><td>' + esc(l.magasin) + '</td><td class="mono">' + esc(l.mvt) +
+              '</td><td class="mono">' + esc(l.doc) + '</td><td class="num">' + num(l.qty, undefined) + '</td><td>' + esc(l.uqs || '') + '</td><td>' + esc(Norm.userKind ? Norm.userKind(l.user) : '') + '</td></tr>';
+          }).join('') + '</tbody></table></div></div>';
+      }
+      R.preview.innerHTML = html;
+      var save = App.$('[data-save]', R.preview);
+      if (save) save.addEventListener('click', send);
+      var clear = App.$('[data-clear]', R.preview);
+      if (clear) clear.addEventListener('click', function () {
+        files = [];
+        batch = null;
+        R.preview.innerHTML = '';
+        renderFiles();
+      });
+    }
+
+    function progress(done, total, text) {
+      var box = App.$('[data-r="progress"]', R.preview);
+      if (!box) return;
+      box.innerHTML = '<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + done + '"><i style="width:' +
+        (total ? Math.round(done / total * 100) : 0) + '%"></i></div><div class="small">' + text + '</div>';
+    }
+
+    function send() {
+      if (!batch || sending) return;
+      var chunks = [];
+      batch.files.forEach(function (r) {
+        var fresh = r.fresh || [];
+        var s = r.summary || {};
+        for (var i = 0; i < fresh.length; i += CHUNK) {
+          chunks.push({
+            file: r.file,
+            period: s.dateMin ? (s.dateMin === s.dateMax ? f.date(s.dateMin) : 'du ' + f.date(s.dateMin) + ' au ' + f.date(s.dateMax)) : '',
+            lines: fresh.slice(i, i + CHUNK).map(function (l) {
+              var o = {};
+              LINE_FIELDS.forEach(function (k) { o[k] = l[k]; });
+              return o;
+            })
+          });
+        }
+      });
+      if (!chunks.length) return;
+      var total = chunks.reduce(function (a, c) { return a + c.lines.length; }, 0);
+      var importId = 'IMP-' + new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14) + '-' + Math.floor(Math.random() * 1e4);
+      var S = batch.summary;
+      var period = S.dateMin ? (S.dateMin === S.dateMax ? f.date(S.dateMin) : 'du ' + f.date(S.dateMin) + ' au ' + f.date(S.dateMax)) : '';
+      sending = true;
+      renderFiles();
+      var save = App.$('[data-save]', R.preview), clear = App.$('[data-clear]', R.preview);
+      if (save) save.disabled = true;
+      if (clear) clear.disabled = true;
+      progress(0, total, 'Envoi en cours…');
+      var started = Date.now();
+      App.withKey('admin', function (key) {
+        var sent = 0, last = null;
+        var p = Promise.resolve();
+        chunks.forEach(function (c, i) {
+          p = p.then(function () {
+            var final = i === chunks.length - 1;
+            progress(sent, total, 'Lot ' + (i + 1) + ' / ' + chunks.length + ' · ' + num(sent) + ' / ' + num(total) + ' lignes envoyées' +
+              (final ? ' · recalcul de l’entrepôt…' : '…'));
+            var meta = { importId: importId, fileName: c.file, kind: 'MB51', period: final ? period : c.period, final: final, alerts: (batch.flags || []).length };
+            return App.call('api_importLines', key, meta, c.lines).then(function (res) {
+              sent += c.lines.length;
+              last = res;
+            }, function (err) {
+              if (App.isKeyError(err) && i === 0) throw err;
+              var e = new Error('Lot ' + (i + 1) + ' / ' + chunks.length + ' : ' + err.message + ' · Les lots déjà envoyés sont enregistrés ; relancer l’import est sans risque (les lignes connues sont ignorées).');
+              throw e;
+            });
+          });
+        });
+        return p.then(function () { return last; });
+      }).then(function (res) {
+        sending = false;
+        result = res;
+        var ms = Date.now() - started;
+        var t = res && res.totals ? res.totals : { added: res ? res.added : 0, duplicates: res ? res.duplicates : 0, rejected: res ? res.rejected : 0 };
+        var names = files.map(function (x) { return x.name; });
+        // The analysis (« rien n’est encore enregistré ») is gone: the saved result is at the top, in view.
+        files = [];
+        batch = null;
+        R.preview.innerHTML = '';
+        R.result.innerHTML = '<div class="panel"><h2>Import enregistré<small>' + esc(names.join(', ')) + '</small></h2>' +
+          '<p><b>Enregistré : ' + f.plural(t.added, 'nouvelle ligne', 'nouvelles lignes') + ', ' + f.plural(t.duplicates, 'déjà connue', 'déjà connues') +
+          (t.rejected ? ', ' + f.plural(t.rejected, 'rejetée', 'rejetées') : '') + '.</b> ' +
+          (ms < 1000 ? 'Enregistré en moins d’une seconde.' : 'Enregistré en ' + esc(f.duration(ms)) + '.') + '</p>' +
+          (res && res.warning ? '<div class="alert-box">' + esc(res.warning) + '</div>' : '') +
+          '<div class="stats">' +
+          stat('Nouvelles lignes', num(t.added), 'ajoutées à la base') +
+          stat('Déjà connues', num(t.duplicates), 'ignorées (doublons)') +
+          stat('Rejetées par le serveur', num(t.rejected), 'contrôle serveur') +
+          stat('État recalculé', res && res.summary ? num(res.summary.exp2Pallets) + ' <small>pal EXP2</small>' : '—', res && res.summary ? 'au ' + f.date(res.summary.asOf) : '') +
+          '</div><p class="small">' + esc((res && res.message) || '') + '</p>' +
+          '<div class="actions"><button type="button" class="btn" data-go="lookup">Recherche article</button><button type="button" class="btn" data-go="plan">Plan 2D</button><button type="button" class="btn" data-new>Nouvel import</button></div></div>';
+        App.$$('[data-go]', R.result).forEach(function (b) {
+          b.addEventListener('click', function () { App.go(b.getAttribute('data-go'), {}); });
+        });
+        App.$('[data-new]', R.result).addEventListener('click', function () {
+          files = [];
+          batch = null;
+          result = null;
+          R.preview.innerHTML = '';
+          R.result.innerHTML = '';
+          renderFiles();
+          if (R.drop.scrollIntoView) R.drop.scrollIntoView({ block: 'center' });
+        });
+        if (R.result.scrollIntoView) R.result.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        App.toast((res && res.message) || 'Import enregistré.', 'ok');
+        if (res && res.warning) App.toast(res.warning, 'warn', 12000);
+        renderFiles();
+        App.refresh(true);
+      }, function (err) {
+        sending = false;
+        renderFiles();
+        if (save) save.disabled = false;
+        if (clear) clear.disabled = false;
+        if (err && err.cancelled) {
+          progress(0, total, 'Envoi annulé : rien n’a été enregistré.');
+          return;
+        }
+        progress(0, total, '<span class="bad-t">Échec : ' + esc(err.message) + '</span>');
+        App.toast('Import interrompu : ' + err.message, 'error');
+      });
+    }
+
+    var input = R.input, drop = R.drop;
+    input.addEventListener('change', function () {
+      addFiles(input.files);
+      input.value = '';
+    });
+    drop.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        input.click();
+      }
+    });
+    ['dragenter', 'dragover'].forEach(function (t) {
+      drop.addEventListener(t, function (ev) {
+        ev.preventDefault();
+        drop.classList.add('over');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (t) {
+      drop.addEventListener(t, function (ev) {
+        ev.preventDefault();
+        drop.classList.remove('over');
+      });
+    });
+    drop.addEventListener('drop', function (ev) {
+      if (ev.dataTransfer && ev.dataTransfer.files) addFiles(ev.dataTransfer.files);
+    });
+    // Dropping a file anywhere else must not navigate away from the app.
+    function block(ev) {
+      if (ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], 'Files') >= 0) ev.preventDefault();
+    }
+    window.addEventListener('dragover', block);
+    window.addEventListener('drop', block);
+    libLine();
+
+    // Real SAP files must not be mixed with the simulated base: say so before anything is dropped.
+    function simWarn(store) {
+      var sim = !!(store.state && store.state.source === 'SIMULATION' && store.status === 'ok');
+      R.simwarn.innerHTML = sim ? '<div class="alert-box">La base contient des données simulées. Avant d’importer de vraies extractions SAP : ' +
+        'menu <b>EXP2 Jumeau › Simulation › Effacer la simulation</b> dans le classeur.</div>' : '';
+    }
+
+    return {
+      update: simWarn,
+      destroy: function () {
+        gone = true;
+        window.removeEventListener('dragover', block);
+        window.removeEventListener('drop', block);
+      }
+    };
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Simulation
+  // ---------------------------------------------------------------------------------------------------------------
+  P.simulation = function (el) {
+    var busy = false, lastMsg = null, shown;
+    el.innerHTML = '<div class="page-head"><h1>Simulation</h1><p>Données fictives pour les démonstrations (phase 0a). Les actions demandent la clé administrateur.</p></div>' +
+      '<div class="sim-actions">' +
+      '<div class="sim-card"><h3>Générer la simulation</h3><p>Remplace les données simulées (les lignes importées de SAP sont conservées) par des jours ouvrés réalistes se terminant hier.</p>' +
+      '<div class="inline"><label class="field"><span>Jours ouvrés</span><input type="number" data-r="days" min="1" max="60" value="14"></label></div>' +
+      '<details class="adv"><summary>Options avancées</summary><div class="inline">' +
+      '<label class="field" title="Même numéro = mêmes données simulées"><span>Variante (n°)</span><input type="number" data-r="seed" min="0" value="2026"></label></div></details>' +
+      '<div><button type="button" class="btn p lg" data-act="simulate">Générer 14 jours</button></div></div>' +
+      '<div class="sim-card"><h3>+1 jour</h3><p>Ajoute la journée ouvrée suivante à la simulation en cours (déclarations, transferts, sorties, quais).</p>' +
+      '<div><button type="button" class="btn lg" data-act="next">Simuler +1 jour</button></div></div>' +
+      '<div class="sim-card"><h3>Recalculer</h3><p>Relit les onglets du classeur (ARTICLES, LAYOUT, règles, seuils) et recalcule l’état de l’entrepôt.</p>' +
+      '<div><button type="button" class="btn lg" data-act="recompute">Recalculer</button></div></div>' +
+      '</div><div data-r="msg" aria-live="polite"></div><div data-r="status"></div>';
+    var R = {};
+    App.$$('[data-r]', el).forEach(function (e) { R[e.getAttribute('data-r')] = e; });
+    var simBtn = App.$('[data-act="simulate"]', el);
+    R.days.addEventListener('input', function () {
+      var d = Math.round(Number(R.days.value));
+      simBtn.textContent = 'Générer ' + (d > 0 ? d : 14) + ' jours';
+    });
+
+    function setBusy(b, text) {
+      busy = b;
+      App.$$('[data-act]', el).forEach(function (x) { x.disabled = b; });
+      if (b) R.msg.innerHTML = '<div class="info-box"><span class="spinner"></span> ' + esc(text) + '</div>';
+    }
+
+    function run(kind) {
+      if (busy) return;
+      var labels = { simulate: 'Génération de la simulation en cours (jusqu’à une minute)…', next: 'Simulation de la journée suivante…', recompute: 'Recalcul en cours…' };
+      var go = function () {
+        setBusy(true, labels[kind]);
+        App.withKey('admin', function (key) {
+          if (kind === 'simulate') return App.call('api_simulate', key, { days: Number(R.days.value) || 14, seed: R.seed.value === '' ? undefined : Number(R.seed.value) });
+          if (kind === 'next') return App.call('api_simulateNextDay', key);
+          return App.call('api_recompute', key);
+        }).then(function (res) {
+          setBusy(false);
+          lastMsg = { ok: true, text: (res && res.message) || 'Terminé.' };
+          renderMsg();
+          App.toast(lastMsg.text, 'ok');
+          App.refresh(true);
+        }, function (err) {
+          setBusy(false);
+          lastMsg = err && err.cancelled ? null : { ok: false, text: err.message };
+          renderMsg();
+        });
+      };
+      var s = App.store.state;
+      if (kind === 'simulate' && s && !App.isEmpty(s)) {
+        var m = App.modal({
+          title: 'Remplacer la simulation ?',
+          body: '<p>Les données simulées actuelles (mouvements, stock initial, articles et quais simulés) seront remplacées. Les lignes importées de SAP sont conservées.</p>',
+          actions: [{ label: 'Annuler', kind: 'ghost', value: null }, { label: 'Générer', kind: 'primary', value: 'go' }]
+        });
+        m.done.then(function (v) { if (v === 'go') go(); });
+        return;
+      }
+      go();
+    }
+    App.$$('[data-act]', el).forEach(function (b) {
+      b.addEventListener('click', function () { run(b.getAttribute('data-act')); });
+    });
+
+    function renderMsg() {
+      R.msg.innerHTML = lastMsg ? '<div class="' + (lastMsg.ok ? 'info-box' : 'alert-box') + '">' + esc(lastMsg.text) + '</div>' : '';
+    }
+
+    function status(store) {
+      var s = store.state;
+      if (!s) {
+        R.status.innerHTML = store.status === 'loading' ? '' : '<div class="panel"><h2>État actuel</h2><p class="muted">' +
+          esc(store.status === 'notInstalled' ? bodyMessage(store.message) : store.status === 'error' ? store.message : 'Aucune donnée.') + '</p></div>';
+        return;
+      }
+      var k = s.kpi || {}, thr = App.thresholds(s), fr = App.freshness(s);
+      var alerts = s.alerts || [];
+      var debug = !!(App.location && App.location.parameter && App.location.parameter.debug === '1');   // ?debug=1: versions, timing
+      R.status.innerHTML = '<div class="row2"><div class="panel"><h2>État actuel</h2><dl class="kv">' +
+        '<dt>Source</dt><dd>' + (App.isEmpty(s) ? 'Aucune donnée' : s.source === 'SIMULATION' ? '<span class="tag sim">DONNÉES SIMULÉES</span>' : 'SAP (imports MB51)') + '</dd>' +
+        '<dt>Données au</dt><dd>' + esc(f.date(s.asOf)) + '</dd>' +
+        '<dt>Dernier import / simulation</dt><dd>' + esc(s.importedAt ? f.dateTime(s.importedAt) + ' (' + fr.ago + ')' : '—') + '</dd>' +
+        '<dt>Calculé le</dt><dd>' + esc(f.dateTime(s.computedAt)) + (debug && s.stats && s.stats.computeMs ? ' · ' + f.num(s.stats.computeMs / 1000, 1) + ' s' : '') + '</dd>' +
+        (debug ? '<dt>Version</dt><dd>données ' + esc(s.version) + ' · quais ' + esc(s.docksVersion === undefined ? '—' : s.docksVersion) + '</dd>' : '') +
+        '<dt>Lignes MB51</dt><dd>' + (s.stats ? num(s.stats.movements) : '—') + '</dd>' +
+        '<dt>Palettes EXP2</dt><dd>' + num(k.exp2Pallets) + ' / ' + num(k.capacity) + ' · <span class="chipd ' + App.satLevel(k.saturation, thr) + '">' + f.pct(k.saturation) + '</span></dd>' +
+        '<dt>En attente PRD2</dt><dd>' + num(k.pendingPallets) + ' pal · plus ancienne ' + f.days(k.oldestPendingDays) + '</dd>' +
+        '<dt>EMRT</dt><dd>' + num(k.emrtPallets) + ' pal</dd>' +
+        '<dt>Quais occupés</dt><dd>' + num(k.docksOccupied) + ' / ' + num(k.docksTotal) + '</dd>' +
+        '</dl></div><div class="panel"><h2>Alertes<small>' + f.plural(alerts.length, 'alerte', 'alertes') + '</small></h2>' +
+        (alerts.length ? '<ul class="alerts-list">' + alerts.slice(0, 12).map(function (a) {
+          return '<li class="' + (a.level === 'crit' ? 'crit' : '') + '">' + esc(a.text) + '</li>';
+        }).join('') + '</ul>' + (alerts.length > 12 ? '<div class="panel-note">… et ' + (alerts.length - 12) + ' autres.</div>' : '') : '<p class="muted">Aucune alerte.</p>') +
+        '</div></div>';
+    }
+
+    return {
+      update: function (store) {
+        if (store.state === shown && !store.changed && store.state) return;
+        shown = store.state;
+        status(store);
+      }
+    };
+  };
+
+  window.PagesPc = { mount: mount, has: has, PAGES: PAGES, pages: P };
+})();
+</script>

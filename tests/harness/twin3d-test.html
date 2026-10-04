@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Twin3D · banc d'essai</title>
+<link rel="icon" href="data:,">
+<!--
+  Local test bench of apps-script/src/Twin3d.html, without Google.
+  Serve the repository root over HTTP (e.g. `npx http-server -p 8080 .`) and open
+  http://localhost:8080/tests/harness/twin3d-test.html
+  Query parameters: mode=family|age|saturation · theme=dark|light · autoRotate=1 · full=1 (every block at capacity)
+  · state=<json url> (default sample-state.json, built by the real Engine from sample-data/csv).
+  Exposes for Playwright: window.__ready, window.__twin (handle), window.__state, window.__picks, window.__lost,
+  window.__error.
+-->
+<style>
+  :root { color-scheme: dark; --bg: #0b1118; --panel: #141c25; --text: #e8edf2; --muted: #9aa7b4; --accent: #2a78d6; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 700; }
+  header button { background: #223040; color: var(--text); border: 1px solid #2f4052; border-radius: 6px; padding: 5px 10px;
+    font: inherit; cursor: pointer; }
+  header button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); }
+  #legend { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-left: auto; }
+  #legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    margin-right: 5px; vertical-align: -1px; background: var(--c); }
+  #view { position: relative; flex: 1; min-height: 0; }
+  #pick { position: absolute; left: 12px; bottom: 12px; max-width: 360px; background: rgba(20, 28, 37, .92);
+    border-radius: 8px; padding: 8px 12px; font-size: 13px; display: none; z-index: 2; }
+  #status { position: absolute; right: 12px; bottom: 12px; color: var(--muted); font-size: 12px; z-index: 2; }
+</style>
+<script src="../harness/vendor/three.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>EXP2 · Vue 3D</h1>
+  <button type="button" data-mode="family">Familles</button>
+  <button type="button" data-mode="age">Âge</button>
+  <button type="button" data-mode="saturation">Saturation</button>
+  <button type="button" id="reset">Recentrer</button>
+  <button type="button" id="rotate">Rotation auto</button>
+  <div id="legend"></div>
+</header>
+<div id="view">
+  <div id="pick"></div>
+  <div id="status">Chargement…</div>
+</div>
+<script>
+(function () {
+  'use strict';
+  var params = new URLSearchParams(location.search);
+  window.__ready = false;
+  window.__picks = [];
+  window.__lost = 0;
+
+  function addScript(code, name) {
+    var s = document.createElement('script');
+    s.textContent = code + '\n//# sourceURL=' + name;
+    document.head.appendChild(s);
+  }
+
+  function inlineScripts(html) {
+    var out = [], re = /<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi, m;
+    while ((m = re.exec(html))) if (!/\ssrc\s*=/.test(m[1] || '')) out.push(m[2]);
+    return out.join('\n');
+  }
+
+  // Every block at its capacity, contents repeated: ~1,464 pallets, the stress case.
+  function fullState(state) {
+    var s = JSON.parse(JSON.stringify(state));
+    var byId = {};
+    s.layout.blocks.forEach(function (b) { byId[b.id] = b; });
+    s.blocks.forEach(function (b) {
+      var L = byId[b.id];
+      var cap = L ? L.cols * L.rows * L.levels : b.capacity;
+      var list = s.blockContents[b.id] || [];
+      var out = [], left = cap, i = 0;
+      while (left > 0 && list.length) {
+        var e = Object.assign({}, list[i % list.length]);
+        e.pallets = Math.min(left, e.pallets || 1);
+        out.push(e);
+        left -= e.pallets;
+        i++;
+      }
+      s.blockContents[b.id] = out;
+      b.pallets = cap;
+      b.capacity = cap;
+      b.saturation = 1;
+    });
+    s.kpi.pendingPallets = 40;
+    return s;
+  }
+
+  function renderLegend(mode, state) {
+    var el = document.getElementById('legend');
+    el.innerHTML = '';
+    Twin3D.legend(mode, state).forEach(function (it) {
+      var sp = document.createElement('span');
+      sp.style.setProperty('--c', it.color);
+      sp.textContent = it.label;
+      el.appendChild(sp);
+    });
+  }
+
+  function setPressed(mode) {
+    document.querySelectorAll('button[data-mode]').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-mode') === mode));
+    });
+  }
+
+  function showPick(p) {
+    var el = document.getElementById('pick');
+    var b = p.block, a = p.article;
+    el.style.display = 'block';
+    el.textContent = '';
+    var t = document.createElement('div');
+    t.style.fontWeight = '700';
+    t.textContent = 'Bloc ' + b.id + ' · ' + b.pallets + ' / ' + b.capacity + ' palettes';
+    el.appendChild(t);
+    var d = document.createElement('div');
+    d.textContent = a ? a.article + ' · ' + a.designation + ' · ' + a.pallets + ' pal. · ' + (a.ageMax === null ? '–' : a.ageMax + ' j')
+      : 'Aucun article à cet emplacement';
+    el.appendChild(d);
+  }
+
+  var stateUrl = params.get('state') || 'sample-state.json';
+  Promise.all([
+    fetch('../../apps-script/src/Config.gs').then(function (r) { return r.text(); }),
+    fetch('../../apps-script/src/Twin3d.html').then(function (r) { return r.text(); }),
+    fetch(stateUrl).then(function (r) { return r.json(); })
+  ]).then(function (res) {
+    addScript(res[0], 'Config.gs');
+    addScript(inlineScripts(res[1]), 'Twin3d.html');
+    var state = params.get('full') === '1' ? fullState(res[2]) : res[2];
+    window.__state = state;
+    var status = document.getElementById('status');
+    if (!Twin3D.supported()) {
+      status.textContent = 'WebGL indisponible';
+      window.__error = 'unsupported';
+      return;
+    }
+    var mode = params.get('mode') || 'family';
+    var autoRotate = params.get('autoRotate') === '1';
+    var t0 = performance.now();
+    var twin = Twin3D.mount(document.getElementById('view'), state.layout, state, {
+      mode: mode,
+      theme: params.get('theme') || 'dark',
+      autoRotate: autoRotate,
+      onPick: function (p) {
+        window.__picks.push(p);
+        showPick(p);
+      },
+      onContextLost: function () {
+        window.__lost++;
+        status.textContent = 'Contexte WebGL perdu';
+      }
+    });
+    var mountMs = performance.now() - t0;
+    window.__twin = twin;
+    setPressed(mode);
+    renderLegend(mode, state);
+    document.querySelectorAll('button[data-mode]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var m = b.getAttribute('data-mode');
+        twin.setMode(m);
+        setPressed(m);
+        renderLegend(m, state);
+      });
+    });
+    document.getElementById('reset').addEventListener('click', function () { twin.resetView(true); });
+    var rot = document.getElementById('rotate');
+    rot.setAttribute('aria-pressed', String(autoRotate));
+    rot.addEventListener('click', function () {
+      var on = rot.getAttribute('aria-pressed') !== 'true';
+      location.search = '?' + new URLSearchParams(Object.assign(Object.fromEntries(params), { autoRotate: on ? '1' : '0' })).toString();
+    });
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        var i = twin.info();
+        status.textContent = i.pallets + ' palettes · ' + i.ghosts + ' en attente · ' + i.trucks + ' camions · ' +
+          i.drawCalls + ' appels · montage ' + Math.round(mountMs) + ' ms';
+        window.__mountMs = mountMs;
+        window.__ready = true;
+      });
+    });
+  }).catch(function (err) {
+    window.__error = String(err && err.stack || err);
+    document.getElementById('status').textContent = 'Erreur : ' + err;
+    throw err;
+  });
+})();
+</script>
+</body>
+</html>
