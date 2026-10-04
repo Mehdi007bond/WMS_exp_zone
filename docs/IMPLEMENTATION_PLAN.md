@@ -2,6 +2,8 @@
 
 A web app built only with **Google Apps Script** and **Google Sheets**. It rebuilds the EXP2 warehouse from SAP extractions and shows, on a TV and on office PCs, what is in the warehouse, where, since when, what is still waiting in production, and how full the racks and the shipping docks are.
 
+The illustrated version of this plan (warehouse sketch to scale, TV and PC mockups, diagrams) is here: https://claude.ai/artifact/43H2yDzvaYKBgpRcck7pvT
+
 Status: for discussion. Every number below comes from the simulated database in `sample-data/`, not from SAP.
 
 ## 1. The idea

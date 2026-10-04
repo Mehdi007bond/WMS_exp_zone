@@ -10,7 +10,7 @@ A digital twin of the **EXP2 finished-goods warehouse**, built only with **Googl
 | **Input** | SAP MB51 exports (production declarations, transfers), uploaded from the PC page. No live SAP link. |
 | **Warehouse** | EXP2, about 1,600 m², 8 storage blocks (1,464 pallet places assumed), 8 shipping docks. |
 | **Screens** | TV (3D view, key numbers, docks) and PC (lookup, pending, 2D plan, trucks, import). |
-| **Documents** | [Implementation plan](docs/IMPLEMENTATION_PLAN.md) · illustrated plan (link added after publishing) · [Sample database](sample-data/README.md) |
+| **Documents** | [Implementation plan](docs/IMPLEMENTATION_PLAN.md) · [illustrated plan](https://claude.ai/artifact/43H2yDzvaYKBgpRcck7pvT) · [Sample database](sample-data/README.md) |
 
 ---
 
@@ -101,7 +101,7 @@ stateDiagram-v2
 | **PC · Quais & camions** | Shipping team | The 8 docks: truck, status, loaded / planned pallets, dock staging saturation |
 | **PC · Import** | Admin | Drop SAP files, see the checks, save; import log |
 
-Mockups of all of them are in the illustrated plan (link added after publishing).
+Mockups of all of them are in the [illustrated plan](https://claude.ai/artifact/43H2yDzvaYKBgpRcck7pvT).
 
 ## Features and roadmap
 
