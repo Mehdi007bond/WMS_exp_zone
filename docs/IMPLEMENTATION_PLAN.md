@@ -32,9 +32,10 @@ The columns are the standard SAP list of material documents, transaction **MB51*
 | **Désignation article** | `PF CONNECTEUR 4 VOIES REF 04` | Material description (`MAKTX`). | Display and search. |
 | **Nom utilisateur** | `BARFLOW_TA11 · OPEXP01` | SAP user ID that posted (`USNAM`). | Automatic or manual posting. Personal data: never shown on the TV; the PC pages show only Auto / Manuel. |
 
-- **Finding 1: MB51 has no pallet number.** SAP lists quantities of an article, not pallets. The twin therefore builds **virtual pallets**: quantity ÷ quantity per pallet, rounded up. It matches entries and exits **oldest first (FIFO)** to give every remaining quantity an entry date. Totals are exact, and the dates are a good estimate. If your finished goods carry a batch (Lot) or an SSCC pallet label in SAP, adding that column turns the estimate into exact pallet tracking.
-- **Finding 2: the date has no time.** "Date cpt." gives days, not hours. Adding "Heure de saisie" (time of entry) to the export would give hours on the TV ("en attente depuis 5 h") and the exact order of the postings within a day.
-- **Finding 3: filters matter.** A transfer is two lines: one in the storage location it leaves and one in the location it arrives in. If the export is filtered on EXP2 only, half of every transfer is missing. Export all three storage locations, with one saved layout that everyone uses.
+- **Finding 1: MB51 has no pallet number.** SAP lists quantities of an article, not pallets. The twin therefore builds **virtual pallets**: for each article in each storage location, total quantity ÷ quantity per pallet, rounded up, so there is at most one partial pallet per article (the oldest one, the one being picked). It matches entries and exits **oldest first (FIFO)** to give every remaining quantity an entry date. Totals are exact, and the dates are a good estimate. If your finished goods carry a batch (Lot) or an SSCC pallet label in SAP, adding that column turns the estimate into exact pallet tracking.
+- **Finding 2: your two files contain no exits.** Declarations and transfers say what enters PRD2 and EXP2, and what goes to EMRT. Nothing says what leaves for customers. Without the 601 goods issues (same MB51 layout), EXP2 would only fill up, saturation would drift above 100 % and there would be no exit date. The shipments extraction is required, not optional.
+- **Finding 3: the date has no time.** "Date cpt." gives days, not hours. Adding "Heure de saisie" (time of entry) to the export would give hours on the TV ("en attente depuis 5 h") and the exact order of the postings within a day.
+- **Finding 4: filters matter.** A transfer is two lines: one in the storage location it leaves and one in the location it arrives in. If the export is filtered on EXP2 only, half of every transfer is missing. Best: **one single MB51 selection** (plant TA11, PRD2 + EXP2 + EMRT, all movement types) with one saved layout that everyone uses.
 
 ## 3. From an SAP line to a status
 
@@ -48,7 +49,7 @@ The columns are the standard SAP list of material documents, transaction **MB51*
 
 - A 311 is **two lines** with the same Doc.article: a negative line in the storage location it leaves and a positive line in the one it enters.
 - Reversals (102, 312, 602) cancel the latest posting of the same article and put the quantity back.
-- **Virtual pallets** = quantity ÷ quantity per pallet, rounded up, per entry. Entries and exits are matched **oldest first (FIFO)**, which gives every remaining quantity an entry date. A partial pallet still takes a full position.
+- **Virtual pallets** = total quantity of an article in a storage location ÷ quantity per pallet, rounded up: at most one partial pallet per article, the oldest one (being picked). Entries and exits are matched **oldest first (FIFO)**, which gives every remaining quantity an entry date.
 
 Example from the sample: article `1000812390` (PF CACHE MOTEUR REF 20), 24 PC per pallet:
 
@@ -78,6 +79,8 @@ Only the surface is known (1,600 m²); the plan assumes **50 × 32 m**, which ma
 | B8 | Allée 72 (?) | 13.3 × 9.5 | 13 × 12 | 2 | 312 |
 | **Total** | | | | | **1,464** |
 
+**Physical check.** The 8 blocks cover about 586 m²; as drawn they hold 732 floor positions (0.80 m² each), but a EUR pallet alone takes 0.96 m². Realistic capacity is closer to 870–1,000 places on 2 levels. The 8 docks are 1.8 m apart, too close for truck doors (3.5–4.5 m). A site survey must confirm capacity and docks; until then capacity is shown as "à confirmer".
+
 Also on the plan: Zone Camion with 8 docks (Q1–Q8) and the 5 trucks of the sketch, forklift roads, G1–G4 and two boxes at the top (meaning unknown), conveyor, AGV stations, empty packaging, carton storage, offices, forklift exchange queue. Names with "(?)" could not be read with certainty. Two levels everywhere is an assumption.
 
 ## 5. Screens
@@ -92,17 +95,20 @@ Also on the plan: Zone Camion with 8 docks (Q1–Q8) and the 5 trucks of the ske
 | Feature | What you see | Data it needs | Phase |
 |---|---|---|---:|
 | **3D twin (TV)** | The warehouse in 3D, with pallets in their blocks colored by family, pending pallets at the conveyor, trucks at the docks with their loading, and saturation per block. | Everything below + `LAYOUT` + `ARTICLES` | 3 |
-| **2D plan (PC)** | The plan to scale. Blocks are colored by saturation, and clicking a block lists its contents. | `LAYOUT`, calculated stock, placement | 2 |
+| **2D plan (PC)** | The plan to scale. Blocks are colored by saturation, and clicking a block lists its contents. Positions are marked "théorique" until the placement is confirmed. | `LAYOUT`, calculated stock, placement | 2 |
 | **Inventory lookup** | One article: quantity and pallets in PRD2, EXP2 and EMRT, each remaining quantity with its entry date and age, exits with exit date and dwell, the raw SAP lines, and where it is on the plan. | MB51 files, `ARTICLES` | 2 |
 | **Entry and exit dates** | For every remaining quantity (oldest first) and every exit, with age and dwell time in days, or in hours if "Heure de saisie" is added. | Date cpt. (+ Heure de saisie) | 1 |
 | **Pending tracker** | Declared but not yet in EXP2, oldest first, with days waiting. Shown as ghost pallets on the TV. | Declarations + transfers | 2 |
 | **Rack saturation** | Per block and for the whole warehouse, in % and pallets, with example thresholds at 85 % and 95 %. | `LAYOUT` capacities, quantity per pallet, placement | 2 |
-| **Quai d'expédition saturation** | Pallets waiting in front of each dock versus its capacity, and docks occupied out of 8. | `QUAIS_CAMIONS` tab (or SAP deliveries) | 4 |
-| **Truck view** | The 8 docks: which truck, its color, its status, and pallets loaded out of planned (33 maximum for a 13.6 m trailer). | `QUAIS_CAMIONS` tab (or SAP shipments) | 4 |
+| **Quai d'expédition saturation** | Pallets prepared in front of each dock versus the space there, and docks occupied. Staged pallets are still EXP2 stock until the 601, so they are shown as a part of EXP2, never counted twice. | Truck visit log (or SAP deliveries) | 3 |
+| **Truck view** | The docks: which truck, its color, its status, and pallets loaded out of planned (33 EUR pallets maximum in a 13.6 m trailer). | Truck visit log (or SAP shipments) | 3 |
 | **Freshness stamp** | "Données SAP du …" on every screen. It turns orange, then red, when no upload has happened for too long. | Import log | 1 |
 | **Import page and log** | Drop the files and see the checks before saving. Lines already in the database are skipped, so uploading twice is harmless. A log keeps who, when, which file and how many lines. | — | 1 |
 | **Alerts** | Pending too long, block too full, article missing from `ARTICLES`, transfer with no declaration, stock that would go negative, data too old. | Thresholds (later) | 1 → 5 |
 | **History and replay** | The state of EXP2 at the end of any past day, and daily curves of entries, exits and saturation. | All movements | 5 |
+| **Manual correction (admin)** | Move, add or remove a virtual pallet when the floor disagrees with the screen. Every correction is logged with who, when and why. | Correction log tab | 4 |
+| **Floor occupancy** | Square meters used by pallets versus net storage area, including the exchange and queue zone, next to the pallet-place saturation. | `LAYOUT`, pallet footprints | 2 |
+| **Truck visit history** | One row per truck visit: arrival, loading start and end, departure, pallets. Gives time at dock and trucks per day. | Truck visit log | 3 |
 | **Settings (admin)** | Articles, movement types, thresholds, placement rules and layout, all as tabs of the spreadsheet. | — | 1 → 2 |
 
 ## 7. Data required
@@ -111,17 +117,21 @@ Also on the plan: Zone Camion with 8 docks (Q1–Q8) and the 5 trucks of the ske
 |---|---|---|---|
 | Production declarations (MB51, MvT 101 or 131 into PRD2) | SAP export, each upload | have: structure | Creates the pending quantities. Confirm 101 or 131. |
 | Transfers (MB51, MvT 311 / 312) | SAP export, each upload | have: structure | Moves quantities PRD2 → EXP2 and EXP2 ↔ EMRT. Export all three storage locations. |
-| Shipments (MB51, MvT 601 / 602 out of EXP2) | SAP export, same layout | to confirm | Gives the exit date to customers. Without it, EXP2 only empties towards EMRT. |
+| Exits (MB51, MvT 601 / 602 and any other issue out of EXP2) | SAP export, same layout, ideally the same selection | needed | Gives the exit date and dwell time. Without it EXP2 only fills up. Required for phase 1. |
 | Opening stock (MB5B at the go-live date, or MB52 that morning) | SAP export, once at go-live, then MB52 weekly | needed | MB51 only covers its dates. Without a starting stock the twin starts empty and exits go negative. The weekly MB52 also checks that nothing was missed. |
+| 60–90 days of receipts before go-live (MB51) | SAP export, once | needed | Gives the pallets already in EXP2 an estimated entry date, instead of "entered on go-live day". |
+| Export date-time and period of each file | A file name rule, or a field on the import page | needed | An MB51 file does not say when it was exported or which days it covers. The freshness stamp and the gap detection need it. |
 | Quantity per pallet, per article | MM03 (unit PAL), packing instruction, or your list | needed | Turns quantities into pallets, so saturation and the 3D view are possible. |
-| Pallet type, height, stacking levels | You, or MM03 | needed | Size of the boxes in 3D, and how many levels a block really holds. |
+| Pallet type, height, stacking levels | You, or MM03 | needed | Size of the boxes in 3D, and how many levels a block really holds. A trailer takes 33 EUR pallets but about 26 ISO ones. |
 | Product family (or customer) per article | You, or MM03 | needed | Colors on the screens and, probably, your placement rules. |
-| Block details: real names, positions, levels | Your sketch + a walk in the warehouse | to confirm | Capacity of each block, which is the base of rack saturation. Surface 1,600 m² is known. |
+| Site survey: real dimensions, block type (floor or rack), lanes × depth × levels, real dock doors | A walk in the warehouse with a tape measure | needed | The sketch does not add up physically (see the warehouse section). Capacity is the base of every saturation figure. |
 | Placement rules | You | later | Which block a pallet goes to. Until then the twin uses a placeholder: product family → block color. |
-| Trucks at the docks (truck, dock, status, planned and loaded pallets) | New tab filled from the PC page, or SAP deliveries / shipments (VL06O, VT11) | to confirm | The truck view and dock occupancy. MB51 says nothing about trucks. |
+| Trucks at the docks (truck, dock, arrival, departure, planned and loaded pallets) | A visit log filled from a tablet at the docks, or SAP deliveries / shipments (VL06O, VT11) | to confirm | The truck view and dock occupancy. MB51 says nothing about trucks. |
 | Staging capacity in front of each dock | You | needed | The denominator of the Quai d'expédition saturation. |
-| Thresholds: pallet too old, block too full, pending too long | You | later | When a number turns orange or red. The page uses example thresholds meanwhile. |
+| Thresholds: pallet too old, block too full, pending too long, data too old | You | later | When a number turns orange or red. The page uses example thresholds meanwhile. |
+| Site calendar: country and time zone, shifts, working days | You | needed | Defines "today" on the TV, ages in calendar or working days, and the time zone of the app. |
 | SAP user IDs that are automatic interfaces | You | to confirm | Separates automatic and manual postings (BARFLOW_TA11 is one). |
+| Stakeholders and what each one needs to see | You | needed | Who gets the link, and whether they have a Google account. |
 
 ### Columns worth adding to the MB51 layout
 
@@ -150,7 +160,8 @@ _Never edited by hand. Each line keeps the import it came from._
 - `LAYOUT`: blocks, roads, docks and zones in meters (the sketch).
 - `REGLES_PLACEMENT`: empty until you give the rules.
 - `PARAM_MAGASINS`, `PARAM_MOUVEMENTS`, `PARAM_SEUILS`.
-- `QUAIS_CAMIONS`: filled by the shipping team from the PC page.
+- `EMPLACEMENTS`: one row per pallet position, generated from `LAYOUT`, with the label used on the floor.
+- `VISITES_CAMIONS`: one row per truck visit, filled by the shipping team; `QUAIS_CAMIONS` is its current state.
 
 _Protected tabs: only 1–2 admins can change them._
 
@@ -159,12 +170,14 @@ _Protected tabs: only 1–2 admins can change them._
 - `CALC_STOCK`: per article, PRD2, EXP2 and EMRT in quantity and pallets.
 - `CALC_EN_ATTENTE`, `CALC_FIFO_EXP2`, `CALC_SORTIES`: the dates.
 - `CALC_BLOCS`, `CALC_JOURNALIER`, `CALC_KPI`: what the screens show.
+- `KPI_JOUR` and a monthly `CHECKPOINT`: enough to replay any past day without copying the whole warehouse every day.
 
 _The TV and PCs only read these small tabs, which keeps the screens fast._
 
 **Logs & safety**
 
-- `IMPORT_LOG`: who, when, which file, which days, lines new, already known, rejected.
+- `IMPORT_LOG`: who, when, which file, export time, which days, lines new, already known, rejected.
+- `CORRECTIONS`: every manual correction, with who, when and why.
 - `ALERTES`: open alerts, acknowledged or not.
 - A copy of the whole spreadsheet every night in a Drive folder (30 daily + 12 monthly kept).
 - Every January, the movements older than 13 months move to an archive file.
@@ -186,6 +199,8 @@ _A spreadsheet holds at least 10 million cells. About 2 million cells of movemen
 - The server writes the movements, recalculates the state once, and stamps a new **data version**.
 - The TV asks every 60 s "is there a new version?" and downloads the state only when there is.
 - 3D uses three.js and the Excel reader uses SheetJS, both loaded from public CDNs. If your network blocks them, a copy can be served with the page.
+- The calculation engine is plain JavaScript with no Google calls inside, so the same code runs in Apps Script and in automatic tests on a PC against the sample database and the messy export files.
+- Truck updates have their own lock and version, so a dock update never waits behind an import.
 - Apps Script limits that matter: 6 minutes per run and 30 simultaneous calls. One TV plus about 20 PCs is far below that.
 
 **The TV**
@@ -193,6 +208,7 @@ _A spreadsheet holds at least 10 million cells. About 2 million cells of movemen
 - A small PC (or Chromebox) running Chrome in kiosk mode, on a 50–55″ 1080p screen made for 24/7 use. Avoid the TV's built-in browser (3D is not guaranteed) and OLED panels (burn-in).
 - Rotating scenes every 30–60 s: overview (the mockup above), docks and trucks, rack saturation, pending list.
 - A full reload every 6–12 hours. If a refresh fails, the last good state stays on screen with its age.
+- The TV refreshes every 60 s, but SAP figures only change when someone imports (probably 1–3 times a day). Only the docks move in between, and the screen says so.
 
 **Access and ownership: to decide**
 
@@ -202,100 +218,124 @@ _A spreadsheet holds at least 10 million cells. About 2 million cells of movemen
 
 ## 10. Build plan
 
-### Phase 0: Clarify
+### Phase 0a: Demo on simulated data
 
-- Answer the questions at the end of this page.
-- Export one real day of each file (names can be hidden), plus one MB52.
-- Confirm the blocks: names, levels, capacity. Start the `ARTICLES` list.
-- One test on the TV hardware: the 3D view, the CDN libraries and the link access.
+- Load the sample database into a Google Sheet and deploy a read-only viewer: the TV screen and the article lookup, marked "DONNÉES SIMULÉES".
+- Run it on the real TV hardware and the plant network: 3D, CDN libraries, link access, Google banner.
+- Show it to the stakeholders and collect their reactions.
 
-**Done when:** A real export imports into the sample structure with no manual fix, and the 3D test runs on the TV.
+**Done when:** Stakeholders have seen it on the real TV, and the 3D view and libraries work on the plant network.
+
+### Phase 0b: Clarify and approve
+
+- Answer the questions at the end of this page; send 1–2 weeks of real exports, unmodified.
+- Site survey: real dimensions, block types and levels, real dock doors.
+- IT approval of the Google account and of the link mode; list of stakeholders.
+
+**Done when:** Written IT approval, a validated capacity per block, and real files that import into the sample structure.
 
 ### Phase 1: Data foundation
 
-- The spreadsheet and the two Apps Script projects (code in this repo).
-- The import page: reading, checks, replacing days, import log.
-- The calculations: stock per storage location, pending, FIFO dates, virtual pallets, daily figures.
-- Freshness stamp and the first alerts (unknown article, negative stock).
+- One movements table for all files, a global duplicate check, exits and opening stock required.
+- The calculation engine (stock per storage location, pending, FIFO dates, pallets per article), tested automatically on the sample database and the messy export files.
+- The import page with its checks, the freshness stamp, the import log.
+- A one-page procedure in French: who exports and imports, when, and who replaces them.
 
-**Done when:** On a given day, EXP2 stock in the twin equals SAP MB52 for EXP2, article by article (every gap explained). Re-uploading a file changes nothing. The sample database gives exactly its `CALC_*` tabs.
+**Done when:** EXP2 stock in the twin equals MB52, article by article. Re-uploading a file adds 0 lines. The messy files give exactly their expected results.
 
-### Phase 2: PC: lookup, pending, 2D plan, saturation
+### Phase 2: PC: lookup, pending, saturation
 
 - Pages: Recherche article, En attente, Plan 2D.
-- Your placement rules replace the placeholder.
-- Rack saturation per block and overall.
+- Saturation per block and overall, positions labeled "théorique" (placeholder by family).
+- Floor occupancy in m².
 
-**Done when:** Any article found in under 10 s with its entry dates. The saturation of 2 blocks matches a physical count within ±5 %.
+**Done when:** Any article found in under 10 s with its entry dates. Block saturation matches a count of 2 blocks within ±5 %.
 
-### Phase 3: 3D and TV mode
+### Phase 3: TV, 3D and docks
 
-- The 3D view from the `LAYOUT` tab, with gentle rotation.
-- The TV layout with rotating scenes and auto refresh.
-- Kiosk setup on the TV PC.
+- The 3D view from the `LAYOUT` tab, rotating TV scenes, automatic refresh, kiosk setup.
+- The truck visit log on a tablet at the docks; the truck view and dock saturation.
 
-**Done when:** The TV runs 5 working days unattended and shows a new upload within 1 minute.
+**Done when:** The TV runs 5 working days unattended; over 90 % of truck visits are logged during a pilot week.
 
-### Phase 4: Docks and trucks
+### Phase 4: Placement rules
 
-- The `QUAIS_CAMIONS` form on the PC, or an SAP deliveries/shipments import if available.
-- The truck view and the Quai d'expédition saturation.
+- Your rules, the position table, and the manual correction tool with its log.
+- Weekly physical checks during the pilot.
 
-**Done when:** The shipping team updates a truck in under 30 s and the TV shows it within 1 minute.
+**Done when:** 2 blocks counted within ±5 %, and at least 90 % of sampled pallets in their predicted block.
 
-### Phase 5: Alerts, history, automation
+### Phase 5: Pilot, alerts, automation
 
-- Your thresholds, the alert list and the TV ticker.
-- Replay of any past day.
-- Automatic upload: a synced Drive folder, or an SAP job that emails the file (needs SAP IT).
+- Two weeks in parallel: the twin compared every day with MB52 and with spot checks before it goes live on the floor.
+- Your thresholds, the alert list, replay of past days.
+- Automatic upload (a synced Drive folder, or an SAP job that emails the file), only once the export layout has been stable for 4 weeks.
 - Nightly backup and yearly archive.
 
-**Done when:** One full week without manual upload, with alerts reviewed with the team.
+**Done when:** The gap with MB52 stays under the agreed tolerance for 2 weeks, then one full week runs without manual upload.
 
 ## 11. Risks
 
 | Risk | What we do |
 |---|---|
-| Exports differ from one person or day to the next (other columns, filters, formats). | One saved global layout and selection variant. The import recognizes columns by name, refuses incomplete files, and checks that both lines of every transfer are there. |
-| No pallet ID in MB51, so pallets and dates are estimates. | Virtual pallets and FIFO, labeled as such. Add Lot or SSCC later if SAP has them. |
-| No starting stock, so the twin is wrong from day one. | MB52 at go-live, then a weekly comparison report twin vs MB52. |
-| Nobody uploads, and the twin silently shows old data. | A large "Données SAP du …" stamp turning orange then red, then automatic upload in phase 5. |
-| Operator names and SAP data visible through a shareable link. | No names on the TV, a read-only viewer project, and IT approval of the Google account used. |
-| The owner account is lost or its owner leaves. | A team account, the code in GitHub, a written deployment procedure and nightly backups. |
-| The placement shown differs from the floor. | Show it as theoretical until your rules are validated, then check 2 blocks physically. A manual correction exists in the admin project. |
-| The TV hardware cannot run the 3D view, or the network blocks the CDNs. | Test in phase 0. The 2D plan is the fallback, and the libraries can be served with the page. |
-| Google limits (6 min per run, 30 parallel calls, cells per file). | Calculate only on import, keep screen data small, and archive every year. |
+| The capacity is wrong (the sketch is denser than physically possible, 2 levels assumed, labels misread), so rack saturation, the main TV number, is wrong at the first demo. | Site survey and your validation of every block before phase 2. Show "capacité à confirmer" until then. |
+| No exits in the files, so EXP2 only fills up and exit dates are missing. | Exits (601 and other issues out of EXP2) required in phase 1, ideally in one MB51 selection. Weekly comparison with MB52. |
+| Pallets and positions on the screen differ from the floor, and people stop trusting it. | Pallets counted per article, positions labeled "théorique", a manual correction tool with a log, and weekly physical checks during the pilot. Ask for Lot or SSCC. |
+| Nobody uploads, and the TV shows old data while refreshing every minute. | A large freshness stamp turning orange then red, an e-mail when no import has happened by a set hour, a written procedure with a backup person, then automatic upload. |
+| Two overlapping or filtered exports double or halve the stock. | One movements table with a global duplicate check, an alert on transfers with a missing line, and a file refused when a transfer is incomplete. |
+| Operator names and SAP data visible through a link that can be forwarded; IT could stop the project after go-live. | IT approval in phase 0b, a read-only viewer project, no names on screens (Auto / Manuel), and a company Google Workspace if available. |
+| The dock data depends on people updating it, so the truck view is often wrong or empty. | Agree on what dock saturation means first, a 1-tap form on a tablet at the docks, and the shipped pallets per day from the 601 as a fallback. |
+| The TV cannot run the 3D view, or the plant network blocks the libraries. | Test in phase 0a on the real hardware; a mini-PC with Chrome; the libraries served with the page; the 2D plan as fallback. |
+| "Location assigned by criteria" grows into a put-away system outside SAP. | Decide descriptive or prescriptive now (see the decisions above). Prescriptive is a separate phase with scanning on the floor. |
+| The engine is tuned on clean simulated data and breaks on real exports. | The messy export files and the first real exports become automatic tests before phase 1 ends. |
+| The owner account is lost, or Google limits are reached as history grows. | A team account, the code in GitHub, nightly backups, monthly checkpoints and yearly archiving. |
 
-## 12. Open questions (most important first)
+## 12. Decisions to make before building
 
-1. Can you send one real export of each file? One day is enough, and names can be hidden.  
-   _Why: Everything else (columns, codes, number and date formats) is a guess until then._
-2. Is the production declaration posted with MvT 101 or 131, always into PRD2? And when you said "300", was it 301, or 311?  
-   _Why: It decides how pending pallets are created and which codes the import accepts._
-3. How do pallets leave EXP2 for customers: a 601 goods issue? Is it posted before or after the truck is loaded?  
-   _Why: It gives the exit date. Without it, the truck view and the dwell time have no SAP source._
-4. What values appear in column S (always empty? E? K? S/H?), and are negative quantities written -240 or 240-?  
-   _Why: Import parsing, and what counts as stock in EXP2._
-5. Could the two files become one MB51 selection: plant TA11, storage locations PRD2 + EXP2 + EMRT, all movement types? If not, do you filter the transfers on EXP2 only?  
-   _Why: One selection means no overlap between files. A filter on EXP2 removes half of every transfer._
-6. Is one declaration line one pallet? Where can I find the quantity per pallet (MM03 unit PAL, packing instruction, your own list)?  
-   _Why: No pallets, no saturation._
-7. Can a key user add columns to the export layout: Poste, Heure de saisie, Magasin récepteur, Lot, Référence?  
-   _Why: Exact pallets, hours, no duplicates._
-8. Are finished goods batch-managed or labeled with SSCC/HU in SAP? Is EXP2 managed by bins (WM/EWM)?  
-   _Why: If yes, SAP can give real pallet IDs, or even real locations, instead of estimates._
-9. For each block: real name, floor stacking or racks, how many levels? What are G1–G4 and the two green boxes at the top?  
-   _Why: Block capacity is the base of rack saturation and of the 3D view._
-10. Docks: how many pallets can wait in front of each dock? Where does truck information come from today? What exactly should the "truck image" show?  
-   _Why: Dock saturation and the truck view._
-11. Is the company on Google Workspace, or will this run on a personal Gmail? Can the TV link be "anyone with the link"?  
-   _Why: Access, the Google banner, and IT approval._
-12. How often can someone export (each shift, every hour)? Can you export MB52 on the go-live day?  
-   _Why: Freshness of the twin, and the starting stock._
+| Decision | Options | Recommendation |
+|---|---|---|
+| **Placement** | Descriptive (where pallets probably are) or prescriptive (tell drivers where to put them, with confirmation) | Descriptive first; prescriptive as a separate phase |
+| **Quai d'expédition saturation** | Doors occupied · pallets prepared vs space · trucks loaded per day | The first two on the TV, the third in history |
+| **Pallets prepared at the docks** | Apart from EXP2 or part of EXP2 | Part of EXP2 (SAP keeps them there until the 601), shown as a sub-total |
+| **Pallet counting** | Per article from quantities · one declaration line = one pallet | One line = one pallet if BARFLOW confirms it; otherwise per article |
+| **Google account and link** | Workspace with company-only access · Gmail with anyone-with-link | Workspace and a team owner account, with IT approval |
+| **"Today" on the TV** | Calendar day · production day (shifts) | Production day if shifts cross midnight |
+| **Import** | Manual · synced Drive folder · SAP job emailing the file | Manual first; automatic after 4 stable weeks |
 
-## 13. Simulated database
+## 13. Open questions (most important first)
+
+1. Can you send 1–2 weeks of both extractions exactly as exported (not re-saved), plus a screenshot of the MB51 selection screen and of the menu you use to export?  
+   _Why: Everything depends on these files: column S, the "300" code, 101 or 131, which storage locations are filtered, whether both lines of each transfer are there._
+2. How do pallets leave EXP2 (601 deliveries, transfers to EMRT, other)? Can those exits be in the same extraction, ideally one selection: TA11, PRD2 + EXP2 + EMRT, all movement types?  
+   _Why: Without exits there is no exit date and EXP2 only fills up._
+3. For each block: floor stacking or racks? How many lanes, how deep, how many levels? Are the numbers on your sketch (26, 72, 24, 36, 50) names or capacities? Is the building about 50 × 32 m, and does 1,600 m² include the offices, the AGV strip and the truck zone?  
+   _Why: Capacity is the denominator of every saturation figure, and the sketch as drawn is denser than physically possible._
+4. What does "Quai d'expédition saturation" mean for you: dock doors occupied, pallets prepared in front of the docks versus the space there, or trucks loaded per day? How many real dock doors are there?  
+   _Why: Three different figures with three different sources. The 8 positions of the sketch are 1.8 m apart, too close for truck doors._
+5. You wrote "track image" once and "truck image" once. Do you mean trucks or racks? For trucks: an icon per dock, the trailer filling up pallet by pallet, or a photo?  
+   _Why: The 3D scene and the docks page depend on it._
+6. Should the app only show where pallets probably are, or tell forklift drivers where to put each pallet (with a confirmation)?  
+   _Why: The second one is a put-away system with input on the floor: a much bigger project._
+7. Where do declared pallets physically wait before the transfer into EXP2: at the line, on the conveyor, or in the exchange zone inside EXP2?  
+   _Why: If they wait inside EXP2, they take space and must count in occupancy even though SAP still shows them in PRD2._
+8. Is one BARFLOW declaration exactly one physical pallet? Where is the quantity per pallet kept, and which articles are in KG?  
+   _Why: If one line is one pallet, pallets can be counted exactly instead of estimated._
+9. Can a key user add Poste, Exercice, Date and Heure de saisie, Magasin récepteur, Lot and the reversed document to one saved MB51 layout?  
+   _Why: A unique key per line, hours instead of days, and exact reversals. The app will also work without them, with more estimates._
+10. Is the company on Google Workspace? Has IT approved SAP stock data in Google? Can the TV link be "anyone with the link"? Who are the stakeholders?  
+   _Why: This decides the access setup and is a go/no-go before real data is loaded._
+11. Who will export and import, how often, at what time, and who replaces them? Can each export overlap the previous one by a few days?  
+   _Why: Freshness of the twin and the catching of back-dated postings._
+12. Which country and time zone is the site in, what are the shifts, and are Saturdays worked?  
+   _Why: Defines "today", ages in calendar or working days, and which data-protection law applies._
+13. What device will drive the TV, and can it reach cdn.jsdelivr.net and cdn.sheetjs.com from the plant network?  
+   _Why: Smart-TV browsers often cannot run the 3D view, and a blocked library breaks the import._
+14. Can you export an MB52 (or MB5B) for PRD2, EXP2 and EMRT on the go-live day, plus 60–90 days of receipts?  
+   _Why: The starting stock, and an estimated age for the pallets already there._
+
+## 14. Simulated database
 
 `sample-data/EXP2_twin_sample_db.xlsx` (and one CSV per tab in `sample-data/csv/`) simulates two weeks of a fictional EXP2 (21.09 → 03.10.2026, Monday to Saturday) with the exact 12 MB51 columns. See `sample-data/README.md` for the tab list. The `CALC_*` tabs are the expected results: the phase-1 app must reproduce them exactly.
 
-State on 03.10.2026: 997 pallets in EXP2 out of 1,464 places (68.1 %), 25 pallets pending in PRD2 (oldest 9 days), 381 pallets at EMRT, 73 pallets in and 65 out that day, trucks at 5 of 8 docks.
+State on 03.10.2026: 994 pallets in EXP2 out of 1,464 places (67.9 %), 22 pallets pending in PRD2 (oldest 9 days), 381 pallets at EMRT, 73 pallets in and 65 out that day, trucks at 5 of 8 docks.
 

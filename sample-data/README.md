@@ -11,7 +11,7 @@
 
 | Tab | What it is | Rows |
 |---|---|---:|
-| `LISEZ_MOI` | Read-me in French: purpose, period, assumptions, the deliberate traps. | 43 |
+| `LISEZ_MOI` | Read-me in French: purpose, period, assumptions, the deliberate traps. | 47 |
 | `SAP_DECLARATIONS` | Your first file: production declarations, the 12 MB51 columns, MvT 101 into PRD2. | 751 |
 | `SAP_TRANSFERTS` | Your second file: transfers 311 / 312, two lines per document. | 1,824 |
 | `SAP_SORTIES_601` | Proposed third file: shipments 601 out of EXP2. | 239 |
