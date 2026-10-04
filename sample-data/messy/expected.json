@@ -1,0 +1,1081 @@
+{
+  "description": "Expected result of importing the three messy MB51 files of sample-data/messy/ (simulated data). See README.md for every trap.",
+  "scenario": {
+    "base": {
+      "files": [
+        "sample-data/csv/SAP_DECLARATIONS.csv",
+        "sample-data/csv/SAP_TRANSFERTS.csv"
+      ],
+      "dates": [
+        "2026-10-02",
+        "2026-10-03"
+      ],
+      "lines": 442,
+      "declarations": 130,
+      "transferts": 312
+    },
+    "not_included": "SAP_SORTIES_601.csv (no 601 file in this set)",
+    "twin_loaded_until": "2026-10-01",
+    "batch_period": [
+      "2026-10-02",
+      "2026-10-03"
+    ],
+    "reference_import_order": [
+      "MB51_declarations_messy.xlsx",
+      "MB51_transferts_messy.xlsx",
+      "MB51_transferts_messy.txt"
+    ],
+    "reader": "Every physical row is kept, blank ones included (SheetJS: sheet_to_json(ws, {header: 1, raw: true, defval: null, blankrows: true}); .txt decoded as windows-1252, split on CRLF and TAB). With raw: true the real Excel dates arrive as serials (46297 = 2026-10-02, 46298 = 2026-10-03).",
+    "note": "Totals do not depend on the import order; per-file duplicate counts do. Pairing (orphan) and backdating checks run on the whole batch after the last file."
+  },
+  "rules": {
+    "plant": "TA11",
+    "dedup_key": "Doc.article|Article|Magasin|MvT|qty|date|rank, after normalisation (rank = 1 for every line here)",
+    "subtotal_row": "no Doc.article and a quantity -> skipped (subtotal / total)",
+    "backdated": "Date cpt. before the batch period (< 2026-10-02, i.e. on or before the last day already loaded)",
+    "orphan": "311/312 document whose lines do not form a zero-sum pair across the whole batch",
+    "auto_user": "BARFLOW_TA11 (compare ignoring spaces, underscores and case)"
+  },
+  "totals": {
+    "data_rows": 452,
+    "valid_lines": 446,
+    "valid_parsed_before_dedup": 451,
+    "duplicates_skipped": 5,
+    "rejected": 1,
+    "skipped": {
+      "subtotal": 34,
+      "header": 2,
+      "blank": 2,
+      "total": 38
+    },
+    "preamble_rows_before_header": 2,
+    "lines_flagged": 3,
+    "documents_flagged": 2
+  },
+  "per_file": {
+    "MB51_declarations_messy.xlsx": {
+      "preamble_rows_before_header": 0,
+      "data_rows": 133,
+      "valid_parsed": 132,
+      "duplicates_skipped": 0,
+      "new_lines": 132,
+      "rejected": 1,
+      "skipped": {
+        "subtotal": 25,
+        "header": 0,
+        "blank": 1
+      }
+    },
+    "MB51_transferts_messy.xlsx": {
+      "preamble_rows_before_header": 0,
+      "data_rows": 167,
+      "valid_parsed": 167,
+      "duplicates_skipped": 1,
+      "new_lines": 166,
+      "rejected": 0,
+      "skipped": {
+        "subtotal": 7,
+        "header": 1,
+        "blank": 0
+      }
+    },
+    "MB51_transferts_messy.txt": {
+      "preamble_rows_before_header": 2,
+      "data_rows": 152,
+      "valid_parsed": 152,
+      "duplicates_skipped": 4,
+      "new_lines": 148,
+      "rejected": 0,
+      "skipped": {
+        "subtotal": 2,
+        "header": 1,
+        "blank": 1
+      }
+    }
+  },
+  "flagged_documents": [
+    {
+      "doc": "4901257604",
+      "code": "TRANSFERT_ORPHELIN",
+      "label": "transfert orphelin",
+      "lines": 1,
+      "file": "MB51_transferts_messy.xlsx",
+      "rows": [
+        75
+      ],
+      "article": "1000887507",
+      "magasin": "EXP2",
+      "qty": 729.25,
+      "uqs": "KG",
+      "date": "2026-10-02",
+      "handling": "accepted; EXP2 entry with origin unknown (PRD2 leg missing)"
+    },
+    {
+      "doc": "4901257888",
+      "code": "ANTIDATE",
+      "label": "saisie antidatée (backdated)",
+      "lines": 2,
+      "file": "MB51_transferts_messy.txt",
+      "rows": [
+        101,
+        102
+      ],
+      "article": "1000516512",
+      "date": "2026-09-30",
+      "handling": "accepted; recompute from the last checkpoint on or before 2026-09-30"
+    }
+  ],
+  "rejected_lines": [
+    {
+      "doc": "4901257816",
+      "file": "MB51_declarations_messy.xlsx",
+      "row": 103,
+      "division": "TA12",
+      "article": "1000744039",
+      "reason": "Division TA12 hors périmètre (plant TA11 only)"
+    }
+  ],
+  "duplicates": [
+    {
+      "doc": "4901257446",
+      "magasin": "PRD2",
+      "article": "1000921426",
+      "qty": -200,
+      "kept_from": "MB51_declarations_messy.xlsx",
+      "skipped_in": "MB51_transferts_messy.xlsx"
+    },
+    {
+      "doc": "4901257657",
+      "magasin": "PRD2",
+      "article": "1000921426",
+      "qty": -200.0,
+      "kept_from": "MB51_transferts_messy.xlsx",
+      "skipped_in": "MB51_transferts_messy.txt"
+    },
+    {
+      "doc": "4901257657",
+      "magasin": "EXP2",
+      "article": "1000921426",
+      "qty": 200.0,
+      "kept_from": "MB51_transferts_messy.xlsx",
+      "skipped_in": "MB51_transferts_messy.txt"
+    },
+    {
+      "doc": "4901257659",
+      "magasin": "PRD2",
+      "article": "1000921426",
+      "qty": -200.0,
+      "kept_from": "MB51_transferts_messy.xlsx",
+      "skipped_in": "MB51_transferts_messy.txt"
+    },
+    {
+      "doc": "4901257659",
+      "magasin": "EXP2",
+      "article": "1000921426",
+      "qty": 200.0,
+      "kept_from": "MB51_transferts_messy.xlsx",
+      "skipped_in": "MB51_transferts_messy.txt"
+    }
+  ],
+  "extra_lines_vs_base": [
+    {
+      "article": "1000956436",
+      "division": "TA11",
+      "magasin": "PRD2",
+      "mvt": "101",
+      "texte": "EM entrée en stock",
+      "s": "",
+      "doc": "5000014382",
+      "date": "2026-10-02",
+      "qty": 1234.5,
+      "uqs": "KG",
+      "designation": "PF MELANGE MAITRE BLANC SAC",
+      "user": "PLANIF01"
+    },
+    {
+      "article": "1000887507",
+      "division": "TA11",
+      "magasin": "EXP2",
+      "mvt": "311",
+      "texte": "TR transf. dans div.",
+      "s": "",
+      "doc": "4901257604",
+      "date": "2026-10-02",
+      "qty": 729.25,
+      "uqs": "KG",
+      "designation": "PF COMPOUND ABS VRAC OCTABIN",
+      "user": "OPEXP02"
+    },
+    {
+      "article": "1000516512",
+      "division": "TA11",
+      "magasin": "PRD2",
+      "mvt": "311",
+      "texte": "TR transf. dans div.",
+      "s": "",
+      "doc": "4901257888",
+      "date": "2026-09-30",
+      "qty": -320.0,
+      "uqs": "PC",
+      "designation": "PF SUPPORT PARE-CHOC REF 19",
+      "user": "OPEXP01"
+    },
+    {
+      "article": "1000516512",
+      "division": "TA11",
+      "magasin": "EXP2",
+      "mvt": "311",
+      "texte": "TR transf. dans div.",
+      "s": "",
+      "doc": "4901257888",
+      "date": "2026-09-30",
+      "qty": 320.0,
+      "uqs": "PC",
+      "designation": "PF SUPPORT PARE-CHOC REF 19",
+      "user": "OPEXP01"
+    }
+  ],
+  "spot_checks": {
+    "note": "row = physical 1-based row (xlsx) or line (txt) of the file; expected normalised values",
+    "rows": [
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 8,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 9,
+        "traps": [
+          "2"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000207622",
+          "doc": "4901257951",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-03",
+          "qty": 400.0,
+          "uqs": "KG",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 15,
+        "traps": [
+          "2"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000216115",
+          "doc": "4901257450",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-02",
+          "qty": 1440.0,
+          "uqs": "PC",
+          "user": "PLANIF01"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 16,
+        "traps": [
+          "4"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000216115",
+          "doc": "4901257465",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-02",
+          "qty": 480.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 36,
+        "traps": [
+          "4"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000351589",
+          "doc": "4901257358",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-02",
+          "qty": 48.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 45,
+        "traps": [
+          "12"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000541046",
+          "doc": "4901257499",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-02",
+          "qty": 144.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 78,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "blank"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 79,
+        "traps": [
+          "2"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000715011",
+          "doc": "4901257571",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-02",
+          "qty": 750.0,
+          "uqs": "KG",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 87,
+        "traps": [
+          "4"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000730226",
+          "doc": "4901257700",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-03",
+          "qty": 24.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 103,
+        "traps": [
+          "13"
+        ],
+        "expect": {
+          "status": "rejected",
+          "division": "TA12"
+        },
+        "doc": "4901257816"
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 115,
+        "traps": [
+          "12"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000866025",
+          "doc": "4901257794",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-03",
+          "qty": 144.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 135,
+        "traps": [
+          "1",
+          "9"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000921426",
+          "doc": "4901257446",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -200.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 149,
+        "traps": [
+          "2",
+          "14"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000956436",
+          "doc": "5000014382",
+          "magasin": "PRD2",
+          "mvt": "101",
+          "date": "2026-10-02",
+          "qty": 1234.5,
+          "uqs": "KG",
+          "user": "PLANIF01"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 159,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_declarations_messy.xlsx",
+        "row": 160,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 2,
+        "traps": [
+          "1"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000744039",
+          "doc": "4901257411",
+          "magasin": "EMRT",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -1440.0,
+          "uqs": "PC",
+          "user": "CHEFQUAI1"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 6,
+        "traps": [
+          "4"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000184644",
+          "doc": "4901257486",
+          "magasin": "EMRT",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 200.0,
+          "uqs": "PC",
+          "user": "OPEXP01"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 9,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 12,
+        "traps": [
+          "4"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000351589",
+          "doc": "4901257342",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 48.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 17,
+        "traps": [
+          "12"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000744039",
+          "doc": "4901257363",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 480.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 20,
+        "traps": [
+          "3"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000887507",
+          "doc": "4901257378",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 600.0,
+          "uqs": "KG",
+          "user": "OPEXP03"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 38,
+        "traps": [
+          "1"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000541046",
+          "doc": "4901257445",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -288.0,
+          "uqs": "PC",
+          "user": "OPEXP03"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 45,
+        "traps": [
+          "12"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000216115",
+          "doc": "4901257470",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 480.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 75,
+        "traps": [
+          "2",
+          "10"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000887507",
+          "doc": "4901257604",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 729.25,
+          "uqs": "KG",
+          "user": "OPEXP02"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 93,
+        "traps": [
+          "3"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000921426",
+          "doc": "4901257659",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 200.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 94,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 95,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 96,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "header"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 98,
+        "traps": [
+          "1"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000954340",
+          "doc": "4901257334",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -480.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 99,
+        "traps": [
+          "4"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000351589",
+          "doc": "4901257342",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -48.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 104,
+        "traps": [
+          "12"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000744039",
+          "doc": "4901257363",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -480.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 111,
+        "traps": [
+          "3"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000751673",
+          "doc": "4901257394",
+          "magasin": "PRD2",
+          "mvt": "312",
+          "date": "2026-10-02",
+          "qty": 200.0,
+          "uqs": "PC",
+          "user": "OPEXP01"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 132,
+        "traps": [
+          "1"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000614750",
+          "doc": "4901257490",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -120.0,
+          "uqs": "PC",
+          "user": "OPEXP02"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 153,
+        "traps": [
+          "3"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000715011",
+          "doc": "4901257600",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -750.0,
+          "uqs": "KG",
+          "user": "OPEXP03"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 173,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 174,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 175,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.xlsx",
+        "row": 176,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 4,
+        "traps": [
+          "A"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000921426",
+          "doc": "4901257657",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -200.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 5,
+        "traps": [
+          "A"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000921426",
+          "doc": "4901257657",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 200.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 6,
+        "traps": [
+          "A"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000921426",
+          "doc": "4901257659",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": -200.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 7,
+        "traps": [
+          "A"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000921426",
+          "doc": "4901257659",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-02",
+          "qty": 200.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 8,
+        "traps": [
+          "12"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000921426",
+          "doc": "4901257664",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-10-03",
+          "qty": -200.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 20,
+        "traps": [
+          "4"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000914295",
+          "doc": "4901257679",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-03",
+          "qty": -320.0,
+          "uqs": "PC",
+          "user": "OPEXP01"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 49,
+        "traps": [
+          "12"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000216115",
+          "doc": "4901257771",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-03",
+          "qty": 480.0,
+          "uqs": "PC",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 80,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "header"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 101,
+        "traps": [
+          "11"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000516512",
+          "doc": "4901257888",
+          "magasin": "PRD2",
+          "mvt": "311",
+          "date": "2026-09-30",
+          "qty": -320.0,
+          "uqs": "PC",
+          "user": "OPEXP01"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 102,
+        "traps": [
+          "11"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000516512",
+          "doc": "4901257888",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-09-30",
+          "qty": 320.0,
+          "uqs": "PC",
+          "user": "OPEXP01"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 154,
+        "traps": [
+          "12"
+        ],
+        "expect": {
+          "status": "valid",
+          "article": "1000207622",
+          "doc": "4901257968",
+          "magasin": "EXP2",
+          "mvt": "311",
+          "date": "2026-10-03",
+          "qty": 400.0,
+          "uqs": "KG",
+          "user": "BARFLOW_TA11"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 157,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "blank"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 158,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      },
+      {
+        "file": "MB51_transferts_messy.txt",
+        "row": 159,
+        "traps": [
+          "6"
+        ],
+        "expect": {
+          "status": "skipped",
+          "kind": "subtotal"
+        }
+      }
+    ]
+  },
+  "valid_lines_check": {
+    "rule": "the valid lines are exactly the base lines plus extra_lines_vs_base (12 fields equal after normalisation)",
+    "count_by_magasin": {
+      "PRD2": 276,
+      "EXP2": 158,
+      "EMRT": 12
+    },
+    "qty_sum_by_magasin_unit": {
+      "EMRT PC": -608.0,
+      "EXP2 KG": 4379.25,
+      "EXP2 PC": 26631.0,
+      "PRD2 KG": 1834.5,
+      "PRD2 PC": -1628.0
+    },
+    "distinct_documents": 289,
+    "lines_user_BARFLOW_TA11": 355
+  }
+}

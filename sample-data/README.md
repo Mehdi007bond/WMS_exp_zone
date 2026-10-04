@@ -35,7 +35,8 @@
 
 - Opening stock first, then every SAP line sorted by `Date cpt.`, `Doc.article`, issuing line before receiving line.
 - Each positive line creates a FIFO layer (entry date = `Date cpt.`); each negative line consumes the oldest layers. Reversals (102 / 312 / 602) consume the newest layer instead.
-- Virtual pallets of a layer = ceil(quantity ÷ `Qté par palette`). Unknown articles have no pallets and are reported.
+- Pallets per article and storage location = ceil(total quantity ÷ `Qté par palette`): at most one partial pallet per article, attributed to the oldest layer. Unknown articles have no pallets and are reported.
+- Daily flows count ceil(line quantity ÷ `Qté par palette`) per SAP line; `Déclarations` = pallets declared (101) minus pallets reversed (102); entries and exits exclude reversals. `Palettes (équiv.)` of an exit = slice quantity ÷ `Qté par palette`, 2 decimals.
 - `CALC_BLOCS` uses a **placeholder** placement (family → block color) until the real placement rules are given.
 
 ## Traps included on purpose
@@ -48,3 +49,7 @@
 - 2 pallets that do not fit their family's blocks (row `À PLACER`).
 
 The phase-1 import and calculation must reproduce every `CALC_*` tab exactly from the `SAP_*` tabs, `ARTICLES` and `LAYOUT`.
+
+## Messy export files (`messy/`)
+
+Three files that look like real SAP MB51 exports, built from the clean days 02.10 and 03.10: trailing minus (`320-`), decimal commas, text dates, subtotal and repeated header rows, changed column order and long header labels, the positive leg of a transfer before the negative one, the same document in two files, a lone transfer leg, a back-dated posting, `BAR FLOW TA11` written with spaces, a line from plant TA12, and a document number from another range. `messy/expected.json` gives what the importer must find (446 valid lines, 5 duplicates skipped, 1 rejected, 38 rows skipped, 2 documents flagged). See `messy/README.md`.

@@ -107,8 +107,8 @@ Mockups of all of them are in the [illustrated plan](https://claude.ai/artifact/
 
 | Phase | Content | Done when |
 |---|---|---|
-| **Phase 0a** | Demo on simulated data: Load the sample database into a Google Sheet and deploy a read-only viewer: the TV screen and the article lookup, marked "DONNÉES SIMULÉES".; Run it on the real TV hardware and the plant network: 3D, CDN libraries, link access, Google banner.; Show it to the stakeholders and collect their reactions. | Stakeholders have seen it on the real TV, and the 3D view and libraries work on the plant network. |
-| **Phase 0b** | Clarify and approve: Answer the questions at the end of this page; send 1–2 weeks of real exports, unmodified.; Site survey: real dimensions, block types and levels, real dock doors.; IT approval of the Google account and of the link mode; list of stakeholders. | Written IT approval, a validated capacity per block, and real files that import into the sample structure. |
+| **Phase 0a** **(next)** | Demo on simulated data: Load the sample database into a Google Sheet and deploy a read-only viewer: the TV screen and the article lookup, marked "DONNÉES SIMULÉES".; Run it on the real TV hardware and the plant network: 3D, CDN libraries, link access, Google banner.; Show it to the stakeholders and collect their reactions. | Stakeholders have seen it on the real TV, and the 3D view and libraries work on the plant network. |
+| **Phase 0b** **(next)** | Clarify and approve: Answer the questions at the end of this page; send 1–2 weeks of real exports, unmodified.; Site survey: real dimensions, block types and levels, real dock doors.; IT approval of the Google account and of the link mode; list of stakeholders. | Written IT approval, a validated capacity per block, and real files that import into the sample structure. |
 | **Phase 1** | Data foundation: One movements table for all files, a global duplicate check, exits and opening stock required.; The calculation engine (stock per storage location, pending, FIFO dates, pallets per article), tested automatically on the sample database and the messy export files.; The import page with its checks, the freshness stamp, the import log.; A one-page procedure in French: who exports and imports, when, and who replaces them. | EXP2 stock in the twin equals MB52, article by article. Re-uploading a file adds 0 lines. The messy files give exactly their expected results. |
 | **Phase 2** | PC: lookup, pending, saturation: Pages: Recherche article, En attente, Plan 2D.; Saturation per block and overall, positions labeled "théorique" (placeholder by family).; Floor occupancy in m². | Any article found in under 10 s with its entry dates. Block saturation matches a count of 2 blocks within ±5 %. |
 | **Phase 3** | TV, 3D and docks: The 3D view from the `LAYOUT` tab, rotating TV scenes, automatic refresh, kiosk setup.; The truck visit log on a tablet at the docks; the truck view and dock saturation. | The TV runs 5 working days unattended; over 90 % of truck visits are logged during a pilot week. |
@@ -127,7 +127,8 @@ WMS_exp_zone/
 └── sample-data/
     ├── README.md                   ← what each tab contains
     ├── EXP2_twin_sample_db.xlsx    ← simulated database, Google-Sheets-ready
-    └── csv/                        ← one CSV per tab (same content)
+    ├── csv/                        ← one CSV per tab (same content)
+    └── messy/                      ← realistic messy SAP exports + expected import results
 ```
 
 Planned from phase 1 (not created yet):
