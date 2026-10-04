@@ -1,0 +1,44 @@
+Rubrique,Contenu
+Objet,"Base de données de test pour le jumeau numérique EXP2 (application Google Apps Script + Google Sheets). Sert à développer et tester l'écran (vue 3D, stock, attente, saturation, quais) avant d'avoir les vraies extractions SAP."
+Statut,"DONNEES SIMULEES - aucune donnée réelle SAP. Articles, documents, utilisateurs, camions et transporteurs sont fictifs. Générateur déterministe (graine 2026)."
+Période,Du lundi 21.09.2026 au samedi 03.10.2026. Jours ouvrés lundi-samedi ; aucune saisie le dimanche 27.09.2026.
+Date de référence,03.10.2026 fin de journée (as-of). Stock initial au 20.09.2026. Âges et attentes en jours calendaires (date de référence - date).
+Périmètre,"Division TA11 uniquement. Magasins : PRD2 = production, EXP2 = notre entrepôt d'expédition (le jumeau, ≈ 1 600 m², 50 x 32 m supposé), EMRT = entrepôt externe."
+Onglet SAP_DECLARATIONS,"SAP brut (format MB51) : déclarations de production en PRD2, MvT 101 (+) et une annulation 102 (-)."
+Onglet SAP_TRANSFERTS,SAP brut (format MB51) : transferts 311 entre magasins (2 lignes par document : émetteur négatif puis récepteur positif) et deux annulations 312.
+Onglet SAP_SORTIES_601,SAP brut PROPOSÉ (à confirmer) : sorties marchandises livraison client MvT 601 depuis EXP2 (négatif).
+Onglet SAP_STOCK_INITIAL,SAP brut PROPOSÉ (format MB52) : photo du stock au 20.09.2026 par article et magasin.
+Onglet ARTICLES,"Référentiel : qté par palette, type et hauteur de palette, gerbage, famille (39 articles : un article volontairement absent)."
+Onglet LAYOUT,"Référentiel : objets du plan (bâtiment, blocs, zone camion, quais, voies, zones) en mètres ; origine = coin haut-gauche, X vers la droite (50 m), Y vers le bas (32 m)."
+Onglet QUAIS_CAMIONS,"Saisie manuelle PROPOSÉE (équipe expédition, dans l'application) : état des quais et camions le 03.10.2026 vers 15:00."
+Onglet REGLES_PLACEMENT,"Paramètre : règles de placement, à définir avec l'équipe (fournies plus tard)."
+Onglet PARAM_MAGASINS,Paramètre : rôle de chaque magasin dans le jumeau.
+Onglet PARAM_MOUVEMENTS,"Paramètre : types de mouvement, effet par magasin, prise en compte (textes approximatifs, à vérifier)."
+Onglet PARAM_SEUILS,"Paramètre : capacités, seuils (vieillissement à définir), rafraîchissement TV."
+Onglet CALC_STOCK,Calculé à partir des onglets SAP - résultat attendu : stock par article et magasin (qté et palettes).
+Onglet CALC_EN_ATTENTE,Calculé à partir des onglets SAP - résultat attendu : couches PRD2 restantes (palettes en attente).
+Onglet CALC_FIFO_EXP2,Calculé à partir des onglets SAP - résultat attendu : couches FIFO EXP2 restantes avec âge.
+Onglet CALC_SORTIES,Calculé à partir des onglets SAP - résultat attendu : consommation des couches EXP2 par les sorties (601 et 311 vers EMRT).
+Onglet CALC_JOURNALIER,Calculé à partir des onglets SAP - résultat attendu : indicateurs par jour calendaire 21.09-03.10.
+Onglet CALC_BLOCS,"Calculé à partir des onglets SAP - résultat attendu : placement PROVISOIRE par famille (F1->B1,B7 ; F2->B2,B8 ; F3->B3,B5 ; F4->B4 ; F5->B6)."
+Onglet CALC_KPI,Calculé à partir des onglets SAP - résultat attendu : indicateurs de l'écran à la date de référence.
+Hypothèse - colonne S,"S = indicateur de stock spécial (SOBKZ) : vide = stock propre (presque toutes les lignes), E = stock client (sur commande) compté dans le stock physique avec un badge. Ce n'est pas le code débit/crédit (S/H) : le signe est déjà dans Qté en UQS."
+Hypothèse - MvT,"Déclaration de production = 101 (131 possible en fabrication répétitive). Textes 'Texte code mvt' approximatifs, à vérifier sur un vrai fichier. Le code 300 cité n'existe pas en standard SAP (probablement 301 ou famille 3xx)."
+Hypothèse - palettes,"Palettes virtuelles = arrondi supérieur (qté / Qté par palette) par couche (stock, attente, FIFO) ou par ligne (déclarations, entrées, sorties du jour). Article inconnu : palettes vides, exclu des totaux palettes."
+Hypothèse - ordre de traitement,"Stock initial d'abord, puis toutes les lignes des 3 onglets SAP bruts triées par (Date cpt., Doc.article, ligne émettrice avant ligne réceptrice). Doc.article croissant = ordre de saisie."
+Hypothèse - FIFO,"Une couche par ligne positive {date entrée = Date cpt., Doc.article, qté, origine}. Une ligne négative consomme les couches les plus anciennes (FIFO), SAUF les annulations 102/312/602 qui consomment la couche la plus récente (LIFO). Couches du stock initial datées 20.09.2026, origine 'Stock initial'. Un retour EMRT->EXP2 crée une nouvelle couche (l'âge repart de la date du retour)."
+Hypothèse - capacité,"Capacité = Colonnes x Rangées x Niveaux des 8 blocs = 1464 palettes. Saturation EXP2 = palettes EXP2 / 1464. Zone quai : 12 palettes par quai (hypothèse). Camion 13,6 m : 33 palettes EUR max."
+Hypothèse - placement,"Placement par famille = PROVISOIRE (familles F1 blanc, F2 crème, F3 cyan, F4 rose, F5 vert = couleurs des blocs du croquis), en attendant les vraies règles. Palettes d'une famille réparties sur ses blocs au prorata de la capacité ; le surplus va dans la ligne 'À PLACER'."
+Hypothèse - jours,"Âge, attente et séjour en jours calendaires. Déclarations du jour = palettes des lignes 101 moins palettes des lignes 102. Entrées / sorties EXP2 du jour : annulations exclues ; le stock fin de journée est recalculé à partir des couches (il n'est donc pas exactement stock veille + entrées - sorties)."
+Cas limite - annulation 102,"Doc.article 4901255240 du 23.09.2026 annule la déclaration 4901255238 (article 1000614750, 120 PC) ; cette quantité n'est jamais transférée."
+Cas limite - annulation 312 (PRD2->EXP2),Doc.article 4901257394 du 02.10.2026 annule le transfert 4901257393 (article 1000751673) : la palette revient en PRD2 et redevient « en attente » (couche datée du 02.10.2026).
+Cas limite - annulation 312 (EXP2->EMRT),"Doc.article 4901256531 du 29.09.2026 annule le transfert 4901256530 (article 1000614750) : le stock revient en EXP2 (nouvelle couche, origine EMRT)."
+Cas limite - article inconnu,"Article 1000571497 (PF CARTER NOUVELLE VERSION REF 35) présent dans SAP_DECLARATIONS et SAP_TRANSFERTS mais absent de ARTICLES : qté calculée, palettes vides, signalé 'INCONNU' dans CALC_STOCK et compté dans CALC_KPI."
+Cas limite - palettes partielles,"21 lignes de déclaration en palette partielle (50-90 % d'une palette), des sorties 601 partielles et des restes de couches partiels (comptés 1 palette chacun)."
+Cas limite - articles en KG,"5 articles en KG (format #,##0.000) : 1000674421, 1000207622, 1000887507, 1000715011, 1000956436."
+Cas limite - stock spécial E,"4 lignes avec S = E (article 1000683594, PF BOITIER SERIE SPECIALE REF 34) : déclaration, transfert 311 (2 lignes) et sortie 601 de stock client."
+Cas limite - palettes bloquées en attente,5 lignes déclarées au moins 3 jours ouvrés avant le 03.10.2026 et jamais transférées : 1000516512 du 24.09.2026 (Doc.article 4901255337); 1000812390 du 25.09.2026 (Doc.article 4901255583); 1000435003 du 29.09.2026 (Doc.article 4901256434); 1000435003 du 29.09.2026 (Doc.article 4901256441); 1000914295 du 30.09.2026 (Doc.article 4901256883).
+Cas limite - surcapacité,Placement provisoire : 2 palettes hors capacité (famille(s) F5) dans la ligne 'À PLACER' de CALC_BLOCS.
+Limite connue,"Le FIFO est calculé sur les quantités (MB51 ne contient pas de numéro de palette / HU). Quand des palettes partielles et des transferts se croisent, une couche peut être coupée : les palettes virtuelles peuvent alors dépasser légèrement les palettes physiques, et la date d'une couche en attente peut différer de la palette réellement restée en PRD2. Ajouter Lot / numéro de palette à l'extraction lèverait cette limite."
+Résultat attendu (as-of),EXP2 997 palettes / 1464 = 68.1 % ; en attente PRD2 25 palettes ; EMRT 381 palettes ; quais occupés 5/8 ; saturation zone quais 43.8 %.
+Import Google Sheets,"Article, Doc.article et MvT sont du TEXTE. Importer le fichier xlsx, ou importer les CSV sans « convertir le texte en nombres, dates et formules ». CSV : UTF-8, séparateur virgule, dates jj.mm.aaaa, point décimal, pas de séparateur de milliers."

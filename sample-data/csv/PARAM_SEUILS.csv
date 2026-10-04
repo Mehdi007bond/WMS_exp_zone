@@ -1,0 +1,13 @@
+Paramètre,Valeur,Unité,Commentaire
+Date de référence (as-of),03.10.2026,date,Fin de journée ; toutes les durées sont calculées à cette date
+Surface bâtiment EXP2,1600,m²,50 x 32 m supposé d'après le ratio du croquis (à confirmer)
+Capacité totale de stockage,1464,palettes,Somme de Capacité (palettes) des blocs B1-B8 de LAYOUT (Colonnes x Rangées x Niveaux)
+Nombre de quais,8,quais,Q01-Q08 d'après le croquis
+Capacité zone quai par quai,12,palettes,Hypothèse à confirmer
+Capacité zone quai totale,96,palettes,Nombre de quais x capacité par quai
+"Capacité camion (semi-remorque 13,6 m)",33,palettes EUR,Maximum 33 palettes EUR 1200x800 au sol
+Seuil âge stock EXP2 - alerte,à définir,jours,Seuils de vieillissement fournis plus tard
+Seuil âge stock EXP2 - critique,à définir,jours,Seuils de vieillissement fournis plus tard
+Seuil attente PRD2 - alerte,à définir,jours,Palette déclarée mais pas transférée vers EXP2
+Seuil saturation EXP2 - alerte,à définir,%,Proposition à valider
+Rafraîchissement écran TV,60,s,Rechargement automatique de l'écran mural

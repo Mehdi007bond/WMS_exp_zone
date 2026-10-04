@@ -1,0 +1,13 @@
+Indicateur,Valeur,Unité,Définition
+Palettes EXP2,997,palettes,"Somme des palettes virtuelles (arrondi supérieur par couche FIFO) des couches EXP2 restantes, articles connus"
+Capacité totale de stockage,1464,palettes,Somme de Capacité (palettes) des blocs B1-B8 (LAYOUT)
+Saturation EXP2,0.681,%,Palettes EXP2 / capacité totale de stockage
+Palettes en attente (PRD2),25,palettes,"Couches PRD2 restantes : déclarées (101) ou retournées (312) et pas encore transférées vers EXP2, articles connus"
+Plus ancienne attente,9,jours,Date de référence - plus ancienne date des couches PRD2 restantes (jours calendaires)
+Entrées EXP2 du jour,73,palettes,"Lignes positives EXP2 hors annulations (102/312/602) du 03.10.2026, arrondi supérieur par ligne"
+Sorties EXP2 du jour,65,palettes,"Lignes négatives EXP2 hors annulations (601 + 311 vers EMRT) du 03.10.2026, arrondi supérieur par ligne"
+Palettes EMRT,381,palettes,Somme des palettes virtuelles des couches EMRT restantes
+Saturation zone quais,0.4375,%,Somme Palettes en zone quai / somme Capacité zone quai (QUAIS_CAMIONS)
+Quais occupés,5/8,quais,Quais dont le statut n'est pas « Libre » (QUAIS_CAMIONS)
+Âge plus ancienne couche EXP2,13,jours,Date de référence - plus ancienne Date entrée des couches EXP2 restantes
+Articles inconnus,1,articles,Articles présents dans les extractions SAP mais absents de ARTICLES : 1000571497 (palettes non calculables)

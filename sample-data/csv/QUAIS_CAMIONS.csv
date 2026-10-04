@@ -1,0 +1,9 @@
+Quai,Statut quai,Camion,Transporteur,Couleur cabine,Arrivée,Départ prévu,Palettes prévues,Palettes chargées,Palettes en zone quai,Capacité zone quai (pal)
+Q01,Occupé - chargement en cours,CAM-01,Transporteur A,bleu,13:40,15:30,33,21,12,12
+Q02,Occupé - chargement en cours,CAM-02,Transporteur B,rouge,14:05,16:00,26,9,12,12
+Q03,Libre,,,,,,,,0,12
+Q04,Occupé - en attente chargement,CAM-03,Transporteur C,vert,14:30,16:45,30,0,8,12
+Q05,"Occupé - chargé, départ imminent",CAM-04,Transporteur A,gris,12:15,15:15,22,22,0,12
+Q06,Libre,,,,,,,,0,12
+Q07,Occupé - chargement en cours,CAM-05,Transporteur B,jaune,14:50,17:00,18,4,10,12
+Q08,Libre,,,,,,,,0,12
