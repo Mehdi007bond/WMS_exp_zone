@@ -1,0 +1,10 @@
+Bloc,Libellé (sketch),Famille(s),Capacité (pal),Palettes placées,Saturation (%)
+B1,Allée 26 (?),F1,260,153,0.5885
+B2,Allée 72 (?),F2,96,56,0.5833
+B3,Allée 24 (?),F3,96,78,0.8125
+B4,Allée 36 / 72 (?),F4,120,91,0.7583
+B5,Allée 26 (?),F3,260,213,0.8192
+B6,Allée 50 (?),F5,80,80,1
+B7,(sans libellé),F1,240,141,0.5875
+B8,Allée 72 (?),F2,312,183,0.5865
+À PLACER,Hors capacité des blocs (placeholder),F5,,2,

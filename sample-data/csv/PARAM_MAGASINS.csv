@@ -1,0 +1,4 @@
+Magasin,Rôle,Dans le jumeau
+PRD2,Magasin de production : stock déclaré (101) en attente de transfert vers EXP2,Non - affiché comme « en attente » (file avant entrée)
+EXP2,Notre entrepôt d'expédition produits finis (≈ 1 600 m²) - objet du jumeau,"Oui - stock placé dans les blocs, quais et camions"
+EMRT,Entrepôt externe,Non - stock externe affiché en indicateur (entrées / sorties EXP2)

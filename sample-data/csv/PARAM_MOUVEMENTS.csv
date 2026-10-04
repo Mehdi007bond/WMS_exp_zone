@@ -1,0 +1,23 @@
+MvT,Texte,Signification,Effet PRD2,Effet EXP2,Effet EMRT,Pris en compte
+101,EM entrée en stock,Déclaration de production : entrée marchandises pour ordre de fabrication (BARFLOW_TA11 ou manuel),+ qté (palette en attente),+ qté si l'ordre réceptionne directement en EXP2 (à vérifier),-,Oui - déclaration
+102,EM entrée stock ann.,Annulation d'une déclaration 101,"- qté (consomme la couche la plus récente, LIFO)",- qté si la 101 était en EXP2,-,Oui - annulation (LIFO)
+131,Entrée marchandises (REM),Déclaration en fabrication répétitive (MFBF / backflush REM),+ qté,+ qté si réception en EXP2,-,À confirmer (même traitement que 101 si utilisé)
+132,Annulation 131,Annulation d'une déclaration REM,- qté (LIFO),-,-,À confirmer (même traitement que 102)
+261,SM pour ordre,Consommation de composants (souvent dans le même document que 101/131),- composants (matières),-,-,Non (composants) - à confirmer
+262,SM pour ordre annul.,Annulation consommation composants,+ composants,-,-,Non (composants) - à confirmer
+300,(aucun),"Code non standard SAP : probablement 301 ou famille 3xx, ou code spécifique",?,?,?,À confirmer avec l'utilisateur (pivot MvT d'une extraction réelle)
+301,TR division à division,Transfert 1 étape vers une autre division,-,- qté si EXP2 émetteur (sortie du site),-,À confirmer
+311,TR transf. dans div.,"Transfert magasin à magasin (1 étape) : 2 lignes, même Doc.article",- qté si PRD2 émetteur (palette quitte l'attente),+ qté si récepteur (entrée) / - qté si émetteur (sortie vers EMRT),+ qté si récepteur / - qté si émetteur,Oui - transfert
+312,TR transf. div. ann.,Annulation d'un 311 (signes inversés),+ qté si la 311 venait de PRD2 (retour en attente),"inverse de la 311 (sortie consomme la couche la plus récente, LIFO)",inverse de la 311 (LIFO),Oui - annulation (LIFO)
+313,TR sortie stock mag.,"Transfert 2 étapes, étape 1 : sortie du magasin émetteur (stock en transfert)",-,"- qté (palette en transit, ex. navette EMRT)",+ stock en transfert (non utilisable),À confirmer (si utilisé)
+315,TR entrée stock mag.,"Transfert 2 étapes, étape 2 : mise en stock au magasin récepteur",-,+ qté si récepteur,+ qté si récepteur,À confirmer (si utilisé)
+321,TR contrôle qualité -> libre,"Changement de type de stock (CQ -> libre), pas de mouvement physique",statut,statut (couleur palette),statut,À confirmer (statut seulement)
+343,TR bloqué -> libre,"Changement de type de stock (bloqué -> libre), pas de mouvement physique",statut,statut (couleur palette),statut,À confirmer (statut seulement)
+344,TR libre -> bloqué,"Changement de type de stock (libre -> bloqué), pas de mouvement physique",statut,statut (palette bloquée),statut,À confirmer (statut seulement)
+551,SM mise au rebut,Sortie pour mise au rebut,-,"- qté (sortie, motif rebut)",- qté,À confirmer (si EXP2/EMRT)
+601,SM livraison,Sortie marchandises pour livraison client (VL02N / VL06G),-,"- qté (sortie client, camion)",- qté si expédié depuis EMRT,Oui - sortie
+602,SM livraison annul.,Annulation d'une sortie 601,-,+ qté (retour en stock),+ qté,Oui - annulation
+641,TR vers stock en transit,Sortie pour commande de transfert (autre division) via livraison,-,- qté (sortie),-,À confirmer (si utilisé)
+643,TR inter-sociétés,Sortie pour commande de transfert inter-sociétés (1 étape),-,- qté (sortie),-,À confirmer (si utilisé)
+701,EM inventaire : libre,Écart d'inventaire positif (MI07),+ qté,+ qté (écart inventaire),+ qté,À confirmer
+702,SM inventaire : libre,Écart d'inventaire négatif (MI07),- qté,- qté (écart inventaire),- qté,À confirmer
