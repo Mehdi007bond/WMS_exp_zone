@@ -1,0 +1,13 @@
+{
+  "name": "exp2-digital-twin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EXP2 warehouse digital twin: Google Apps Script + Google Sheets (tests and local harness)",
+  "scripts": {
+    "test": "node --test tests/",
+    "harness": "node tests/harness/build.js"
+  },
+  "devDependencies": {
+    "xlsx": "0.18.5"
+  }
+}

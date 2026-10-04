@@ -1,0 +1,5 @@
+node_modules/
+tests/harness/out/
+tests/harness/vendor/
+.clasp.json
+.clasprc.json
