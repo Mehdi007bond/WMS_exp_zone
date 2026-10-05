@@ -8,6 +8,7 @@ function ConfigModule_() {
     MOVEMENTS: 'MOUVEMENTS',
     OPENING: 'STOCK_INITIAL',
     ARTICLES: 'ARTICLES',
+    PROJECTS: 'PROJETS',
     LAYOUT: 'LAYOUT',
     RULES: 'REGLES_PLACEMENT',
     MVT: 'PARAM_MOUVEMENTS',
@@ -26,13 +27,16 @@ function ConfigModule_() {
     LOOKUP: '_LOOKUP'
   };
 
-  // Headers of the tabs the app writes. CALC_* headers are identical to sample-data/csv.
+  // Headers of the tabs the app writes. The first CALC_* columns are identical to sample-data/csv (v1 oracle);
+  // v2 columns are always appended at the end, so a v1 sheet is migrated by adding headers (docs/SPEC_V2.md 3).
   var HEADERS = {
     MOUVEMENTS: ['Clé', 'Article', 'Division', 'Magasin', 'MvT', 'Texte code mvt', 'S', 'Doc.article', 'Poste',
-      'Date cpt.', 'Qté en UQS', 'UQS', 'Désignation article', 'Nom utilisateur', 'Source', 'Import', 'Ajouté le'],
+      'Date cpt.', 'Qté en UQS', 'UQS', 'Désignation article', 'Nom utilisateur', 'Source', 'Import', 'Ajouté le',
+      'Saisie le', 'Étiquette', 'Texte en-tête', 'Texte', 'Référence', 'Client', 'Commande client'],
     STOCK_INITIAL: ['Article', 'Division', 'Magasin', 'Désignation article', 'Stock utilisation libre', 'UQS', 'Date stock'],
     ARTICLES: ['Article', 'Désignation article', 'UQS', 'Qté par palette', 'Type palette', 'Hauteur palette (cm)',
-      'Niveaux gerbage max', 'Famille'],
+      'Niveaux gerbage max', 'Famille', 'Projet'],
+    PROJETS: ['Projet', 'Blocs', 'Couleur', 'Commentaire'],
     LAYOUT: ['ID', 'Type', 'Libellé (sketch)', 'X (m)', 'Y (m)', 'Largeur (m)', 'Profondeur (m)', 'Colonnes', 'Rangées',
       'Niveaux', 'Capacité (palettes)', 'Couleur', 'Statut'],
     REGLES_PLACEMENT: ['Priorité', 'Critère', 'Valeur', 'Bloc cible', 'Commentaire'],
@@ -43,15 +47,17 @@ function ConfigModule_() {
     VISITES_CAMIONS: ['Horodatage', 'Quai', 'Statut quai', 'Camion', 'Transporteur', 'Arrivée', 'Départ prévu',
       'Palettes prévues', 'Palettes chargées', 'Palettes en zone quai', 'Saisi par'],
     CALC_STOCK: ['Article', 'Désignation article', 'UQS', 'Qté par palette', 'PRD2 qté', 'PRD2 palettes', 'EXP2 qté',
-      'EXP2 palettes', 'EMRT qté', 'EMRT palettes'],
-    CALC_EN_ATTENTE: ['Article', 'Désignation article', 'Date déclaration', 'Doc.article', 'Qté', 'Palettes', 'Attente (jours)'],
+      'EXP2 palettes', 'EMRT qté', 'EMRT palettes', 'Source qté/pal', 'Projet'],
+    CALC_EN_ATTENTE: ['Article', 'Désignation article', 'Date déclaration', 'Doc.article', 'Qté', 'Palettes', 'Attente (jours)',
+      'Étiquette', 'Saisie le', 'Attente (h)', 'Niveau', 'Projet'],
     CALC_FIFO_EXP2: ['Article', 'Désignation article', 'Date entrée', 'Doc.article entrée', 'Origine', 'Qté restante',
-      'Palettes', 'Âge (jours)'],
+      'Palettes', 'Âge (jours)', 'Étiquette', 'Saisie le', 'Âge (h)', 'Projet'],
     CALC_SORTIES: ['Article', 'Date entrée', 'Date sortie', 'Qté', 'Palettes (équiv.)', 'Destination', 'Séjour (jours)',
-      'Doc.article sortie'],
+      'Doc.article sortie', 'Étiquette', 'Entrée le', 'Sortie le', 'Séjour (h)'],
     CALC_JOURNALIER: ['Date', 'Déclarations (pal)', 'Entrées EXP2 (pal)', 'Sorties EXP2 (pal)',
-      'Stock EXP2 fin de journée (pal)', 'Saturation EXP2 (%)', 'En attente PRD2 fin de journée (pal)'],
-    CALC_BLOCS: ['Bloc', 'Libellé (sketch)', 'Famille(s)', 'Capacité (pal)', 'Palettes placées', 'Saturation (%)'],
+      'Stock EXP2 fin de journée (pal)', 'Saturation EXP2 (%)', 'En attente PRD2 fin de journée (pal)',
+      'Délai PRD2→EXP2 médian (h)', 'Délai PRD2→EXP2 P90 (h)'],
+    CALC_BLOCS: ['Bloc', 'Libellé (sketch)', 'Famille(s)', 'Capacité (pal)', 'Palettes placées', 'Saturation (%)', 'Projet(s)'],
     CALC_KPI: ['Indicateur', 'Valeur', 'Unité', 'Définition'],
     IMPORT_LOG: ['Horodatage', 'Type', 'Fichier', 'Période', 'Lues', 'Nouvelles', 'Déjà connues', 'Rejetées',
       'Alertes', 'Résultat', 'Durée (s)']
@@ -69,8 +75,8 @@ function ConfigModule_() {
   };
 
   var MVT_TEXTS = {
-    '101': 'EM entrée en stock', '102': 'EM entrée stock ann.', '131': 'Entrée marchandises (REM)', '132': 'Annulation 131',
-    '311': 'TR transf. dans div.', '312': 'TR transf. div. ann.', '313': 'TR sortie stock mag.', '315': 'TR entrée stock mag.',
+    '101': 'EM entrée en stock', '102': 'EM entrée stock ann.', '131': 'Entrée marchandises', '132': 'Annulation 131',
+    '311': 'TR dans division', '312': 'TR transf. div. ann.', '313': 'TR sortie stock mag.', '315': 'TR entrée stock mag.',
     '601': 'SM livraison', '602': 'SM livraison annul.', '641': 'TR vers stock en transit', '643': 'TR inter-sociétés',
     '551': 'SM mise au rebut', '701': 'EM inventaire : libre', '702': 'SM inventaire : libre',
     '261': 'SM pour ordre', '262': 'SM pour ordre annul.', '321': 'TR contrôle qualité -> libre', '322': 'TR libre -> contrôle qualité',
@@ -85,26 +91,35 @@ function ConfigModule_() {
     freshWarnH: 4,          // hours since last import before the TV badge turns orange
     freshCritH: 24,         // red
     tvRefreshS: 60,         // version polling period
-    tvSceneS: 45            // rotating TV scenes
+    tvSceneS: 45,           // rotating TV scenes
+    pendingHoursWarn: 4,    // label in PRD2 since this many hours (entry time), amber
+    pendingHoursCrit: 6,    // red: a reference in PRD2 for more than 6 h is a real problem (user rule)
+    labelIsPallet: 1,       // 1 label (container number) = 1 pallet
+    importTrackedOnly: 1,   // import keeps finished goods only (articles that reach EXP2, or listed in ARTICLES)
+    trackAll: 0             // engine: 1 = compute every article, not only the tracked ones
   };
+
+  // Label (container number) found in the MB51 texts: item text of any line, or header text of a declaration
+  // ('434514671|20261005010841' -> '434514671'). docs/SPEC_V2.md 2.3.
+  var LABEL = { itemRe: '^\\d{6,12}$', headerRe: '^(\\d{6,12})(?:[_|].*)?$', headerMvts: ['101', '102', '131', '132'] };
 
   // Display colors. Families mirror the block colors of the user's sketch.
   var COLORS = {
     blocks: { blanc: '#f5f6f7', creme: '#efe3bb', cyan: '#c3e4ec', rose: '#f1cadb', vert: '#cfe6c8' },
     families: { F1: '#e7ebef', F2: '#ecdeb0', F3: '#a2dce9', F4: '#f0c0d5', F5: '#b8e2ab' },
+    // Projects without a color in PROJETS, in sorted name order (light enough for dark pallets text, distinct from
+    // the saturation blue / amber / red).
+    projects: ['#7fb3e0', '#f2b27a', '#8fd19e', '#e79ac0', '#c3a6e8', '#f3d36b', '#7fd1cf', '#e8a39a', '#b4c77a',
+      '#a9b8d6', '#d9b48f', '#9fd4f0'],
+    noProject: '#c9ced6',
     familyByBlockColor: { blanc: 'F1', creme: 'F2', cyan: 'F3', rose: 'F4', vert: 'F5' },
     cabs: { bleu: '#2a78d6', rouge: '#e34948', vert: '#1baf7a', gris: '#8a949e', jaune: '#eda100' },
     status: { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b' }
   };
 
-  // Placeholder placement until the real rules are given: family -> blocks of the same sketch color.
-  var DEFAULT_RULES = [
-    { priority: 10, criterion: 'FAMILLE', value: 'F1', blocks: ['B1', 'B7'] },
-    { priority: 10, criterion: 'FAMILLE', value: 'F2', blocks: ['B2', 'B8'] },
-    { priority: 10, criterion: 'FAMILLE', value: 'F3', blocks: ['B3', 'B5'] },
-    { priority: 10, criterion: 'FAMILLE', value: 'F4', blocks: ['B4'] },
-    { priority: 10, criterion: 'FAMILLE', value: 'F5', blocks: ['B6'] }
-  ];
+  // Placement comes from the projects (PROJETS: project -> blocks) and REGLES_PLACEMENT; no placeholder rules
+  // (v1 used families F1-F5 here). docs/SPEC_V2.md 4.7.
+  var DEFAULT_RULES = [];
 
   // Warehouse layout redrawn from the user's sketch (meters, origin top-left, 50 x 32 m assumed).
   var DEFAULT_LAYOUT = {
@@ -469,10 +484,10 @@ function ConfigModule_() {
 
   return {
     APP_NAME: 'EXP2 · Jumeau numérique',
-    VERSION: '1.0.0',
+    VERSION: '2.0.0',
     PLANT: 'TA11',
     MAGASINS: { PRD2: 'PRD2', EXP2: 'EXP2', EMRT: 'EMRT' },
-    AUTO_USERS: ['BARFLOW_TA11'],
+    AUTO_USERS: ['BARFLOW_TA11', 'ADMINJOB'],
     TRUCK_CAPACITY: 33,
     DOCK_STAGING_CAPACITY: 12,
     TABS: TABS,
@@ -480,6 +495,7 @@ function ConfigModule_() {
     MVT_KINDS: MVT_KINDS,
     MVT_TEXTS: MVT_TEXTS,
     THRESHOLDS: THRESHOLDS,
+    LABEL: LABEL,
     COLORS: COLORS,
     DEFAULT_RULES: DEFAULT_RULES,
     DEFAULT_LAYOUT: DEFAULT_LAYOUT
