@@ -10,7 +10,8 @@
  *   App.withKey(scope, fn)       asks the key once in an in-page modal, keeps it in sessionStorage
  *   App.modal(opts), App.toast() in-page dialogs and notices (no alert / confirm / prompt)
  *   App.go(page, params)         in-app navigation (google.script.history or history.pushState), no reload
- *   App.fmt                      fr-FR numbers, dd.mm.yyyy dates, times, ages and durations
+ *   App.fmt                      fr-FR numbers, dd.mm.yyyy dates, SAP entry times (dd/mm hh:mm), ages and durations
+ *   App.projectColor / projectLegend / pendingStats   projects and pending labels of a state (docs/SPEC_V2.md 4.9)
  *
  * The page runs inside the Apps Script iframe: the top-level URL is read with google.script.url and changed with
  * google.script.history; window.location / window.history are the fallbacks (local harness).
@@ -21,7 +22,7 @@
   var CONF = typeof CFG !== 'undefined' && CFG ? CFG : {};
   var THR_DEFAULT = {
     satWarn: 0.85, satCrit: 0.95, pendingDaysWarn: 3, pendingDaysCrit: 6, dockStagingWarn: 0.85,
-    freshWarnH: 4, freshCritH: 24, tvRefreshS: 60, tvSceneS: 45
+    freshWarnH: 4, freshCritH: 24, tvRefreshS: 60, tvSceneS: 45, pendingHoursWarn: 4, pendingHoursCrit: 6, importTrackedOnly: 1
   };
   var THR = assign({}, THR_DEFAULT, CONF.THRESHOLDS || {});
   var CABS = (CONF.COLORS && CONF.COLORS.cabs) || { bleu: '#2a78d6', rouge: '#e34948', vert: '#1baf7a', gris: '#8a949e', jaune: '#eda100' };
@@ -105,6 +106,29 @@
       var d = new Date(v);
       if (isNaN(d.getTime())) return String(v);
       return pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + '.' + d.getFullYear() + ' à ' + fmt.time(d);
+    },
+    /**
+     * SAP entry time 'yyyy-mm-dd hh:mm:ss' (wall clock, no time zone) -> 'dd/mm/yyyy hh:mm'; short: 'dd/mm hh:mm'.
+     * Read as text, never through Date: the time written by SAP is shown as is, whatever the browser time zone.
+     */
+    stamp: function (ts, short) {
+      var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(ts || ''));
+      if (!m) return ts ? String(ts) : '–';
+      return m[3] + '/' + m[2] + (short ? '' : '/' + m[1]) + ' ' + m[4] + ':' + m[5];
+    },
+    stampShort: function (ts) {
+      return fmt.stamp(ts, true);
+    },
+    /** 'yyyy-mm-dd hh:mm:ss' -> 'hh:mm' ('' when no time). */
+    clock: function (ts) {
+      var m = /[ T](\d{2}):(\d{2})/.exec(String(ts || ''));
+      return m ? m[1] + ':' + m[2] : '';
+    },
+    /** Hours (decimal, e.g. 8.2 or 44.04) -> '8 h 12', '44 h 02', '0 h 35' (minutes rounded down, as the alerts). */
+    hm: function (h) {
+      if (!isNum(h)) return '–';
+      var min = Math.floor(Math.max(0, Number(h)) * 60 + 1e-6);
+      return Math.floor(min / 60) + ' h ' + pad2(min % 60);
     },
     /** Duration in ms -> '45 s', '12 min', '3 h 05', '2 j 4 h'. */
     duration: function (ms) {
@@ -386,6 +410,9 @@
     var imported = isNaN(t) ? '' : (sameDay ? 'à ' + fmt.time(t) : 'le ' + fmt.dateShort(new Date(t).toISOString()) + ' à ' + fmt.time(t));
     var sim = state.source === 'SIMULATION';
     var verb = sim ? 'générées' : 'importées';
+    // With entry times (v2), the data runs up to the latest SAP entry: 'Données SAP jusqu’au 05/10/2026 22:09'.
+    var ts = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(String(state.asOfTs || '')) ? fmt.stamp(state.asOfTs) : '';
+    var lead = sim ? (ts ? 'Données simulées jusqu’au' : 'Données simulées au') : (ts ? 'Données SAP jusqu’au' : 'Données SAP du');
     return {
       level: level,
       label: label,
@@ -393,12 +420,14 @@
       age: age,
       ago: age === null ? '' : fmt.ago(age),
       asOf: fmt.date(state.asOf),
+      asOfStamp: ts,
+      asOfLabel: ts || fmt.date(state.asOf),
       imported: imported,
       simulated: sim,
       verb: verb,
-      // 'Données SAP du 03.10.2026 · importées à 07:42' / 'Données simulées au 03.10.2026 · générées à 21:10'
-      lead: sim ? 'Données simulées au' : 'Données SAP du',
-      text: (sim ? 'Données simulées au ' : 'Données SAP du ') + fmt.date(state.asOf) + (imported ? ' · ' + verb + ' ' + imported : '')
+      // 'Données SAP jusqu’au 05/10/2026 22:09 · importées à 07:42' / 'Données simulées au 03.10.2026 · générées à 21:10'
+      lead: lead,
+      text: lead + ' ' + (ts || fmt.date(state.asOf)) + (imported ? ' · ' + verb + ' ' + imported : '')
     };
   };
 
@@ -620,7 +649,7 @@
   // ---------------------------------------------------------------------------------------------------------------
   var KEY_PREFIX = 'exp2.key.';
   var KEY_LABELS = {
-    admin: { title: 'Clé administrateur', what: 'importer, simuler ou recalculer' },
+    admin: { title: 'Clé administrateur', what: 'importer, simuler, recalculer ou modifier les projets' },
     docks: { title: 'Clé quais', what: 'modifier les quais (la clé administrateur convient aussi)' }
   };
 
@@ -923,6 +952,98 @@
     return v >= thr.satCrit ? 'c' : v >= thr.satWarn ? 'w' : 'n';
   };
 
+  /** Yes / no setting of PARAM_SEUILS (1 / 0, '1', 'oui', true...); def when empty. */
+  App.flag = function (v, def) {
+    if (v === null || v === undefined || v === '') return !!def;
+    if (typeof v === 'boolean') return v;
+    var s = fold(v);
+    if (/^(0|non|no|false|faux)$/.test(s)) return false;
+    if (/^(1|oui|yes|true|vrai)$/.test(s)) return true;
+    return isNum(v) ? Number(v) !== 0 : !!def;
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Projects (state.projects colors, state.projectsList) and pending labels (state.pending, docs/SPEC_V2.md 4.9)
+  // ---------------------------------------------------------------------------------------------------------------
+  var NO_PROJECT = 'Sans projet';
+  App.NO_PROJECT = NO_PROJECT;
+  var NO_PROJECT_COLOR = (CONF.COLORS && CONF.COLORS.noProject) || '#c9ced6';
+  App.NO_PROJECT_COLOR = NO_PROJECT_COLOR;
+
+  /** Color of a project in a state (PROJETS › Couleur or the automatic palette); grey for no project. */
+  App.projectColor = function (state, name) {
+    var map = (state && state.projects) || {};
+    if (name && map[name]) return map[name];
+    if (name) {
+      var key = fold(name);
+      for (var k in map) if (Object.prototype.hasOwnProperty.call(map, k) && fold(k) === key) return map[k];
+    }
+    return map[NO_PROJECT] || NO_PROJECT_COLOR;
+  };
+
+  /** True when the state has at least one real project (v2 data); v1 states use the families. */
+  App.hasProjects = function (state) {
+    return ((state && state.projectsList) || []).some(function (p) { return p && p.project && p.project !== NO_PROJECT; });
+  };
+
+  /**
+   * Legend entries of the project colors: projects with references or blocks, then 'Sans projet' when pallets
+   * have no project. -> [{ label, color, exp2, pending }] ([] for a v1 state).
+   */
+  App.projectLegend = function (state) {
+    if (!App.hasProjects(state)) return [];
+    return state.projectsList.filter(function (p) {
+      if (p.project === NO_PROJECT) return (p.exp2Pallets || 0) + (p.pendingPallets || 0) > 0;
+      return (p.articles || 0) > 0 || (p.blocks || []).length > 0;
+    }).map(function (p) {
+      return { label: p.project, color: p.color || App.projectColor(state, p.project), exp2: p.exp2Pallets || 0, pending: p.pendingPallets || 0 };
+    });
+  };
+
+  /** Level of a pending row: the engine's ('crit' | 'warn' | ''), else the day rule (state of v1). */
+  App.pendingLevel = function (p, thr) {
+    if (p && (p.level === 'crit' || p.level === 'warn' || p.level === '')) return p.level;
+    thr = thr || THR;
+    var d = p ? Number(p.days) : NaN;
+    if (!isFinite(d)) return '';
+    return d >= (thr.pendingDaysCrit || 2 * thr.pendingDaysWarn) ? 'crit' : d >= thr.pendingDaysWarn ? 'warn' : '';
+  };
+
+  /**
+   * Pending figures of a state for the pending page and the TV: labels (one row per label) and unlabeled rows
+   * (quantities without a container number), counted by level; the oldest row; the hour thresholds.
+   * -> { rows, labels, unlabeled, crit, warn, critRows, warnRows, critUnlabeled, oldest, timed, truncated, total, thr }
+   *    crit / warn count labels (rows with a label); critRows / warnRows count every row.
+   */
+  App.pendingStats = function (state) {
+    var thr = App.thresholds(state);
+    var rows = ((state && state.pending) || []).slice();
+    var out = { rows: rows, labels: 0, unlabeled: 0, crit: 0, warn: 0, critRows: 0, warnRows: 0, critUnlabeled: 0, oldest: null,
+      timed: false, truncated: false, total: rows.length, thr: thr };
+    rows.forEach(function (p) {
+      var lvl = App.pendingLevel(p, thr);
+      if (p.label) out.labels++;
+      else out.unlabeled++;
+      if (lvl === 'crit') {
+        out.critRows++;
+        if (p.label) out.crit++;
+        else out.critUnlabeled++;
+      } else if (lvl === 'warn') {
+        out.warnRows++;
+        if (p.label) out.warn++;
+      }
+      if (isNum(p.hours)) out.timed = true;
+      var o = out.oldest;
+      if (!o || (isNum(p.hours) ? !isNum(o.hours) || Number(p.hours) > Number(o.hours) : !isNum(o.hours) && Number(p.days) > Number(o.days))) {
+        out.oldest = p;
+      }
+    });
+    var total = state && isNum(state.pendingTotal) ? Number(state.pendingTotal) : rows.length;
+    out.total = Math.max(total, rows.length);
+    out.truncated = out.total > rows.length;
+    return out;
+  };
+
   /** Truck at a dock (side view). dark: TV palette. Free dock: dashed outline. */
   App.truckSvg = function (d, dark) {
     var cap = Number(CONF.TRUCK_CAPACITY) || 33;
@@ -971,6 +1092,42 @@
       '<circle cx="' + e[0].toFixed(1) + '" cy="' + e[1].toFixed(1) + '" r="3.5" fill="' + (opts.dot || '#eef2f6') + '" stroke="' + (opts.dotStroke || '#0b1016') + '" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>';
   };
 
+  // Hour threshold as written in PARAM_SEUILS: 6 -> '6', 4.5 -> '4,5'.
+  App.hText = function (v) {
+    return String(Number(v)).replace('.', ',');
+  };
+
+  /**
+   * Pending labels by waiting time (rows with hours): < 1 h, 1-2 h, 2 h-warn, warn-crit, crit-2 x crit, > 2 x crit.
+   * -> [{ label, lo, hi, value (rows), level: '' | 'warn' | 'crit', color }]; the bars from the thresholds are amber
+   * and red.
+   */
+  App.pendingBuckets = function (rows, thr) {
+    thr = thr || THR;
+    var warn = Number(thr.pendingHoursWarn) > 0 ? Number(thr.pendingHoursWarn) : 4;
+    var crit = Number(thr.pendingHoursCrit) > 0 ? Number(thr.pendingHoursCrit) : 6;
+    var edges = [1, 2, warn, crit, 2 * crit].sort(function (a, b) { return a - b; })
+      .filter(function (x, i, a) { return i === 0 || x > a[i - 1]; });
+    var out = [];
+    for (var i = 0; i <= edges.length; i++) {
+      var lo = i ? edges[i - 1] : 0, hi = i < edges.length ? edges[i] : Infinity;
+      var level = lo >= crit ? 'crit' : lo >= warn ? 'warn' : '';
+      out.push({ lo: lo, hi: hi, value: 0, level: level, color: level === 'crit' ? '#d03b3b' : level === 'warn' ? '#d99a00' : null,
+        label: i === 0 ? '< ' + App.hText(hi) + ' h' : hi === Infinity ? '> ' + App.hText(lo) + ' h' : App.hText(lo) + '–' + App.hText(hi) + ' h' });
+    }
+    (rows || []).forEach(function (p) {
+      if (!isNum(p.hours)) return;
+      var h = Number(p.hours);
+      for (var j = 0; j < out.length; j++) {
+        if (h >= out[j].lo && h < out[j].hi) {
+          out[j].value++;
+          break;
+        }
+      }
+    });
+    return out;
+  };
+
   /** Pending pallets grouped by declaration date (oldest first): [{ date, pallets, lines, unknown }]. */
   App.pendingByDate = function (state) {
     var by = {}, out = [];
@@ -988,7 +1145,7 @@
   };
 
   /**
-   * Vertical bar chart (SVG string) of [{ label, value, title, hot }].
+   * Vertical bar chart (SVG string) of [{ label, value, title, hot, color }] (color: own bar color, e.g. red).
    * opts: { w, h, dark, ariaLabel }.
    */
   App.barChart = function (rows, opts) {
@@ -1010,7 +1167,7 @@
     });
     rows.forEach(function (r, i) {
       var h = (r.value || 0) / max * (bottom - top), cx = left + slot * i + slot / 2, y = bottom - h;
-      var col = r.hot ? hot : cold;
+      var col = r.color || (r.hot ? hot : cold);
       var rr = Math.min(4, barW / 4, h / 2);
       s += '<g><title>' + esc(r.title || (r.label + ' : ' + r.value)) + '</title>';
       if (h > 0) {
@@ -1031,12 +1188,13 @@
   /**
    * Mounts the three.js twin (window.Twin3D) when supported, else the isometric canvas (window.IsoView).
    * A lost WebGL context switches to the isometric view for good.
-   * opts: { autoRotate, mode: 'family'|'age'|'saturation', theme: 'dark'|'light', boost, labelPx, dockLabels, onPick(info), onSwitch(kind) }
+   * opts: { autoRotate, mode: 'project'|'age'|'saturation' ('family' = 'project'), theme: 'dark'|'light', boost, labelPx,
+   *         dockLabels, onPick(info), onSwitch(kind) }
    * -> { kind: '3d'|'iso', update(state), resize(), setMode(mode), legend(state), highlight(article), destroy() }
    */
   App.mountTwin = function (container, state, opts) {
     opts = opts || {};
-    var mode = opts.mode || 'family';
+    var mode = opts.mode === 'age' || opts.mode === 'saturation' ? opts.mode : 'project';
     var current = state;
     var impl = null;
     var api = { kind: 'iso' };
@@ -1138,8 +1296,8 @@
     };
     api.resize = function () { impl.resize(); };
     api.setMode = function (m) {
-      mode = m;
-      impl.setMode(m);
+      mode = m === 'age' || m === 'saturation' ? m : 'project';
+      impl.setMode(mode);
     };
     api.legend = function (s) { return impl.legend(s || current); };
     api.highlight = function (a) { impl.highlight(a); };

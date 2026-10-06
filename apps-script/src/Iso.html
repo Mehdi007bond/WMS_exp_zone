@@ -4,9 +4,11 @@
  *
  *   IsoView.draw(canvas, layout, state, opts)
  *     layout: state.layout or CFG.DEFAULT_LAYOUT (normalised by Plan2D.normLayout)
- *     state:  compact state - pallets per block (state.blocks, state.blockContents with family colors from
- *             state.families), trucks (state.docks), pending ghosts (state.kpi.pendingPallets), block tags
- *     opts:   { mode: 'family' | 'age' | 'saturation', boost (canvas resolution factor), pending (override) }
+ *     state:  compact state - pallets per block (state.blocks, state.blockContents colored by project from
+ *             state.projects, by family for v1 data, grey when neither), trucks (state.docks), pending ghosts
+ *             (state.kpi.pendingPallets, red for state.kpi.pendingCrit), block tags (title = project names)
+ *     opts:   { mode: 'project' | 'age' | 'saturation' ('family' = 'project'), boost (canvas resolution factor),
+ *               pending (override) }
  *   IsoView.legend(mode, state) -> [{ color, label }] (same entries as Twin3D.legend)
  *
  * The canvas takes the CSS size of its element; the picture is always dark (TV palette).
@@ -21,6 +23,8 @@
   var AGE_DAYS = { warn: 7, crit: 14 };
   // Hand-tuned tag heights (m) so that the labels of the default layout do not overlap; other blocks use 3.4 m.
   var TAG_Z = { B2: 5.8, B4: 1.4, B6: 4.6 };
+  var NO_PROJECT = 'Sans projet';
+  var GHOST = '#7cc8ff', GHOST_CRIT = '#ff5a5a';
 
   function conf() {
     return typeof CFG !== 'undefined' && CFG ? CFG : {};
@@ -100,6 +104,31 @@
     return BLOCK_FAM[block.color] || '#c8ced5';
   }
 
+  function projectColor(state, name) {
+    if (!name) return null;
+    var map = (state && state.projects) || {};
+    if (map[name]) return map[name];
+    var low = String(name).toLowerCase();
+    for (var k in map) if (Object.prototype.hasOwnProperty.call(map, k) && k.toLowerCase() === low) return map[k];
+    return null;
+  }
+
+  function noProjectColor(state) {
+    var map = (state && state.projects) || {};
+    return map[NO_PROJECT] || (conf().COLORS || {}).noProject || '#c9ced6';
+  }
+
+  function hasProjects(state) {
+    return ((state && state.projectsList) || []).some(function (p) { return p && p.project && p.project !== NO_PROJECT; });
+  }
+
+  // Pallet color in the project mode: its project, else its family (v1 data), else neutral grey.
+  function entryColor(state, e, block, blockState) {
+    var projects = (blockState && blockState.projects) || block.projects || [];
+    if (!e) return projectColor(state, projects[0]) || familyColor(state, '', block);
+    return projectColor(state, e.project) || (e.family ? familyColor(state, e.family, block) : null) || noProjectColor(state);
+  }
+
   function isFree(d) {
     if (window.App && window.App.dockKind) return window.App.dockKind(d) === 'free';
     return !d.truck || String(d.status || '').toLowerCase() === 'libre';
@@ -127,12 +156,23 @@
         { label: pct(thr.satCrit) + ' et plus', color: st.critical }
       ];
     }
+    if (hasProjects(state)) {
+      return state.projectsList.filter(function (p) {
+        if (p.project === NO_PROJECT) return (Number(p.exp2Pallets) || 0) + (Number(p.pendingPallets) || 0) > 0;
+        return (Number(p.articles) || 0) > 0 || (p.blocks || []).length > 0;
+      }).map(function (p) {
+        return { label: p.project, color: p.color || projectColor(state, p.project) || noProjectColor(state) };
+      });
+    }
     var fams = {}, k;
-    var base = (conf().COLORS || {}).families || {};
-    for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) fams[k] = base[k];
     var sf = (state && state.families) || {};
     for (k in sf) if (Object.prototype.hasOwnProperty.call(sf, k)) fams[k] = sf[k];
-    return Object.keys(fams).sort().map(function (f) { return { label: 'Famille ' + f, color: fams[f] }; });
+    if (!Object.keys(fams).length && !(state && state.projects)) {
+      var base = (conf().COLORS || {}).families || {};
+      for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) fams[k] = base[k];
+    }
+    var out = Object.keys(fams).sort().map(function (f) { return { label: 'Famille ' + f, color: fams[f] }; });
+    return out.length ? out : [{ label: NO_PROJECT, color: noProjectColor(state) }];
   }
 
   function draw(canvas, layout, state, opts) {
@@ -140,7 +180,7 @@
     var W = canvas.clientWidth, H = canvas.clientHeight;
     if (!W || !H) return null;
     var L = window.Plan2D ? window.Plan2D.normLayout(layout) : layout;
-    var mode = opts.mode || 'family';
+    var mode = opts.mode === 'age' || opts.mode === 'saturation' ? opts.mode : 'project';
     var dpr = Math.min(3, (window.devicePixelRatio || 1) * (opts.boost || 1));
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
@@ -242,10 +282,10 @@
       // One color per pallet, in the order of the block contents (articles, oldest pallets first).
       var colors = [];
       (contents[b.id] || []).forEach(function (e) {
-        var col = mode === 'age' ? ageColor(e.ageMax, thrC) : mode === 'saturation' ? satColor(sat, thrC) : familyColor(state, e.family, b);
+        var col = mode === 'age' ? ageColor(e.ageMax, thrC) : mode === 'saturation' ? satColor(sat, thrC) : entryColor(state, e, b, bs);
         for (var k = 0; k < (Number(e.pallets) || 0) && colors.length < total; k++) colors.push(col);
       });
-      var fallback = mode === 'saturation' ? satColor(sat, thrC) : mode === 'age' ? '#9aa4ae' : familyColor(state, '', b);
+      var fallback = mode === 'saturation' ? satColor(sat, thrC) : mode === 'age' ? '#9aa4ae' : entryColor(state, null, b, bs);
       while (colors.length < total) colors.push(fallback);
       var cw = b.w / b.cols, ch = b.h / b.rows, pw = cw * 0.8, pd = ch * 0.8;
       var cache = {};
@@ -270,21 +310,32 @@
       });
     }
     var pending = opts.pending !== undefined ? Number(opts.pending) : Number(state && state.kpi ? state.kpi.pendingPallets : 0) || 0;
+    var pendingCrit = Number(state && state.kpi ? state.kpi.pendingCrit : 0) || 0;
     var gx = conv ? conv.x + 0.7 : 6, gy = conv ? conv.y - 1.55 : BH - 5;
     var maxG = conv ? Math.max(1, Math.floor((conv.w - 0.7) / 1.05)) : 16;
+    // The oldest first along the conveyor: those waiting more than pendingHoursCrit are red.
     for (var gI = 0; gI < Math.min(pending, maxG); gI++) {
-      items.push({ x: gx + gI * 1.05, y: gy, z: 0, w: 0.82, d: 0.82, h: 0.95, ghost: '#7cc8ff', k: gx + gy + gI * 1.05 });
+      items.push({ x: gx + gI * 1.05, y: gy, z: 0, w: 0.82, d: 0.82, h: 0.95, ghost: gI < pendingCrit ? GHOST_CRIT : GHOST, k: gx + gy + gI * 1.05 });
     }
     items.sort(function (a, b) { return a.k - b.k; });
     items.forEach(box);
 
     // Labels.
     ctx.textBaseline = 'middle';
-    function tag(x, y, z, txt, bg, fg, size, weight) {
+    // Tag centered on a 3D point; sub: smaller second line (block id and saturation under the project names).
+    function tag(x, y, z, txt, bg, fg, size, weight, sub) {
       var p = P(x, y, z);
       size = size || fs;
-      ctx.font = (weight || 600) + ' ' + size + 'px "IBM Plex Sans", system-ui, sans-serif';
-      var w = ctx.measureText(txt).width + size, hh = size + 8;
+      var font = (weight || 600) + ' ' + size + 'px "IBM Plex Sans", system-ui, sans-serif';
+      var subSize = Math.round(size * 0.8), subFont = '600 ' + subSize + 'px "IBM Plex Sans", system-ui, sans-serif';
+      ctx.font = font;
+      var w = ctx.measureText(txt).width;
+      if (sub) {
+        ctx.font = subFont;
+        w = Math.max(w, ctx.measureText(sub).width);
+      }
+      w += size;
+      var hh = size + 8 + (sub ? subSize + 2 : 0);
       ctx.fillStyle = bg;
       ctx.beginPath();
       if (ctx.roundRect) ctx.roundRect(p[0] - w / 2, p[1] - hh / 2, w, hh, 4);
@@ -292,7 +343,14 @@
       ctx.fill();
       ctx.fillStyle = fg;
       ctx.textAlign = 'center';
-      ctx.fillText(txt, p[0], p[1] + 0.5);
+      ctx.font = font;
+      if (!sub) {
+        ctx.fillText(txt, p[0], p[1] + 0.5);
+        return;
+      }
+      ctx.fillText(txt, p[0], p[1] - hh / 2 + 4 + size / 2 + 0.5);
+      ctx.font = subFont;
+      ctx.fillText(sub, p[0], p[1] + hh / 2 - 4 - subSize / 2 + 0.5);
     }
     var thr = (window.App && window.App.thresholds) ? window.App.thresholds(state) : (conf().THRESHOLDS || { satWarn: 0.85, satCrit: 0.95 });
     if (opts.labels !== false) {
@@ -301,10 +359,17 @@
         var v = bs && bs.saturation !== null && bs.saturation !== undefined ? Number(bs.saturation) : 0;
         var col = v >= thr.satCrit ? '#d03b3b' : v >= thr.satWarn ? '#fab219' : 'rgba(15,23,32,.92)';
         var fg = v >= thr.satWarn && v < thr.satCrit ? '#1b1405' : '#eef2f6';
-        tag(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, b.id + '  ' + Math.round(v * 100) + '\u00a0%', col, fg);
+        var pctTxt = Math.round(v * 100) + '\u00a0%';
+        // Title (project names) with 'B1 · 63 %' small; without a title (v1): 'B1  63 %'.
+        var title = String((bs && bs.title) || b.title || '');
+        if (title) tag(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, title, col, fg, null, 700, b.id + ' · ' + pctTxt);
+        else tag(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, b.id + '  ' + pctTxt, col, fg);
       });
       if (pending > 0) {
-        tag(conv ? conv.x + conv.w / 2 : 14, conv ? conv.y + 1 : BH - 2.4, 1.6, 'En attente PRD2 : ' + pending + ' pal', 'rgba(22,74,118,.92)', '#eef6ff');
+        var hCrit = Number((thr && thr.pendingHoursCrit) || 6);
+        tag(conv ? conv.x + conv.w / 2 : 14, conv ? conv.y + 1 : BH - 2.4, 1.6, 'En attente PRD2 : ' + pending + ' pal' +
+          (pendingCrit > 0 ? ' · ' + pendingCrit + ' > ' + String(hCrit).replace('.', ',') + ' h' : ''),
+          pendingCrit > 0 ? 'rgba(125,30,30,.94)' : 'rgba(22,74,118,.92)', '#eef6ff');
       }
       if (L.truckZone) {
         tag(L.truckZone.x + 0.6, L.truckZone.y + 0.6, 0.2, 'Zone camion', 'rgba(10,15,20,.75)', '#a8b4c0', Math.max(10, fs - 2), 500);

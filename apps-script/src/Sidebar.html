@@ -57,6 +57,7 @@
     .alerts { margin: 8px 0 0; padding: 0; list-style: none; }
     .alerts li { font-size: 12px; padding: 3px 0 3px 10px; border-left: 3px solid var(--warn); margin-bottom: 4px; color: var(--ink); }
     .alerts li.crit { border-left-color: var(--crit); }
+    dd.crit { color: var(--crit); }
     form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
     input {
@@ -113,8 +114,8 @@
   <section class="card">
     <h2>Simulation</h2>
     <form id="simForm" autocomplete="off">
-      <label>Jours ouvrés
-        <input type="number" id="days" min="1" max="60" step="1" value="14" required>
+      <label>Jours
+        <input type="number" id="days" min="1" max="60" step="1" value="7" required>
       </label>
       <label>Date de fin
         <input type="date" id="endDate">
@@ -122,8 +123,8 @@
       <details>
         <summary>Options avancées</summary>
         <div class="grid">
-          <label>Palettes / jour
-            <input type="number" id="palletsPerDay" min="5" max="500" step="1" placeholder="auto (70)">
+          <label title="Étiquettes déclarées par jour (1 étiquette = 1 palette)">Étiquettes / jour
+            <input type="number" id="palletsPerDay" min="20" max="1500" step="1" placeholder="auto (450)">
           </label>
           <label title="Même numéro = mêmes données simulées">Variante (n°)
             <input type="number" id="seed" min="0" step="1" value="2026">
@@ -132,12 +133,20 @@
       </details>
     </form>
     <div class="actions">
-      <button type="submit" form="simForm" class="primary" id="btnSimulate">Générer 14 jours</button>
+      <button type="submit" form="simForm" class="primary" id="btnSimulate">Générer 7 jours</button>
       <button type="button" id="btnNextDay">+1 jour</button>
       <button type="button" id="btnRecompute">Recalculer</button>
     </div>
     <div id="msg" class="msg" role="status"></div>
     <p class="hint">« Générer » remplace les données simulées (un second clic confirme) ; les lignes importées depuis SAP sont conservées.</p>
+  </section>
+
+  <section class="card">
+    <h2>Projets &amp; références</h2>
+    <p class="hint" style="margin:0 0 8px">Affectez les références à des projets : les noms de projet remplacent B1…B8 sur tous les écrans.</p>
+    <div class="actions" style="margin-top:0">
+      <button type="button" id="btnProjects">Ouvrir le panneau Projets</button>
+    </div>
   </section>
 
   <section class="card">
@@ -197,6 +206,18 @@
         return (Math.round(f * 1000) / 10).toFixed(1).replace('.', ',') + '\u00a0%';
       }
 
+      // 44.04 -> '44 h 02'.
+      function frHours(h) {
+        if (h === null || h === undefined || isNaN(h)) return '';
+        var min = Math.round(h * 60);
+        return Math.floor(min / 60) + ' h ' + (min % 60 < 10 ? '0' : '') + (min % 60);
+      }
+
+      // Threshold of PARAM_SEUILS in hours: 6 -> '6', 4.5 -> '4,5'.
+      function frHoursSetting(n) {
+        return String(n === null || n === undefined ? 6 : n).replace('.', ',');
+      }
+
       function setMessage(text, kind) {
         var m = $('msg');
         m.textContent = text || '';
@@ -226,22 +247,28 @@
         if (!st) {
           badge.textContent = 'vide';
           badge.className = 'badge';
-          $('status').innerHTML = 'Aucun calcul pour l\'instant : cliquez sur <b>Générer 14 jours</b> ou importez des fichiers SAP.';
+          $('status').innerHTML = 'Aucun calcul pour l\'instant : cliquez sur <b>Générer 7 jours</b> ou importez des fichiers SAP.';
         } else {
           var sim = st.source === 'SIMULATION';
           badge.textContent = sim ? 'simulation' : 'SAP';
           badge.className = 'badge ' + (sim ? 'sim' : 'sap');
+          var oldest = st.oldestPendingHours !== null && st.oldestPendingHours !== undefined ? frHours(st.oldestPendingHours)
+            : (st.oldestPendingDays ? st.oldestPendingDays + ' j' : '');
           var rows = [
-            ['Données au', frDate(st.asOf)],
+            ['Données au', frDate(st.asOf) + (st.asOfTs ? ' <span class="muted">' + esc(String(st.asOfTs).slice(11, 16)) + '</span>' : '')],
             ['Palettes EXP2', frNum(st.exp2Pallets) + ' <span class="muted">/ ' + frNum(st.capacity) + '</span>'],
             ['Saturation EXP2', frPct(st.saturation)],
-            ['En attente PRD2', frNum(st.pendingPallets) + ' pal' + (st.oldestPendingDays ? ' <span class="muted">(' + st.oldestPendingDays + ' j)</span>' : '')],
+            ['En attente PRD2', frNum(st.pendingPallets) + ' pal' + (oldest ? ' <span class="muted">(' + esc(oldest) + ')</span>' : '')],
+            ['PRD2 > ' + frHoursSetting(st.pendingHoursCrit) + ' h', frNum(st.pendingCrit || 0) + ' pal', st.pendingCrit > 0 ? 'crit' : ''],
             ['Quais occupés', (st.docksOccupied || 0) + ' / ' + (st.docksTotal || 0)],
             ['Alertes', st.alerts + (st.critical ? ' <span class="muted">dont ' + st.critical + ' critique' + (st.critical > 1 ? 's' : '') + '</span>' : '')],
             ['Calculé le', frDateTime(st.computedAt)]
           ];
-          if (s.lastImport) rows.splice(6, 0, ['Dernier import', esc(s.lastImport.kind) + ' <span class="muted">' + frDateTime(s.lastImport.at) + '</span>']);
-          var html = '<dl>' + rows.map(function (r) { return '<dt>' + esc(r[0]) + '</dt><dd>' + r[1] + '</dd>'; }).join('') + '</dl>';
+          if (st.noProjectArticles) rows.splice(5, 0, ['Références sans projet', frNum(st.noProjectArticles)]);
+          if (s.lastImport) rows.splice(rows.length - 1, 0, ['Dernier import', esc(s.lastImport.kind) + ' <span class="muted">' + frDateTime(s.lastImport.at) + '</span>']);
+          var html = '<dl>' + rows.map(function (r) {
+            return '<dt>' + esc(r[0]) + '</dt><dd' + (r[2] ? ' class="' + r[2] + '"' : '') + '>' + r[1] + '</dd>';
+          }).join('') + '</dl>';
           if (st.alertsList && st.alertsList.length) {
             html += '<ul class="alerts">' + st.alertsList.map(function (a) {
               return '<li class="' + (a.level === 'crit' ? 'crit' : '') + '">' + esc(a.text) + '</li>';
@@ -253,6 +280,16 @@
 
       function fillDefaults(s) {
         var d = s.defaults || {};
+        var lim = s.limits || {};
+        if (d.days) {
+          $('days').value = d.days;
+          disarm();
+        }
+        if (lim.days) $('days').max = lim.days[1];
+        if (lim.palletsPerDay) {
+          $('palletsPerDay').min = lim.palletsPerDay[0];
+          $('palletsPerDay').max = lim.palletsPerDay[1];
+        }
         if (d.endDate && !$('endDate').value) $('endDate').value = d.endDate;
         $('endDate').max = todayIso();
         if (d.seed !== undefined && d.seed !== null) $('seed').value = d.seed;
@@ -322,7 +359,8 @@
       var armed = null;
       function simLabel() {
         var d = Math.round(Number($('days').value));
-        return 'Générer ' + (d > 0 ? d : 14) + ' jours';
+        d = d > 0 ? d : 7;
+        return 'Générer ' + d + (d > 1 ? ' jours' : ' jour');
       }
       function disarm() {
         if (armed) clearTimeout(armed);
@@ -363,6 +401,17 @@
         if (busy) return;
         setBusy(true, 'Recalcul en cours…');
         call('sidebar_recompute', [], done, showError);
+      });
+
+      // The projects panel replaces this one in the sidebar (menu EXP2 Jumeau › Panneau de contrôle to come back).
+      $('btnProjects').addEventListener('click', function () {
+        $('btnProjects').disabled = true;
+        call('ouvrirProjets', [], function () {
+          $('btnProjects').disabled = false;
+        }, function (err) {
+          $('btnProjects').disabled = false;
+          showError(err);
+        });
       });
 
       Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {

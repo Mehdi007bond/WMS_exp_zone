@@ -6,11 +6,15 @@
     mount(container, layout, state, opts) -> handle
     legend(mode, state, opts) -> [{ label, color }] French legend entries of a color mode
   }
-  handle = { update(state), resize(), setMode('family'|'age'|'saturation'), destroy(),
+  handle = { update(state), resize(), setMode('project'|'age'|'saturation'), destroy(),
              getMode(), resetView(animate), highlight(article|null), project(xm, ym, hm), info(), renderNow() }
 
   layout: state.layout (meters, CFG.DEFAULT_LAYOUT shape; truck_zone / quai_common accepted). x runs along the
   50 m side, y along the 32 m side; three.js uses x -> x and y -> z, origin at the building center.
+  Color modes: 'project' (pallets in the color of their project, state.projects; family color for v1 data without
+  projects, neutral grey when neither; 'family' is accepted for 'project'), 'age', 'saturation'.
+  Block labels show the block title (project names, state.blocks[].title) with 'B1 · 63 %' small; the pending ghost
+  pallets turn red for the labels waiting more than pendingHoursCrit (state.kpi.pendingCrit).
   opts: { mode, theme: 'dark'|'light', autoRotate (true|'sway': slow swing around the home angle, 'spin': full turns),
           autoRotateSpeed (rad/s), autoRotateResumeMs, onPick({ block,
           article, blockId, x, y }), onContextLost(event), thresholds, ageWarnDays, ageCritDays, maxPixelRatio,
@@ -23,7 +27,7 @@
 function Twin3dModule_() {
   'use strict';
 
-  var MODES = ['family', 'age', 'saturation'];
+  var MODES = ['project', 'age', 'saturation'];
   var LEVEL_H = 1.25;           // height of one stacking level (m)
   var BASE_H = 0.14;            // wooden pallet base (m)
   var LOAD_H = 1.0;             // load on the pallet (m)
@@ -43,8 +47,11 @@ function Twin3dModule_() {
     families: { F1: '#e7ebef', F2: '#ecdeb0', F3: '#a2dce9', F4: '#f0c0d5', F5: '#b8e2ab' },
     familyByBlockColor: { blanc: 'F1', creme: 'F2', cyan: 'F3', rose: 'F4', vert: 'F5' },
     cabs: { bleu: '#2a78d6', rouge: '#e34948', vert: '#1baf7a', gris: '#8a949e', jaune: '#eda100' },
-    status: { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b' }
+    status: { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b' },
+    noProject: '#c9ced6'
   };
+  var NO_PROJECT = 'Sans projet';
+  var GHOST_CRIT = '#ff5a5a';     // pending ghosts of the labels waiting more than pendingHoursCrit
   var EXTRA_FAMILY = ['#d9d2f0', '#f6d8bd', '#cfe0f5', '#e2e2e2', '#f3e3a6', '#cbe9dc', '#f2cfcf', '#dfe8c4'];
   var THEMES = {
     dark: {
@@ -79,7 +86,9 @@ function Twin3dModule_() {
     '.t3d-label.t3d-dock.t3d-busy{background:rgba(26,86,160,.92)}',
     '.t3d-label.t3d-dock .t3d-sub{opacity:.85;margin-left:.35em;font-weight:500}',
     '.t3d-label.t3d-zone{background:rgba(12,18,26,.8);color:#ffd84a;text-transform:none;letter-spacing:0;font-size:.9em}',
-    '.t3d-label.t3d-pending{background:rgba(22,74,118,.9);font-size:.88em}'
+    '.t3d-label.t3d-pending{background:rgba(22,74,118,.9);font-size:.88em}',
+    '.t3d-label.t3d-pending .t3d-crit{color:#ffb4b4}',
+    '.t3d-label.t3d-block .t3d-title{display:block;font-weight:700;max-width:12em;overflow:hidden;text-overflow:ellipsis}'
   ].join('');
 
   var supportCache = null;
@@ -190,6 +199,33 @@ function Twin3dModule_() {
     return EXTRA_FAMILY[Math.floor(hash_(family) * EXTRA_FAMILY.length) % EXTRA_FAMILY.length];
   }
 
+  function modeOf_(m) {
+    return m === 'age' || m === 'saturation' ? m : 'project';
+  }
+
+  function sameName_(a, b) {
+    return key_(a) === key_(b);
+  }
+
+  // Color of a project (state.projects), null when the name is empty or unknown.
+  function projectHex_(name, state) {
+    if (!name) return null;
+    var map = (state && state.projects) || {};
+    if (map[name]) return map[name];
+    for (var k in map) if (Object.prototype.hasOwnProperty.call(map, k) && sameName_(k, name)) return map[k];
+    return null;
+  }
+
+  function noProjectHex_(state) {
+    var map = (state && state.projects) || {};
+    return map[NO_PROJECT] || colors_().noProject || FALLBACK_COLORS.noProject;
+  }
+
+  // True when the state carries real projects (v2); v1 states color by family.
+  function hasProjects_(state) {
+    return ((state && state.projectsList) || []).some(function (p) { return p && p.project && p.project !== NO_PROJECT; });
+  }
+
   function blockHex_(name) {
     if (!name) return null;
     if (rgb_(name)) return name;
@@ -227,7 +263,7 @@ function Twin3dModule_() {
         cols: Math.max(1, Math.round(num_(k.cols, Math.round(w / 1.0)))),
         rows: Math.max(1, Math.round(num_(k.rows, Math.round(h / 0.8)))),
         levels: Math.max(1, Math.round(num_(k.levels, 2))),
-        color: k.color || '', families: k.families || ''
+        color: k.color || '', families: k.families || '', title: k.title || '', projects: k.projects || []
       };
     });
     var tz = L.truckZone || L.truck_zone || null;
@@ -329,12 +365,24 @@ function Twin3dModule_() {
         { label: pct_(thr.satCrit) + ' et plus', color: st.critical }
       ];
     }
+    if (hasProjects_(state)) {
+      // Projects with references or blocks, then 'Sans projet' when pallets have no project (state.projectsList order).
+      return state.projectsList.filter(function (p) {
+        if (p.project === NO_PROJECT) return num_(p.exp2Pallets, 0) + num_(p.pendingPallets, 0) > 0;
+        return num_(p.articles, 0) > 0 || (p.blocks || []).length > 0;
+      }).map(function (p) {
+        return { label: p.project, color: p.color || projectHex_(p.project, state) || noProjectHex_(state) };
+      });
+    }
     var fam = {}, k;
-    var base = colors_().families || {};
-    for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) fam[k] = base[k];
     var sf = (state && state.families) || {};
     for (k in sf) if (Object.prototype.hasOwnProperty.call(sf, k)) fam[k] = sf[k];
-    return Object.keys(fam).sort().map(function (f) { return { label: 'Famille ' + f, color: fam[f] }; });
+    if (!Object.keys(fam).length && !(state && state.projects)) {
+      var base = colors_().families || {};
+      for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) fam[k] = base[k];
+    }
+    var out = Object.keys(fam).sort().map(function (f) { return { label: 'Famille ' + f, color: fam[f] }; });
+    return out.length ? out : [{ label: NO_PROJECT, color: noProjectHex_(state) }];
   }
 
   function injectCss_() {
@@ -357,7 +405,7 @@ function Twin3dModule_() {
     injectCss_();
 
     var theme = THEMES[opts.theme === 'light' ? 'light' : 'dark'];
-    var mode = MODES.indexOf(opts.mode) >= 0 ? opts.mode : 'family';
+    var mode = modeOf_(opts.mode);
     var highlightArticle = null;
     var destroyed = false, lost = false;
     var listeners = [];
@@ -402,6 +450,8 @@ function Twin3dModule_() {
     var matLoad = new T.MeshLambertMaterial({ color: 0xffffff });
     var matGhost = new T.MeshLambertMaterial({ color: new T.Color(theme.ghost), transparent: true, opacity: 0.2, depthWrite: false });
     var matGhostLine = new T.LineBasicMaterial({ color: new T.Color(theme.ghost), transparent: true, opacity: 0.9 });
+    var matGhostCrit = new T.MeshLambertMaterial({ color: new T.Color(GHOST_CRIT), transparent: true, opacity: 0.32, depthWrite: false });
+    var matGhostCritLine = new T.LineBasicMaterial({ color: new T.Color(GHOST_CRIT), transparent: true, opacity: 0.95 });
     var matShell = new T.MeshLambertMaterial({ color: new T.Color(theme.shell), transparent: true, opacity: 0.3, depthWrite: false, side: T.DoubleSide });
     var matShellLine = new T.LineBasicMaterial({ color: new T.Color(theme.shellLine) });
     var palletGeo = new GeoBuilder_(false)
@@ -624,10 +674,12 @@ function Twin3dModule_() {
       labels = [];
       blockLabels = L.blocks.map(function (b) {
         var lab = addLabel_('t3d-block', wx_(b.x + b.w / 2), Y_FOOT + b.levels * LEVEL_H + 0.35, wz_(b.y + b.h / 2), b.label);
-        lab.el.innerHTML = '<b></b><span class="t3d-pct"></span>';
-        lab.idEl = lab.el.firstChild;
+        lab.el.innerHTML = '<span class="t3d-title"></span><b></b><span class="t3d-pct"></span>';
+        lab.titleEl = lab.el.firstChild;
+        lab.idEl = lab.el.childNodes[1];
         lab.pctEl = lab.el.lastChild;
         lab.idEl.textContent = b.id;
+        lab.block = true;
         return lab;
       });
       zoneLabel = null;
@@ -664,12 +716,19 @@ function Twin3dModule_() {
       L.blocks.forEach(function (b, i) {
         var lab = blockLabels[i], sb = stateBlocks[b.id];
         var sat = sb ? sb.saturation : null;
-        lab.pctEl.textContent = pct_(sat);
+        // Title (project names) above 'B1 · 63 %'; without a title: 'B1' above '63 %' (v1 labels).
+        var title = blockTitle_(b);
+        lab.titleEl.textContent = title;
+        lab.titleEl.style.display = title ? '' : 'none';
+        lab.idEl.style.display = title ? 'none' : '';
+        lab.pctEl.textContent = title ? b.id + ' · ' + pct_(sat) : pct_(sat);
+        lab.size = null;
         // Same code as the side bars and the 2D plan tags: white below satWarn, amber from satWarn, red from satCrit.
         var lvl = saturationLevel_(sat, thr);
         lab.pctEl.style.color = lvl === 'critical' ? '#ff9a9a' : lvl === 'warning' ? '#fbd46a' : '#ffffff';
         lab.el.style.borderLeft = '3px solid ' + (lvl === 'critical' ? '#d03b3b' : lvl === 'warning' ? '#fab219' : lvl ? '#5b9be0' : 'transparent');
-        lab.el.title = (b.label ? b.label + ' · ' : '') + (sb ? sb.pallets + ' / ' + sb.capacity + ' palettes' : '');
+        lab.el.title = 'Bloc ' + b.id + (title ? ' · ' + title : '') + (b.label ? ' · ' + b.label : '') +
+          (sb ? ' · ' + sb.pallets + ' / ' + sb.capacity + ' palettes' : '');
       });
       Object.keys(dockLabels).forEach(function (id) {
         var lab = dockLabels[id], d = null;
@@ -681,9 +740,17 @@ function Twin3dModule_() {
         lab.el.title = 'Quai ' + lab.numEl.textContent + (d && d.status ? ' · ' + d.status : '');
       });
       if (pendingLabel) {
-        var p = num_((state.kpi || {}).pendingPallets, 0);
+        var k = state.kpi || {}, p = num_(k.pendingPallets, 0), crit = num_(k.pendingCrit, 0);
+        var hCrit = num_((state.thresholds || {}).pendingHoursCrit, 6);
         pendingLabel.el.textContent = 'En attente PRD2 : ' + p + ' pal';
+        if (crit > 0) {
+          var span = document.createElement('span');
+          span.className = 't3d-crit';
+          span.textContent = ' · ' + crit + ' > ' + String(hCrit).replace('.', ',') + ' h';
+          pendingLabel.el.appendChild(span);
+        }
         pendingLabel.hidden = !(p > 0);
+        pendingLabel.size = null;
       }
     }
 
@@ -707,9 +774,44 @@ function Twin3dModule_() {
       dockSeq.forEach(function (lab, i) { lab.thin = sparse && i % 2 === 1; });
     }
 
+    // Block labels (project names are wider than the block ids) never cover each other: a label that overlaps one
+    // nearer the top of the screen moves down below it. -> { index of the label: dy in px }
+    function blockShifts_(w, h) {
+      var boxes = [];
+      blockLabels.forEach(function (lab, i) {
+        if (lab.hidden) return;
+        tmpV.copy(lab.pos).project(camera);
+        if (!(tmpV.z > -1 && tmpV.z < 1)) return;
+        if (!lab.size) lab.size = { w: lab.el.offsetWidth || 0, h: lab.el.offsetHeight || 0 };
+        var x = (tmpV.x + 1) / 2 * w, y = (1 - tmpV.y) / 2 * h;
+        boxes.push({ i: i, x0: x - lab.size.w / 2, x1: x + lab.size.w / 2, y0: y - lab.size.h, y1: y, dy: 0 });
+      });
+      boxes.sort(function (a, b) { return a.y0 - b.y0; });
+      var gap = 3;
+      for (var a = 0; a < boxes.length; a++) {
+        for (var b = 0; b < a; b++) {
+          var A = boxes[a], B = boxes[b];
+          if (A.x0 < B.x1 + gap && A.x1 > B.x0 - gap && A.y0 + A.dy < B.y1 + B.dy + gap && A.y1 + A.dy > B.y0 + B.dy - gap) {
+            A.dy = B.y1 + B.dy + gap - A.y0;
+          }
+        }
+      }
+      var out = {};
+      boxes.forEach(function (x) { out[x.i] = x.dy; });
+      return out;
+    }
+
     function updateLabelPositions_() {
       var w = viewW, h = viewH;
       dockDensity_(w, h);
+      // Sizes are read once per text change; the labels must be displayed to be measured.
+      blockLabels.forEach(function (lab) {
+        if (!lab.size && !lab.shown && !lab.hidden) {
+          lab.el.style.display = '';
+          lab.shown = true;
+        }
+      });
+      var shifts = blockShifts_(w, h);
       for (var i = 0; i < labels.length; i++) {
         var lab = labels[i];
         tmpV.copy(lab.pos).project(camera);
@@ -722,6 +824,7 @@ function Twin3dModule_() {
           continue;
         }
         var x = Math.round((tmpV.x + 1) / 2 * w), y = Math.round((1 - tmpV.y) / 2 * h);
+        if (lab.block) y += Math.round(shifts[blockLabels.indexOf(lab)] || 0);
         if (!lab.shown) {
           lab.el.style.display = '';
           lab.shown = true;
@@ -784,6 +887,17 @@ function Twin3dModule_() {
       counts.pallets = idx;
     }
 
+    // Projects and title of a layout block, from the state (state.blocks, else state.layout.blocks).
+    function blockProjects_(b) {
+      var sb = stateBlocks[b.id];
+      return (sb && sb.projects) || b.projects || [];
+    }
+
+    function blockTitle_(b) {
+      var sb = stateBlocks[b.id];
+      return String((sb && sb.title) || b.title || '');
+    }
+
     function blockFamily_(b) {
       var sb = stateBlocks[b.id];
       var fams = String((sb && sb.families) || b.families || '').split(/[,;\s]+/).filter(Boolean);
@@ -800,8 +914,11 @@ function Twin3dModule_() {
         var sb = stateBlocks[b.id];
         rgb = saturationRgb_(sb ? sb.saturation : null, thr) || rgb_(theme.neutral);
       } else {
-        var fam = e && e.family ? e.family : blockFamily_(b);
-        rgb = rgb_(familyHex_(fam, state)) || rgb_(theme.neutral);
+        // Project color; v1 data (no project): family color; neither: neutral grey.
+        var hex = null;
+        if (e) hex = projectHex_(e.project, state) || (e.family ? familyHex_(e.family, state) : null) || noProjectHex_(state);
+        else hex = projectHex_(blockProjects_(b)[0], state) || familyHex_(blockFamily_(b), state);
+        rgb = rgb_(hex) || rgb_(theme.neutral);
         if (e) rgb = scale_(rgb, 0.9 + 0.16 * hash_(e.article + '#'));
       }
       if (highlightArticle !== null && !(e && String(e.article) === highlightArticle)) rgb = mix_(rgb, rgb_(theme.dim), 0.75);
@@ -822,8 +939,9 @@ function Twin3dModule_() {
         if (mode === 'saturation') {
           var s = saturationRgb_(sb ? sb.saturation : null, thr);
           if (s) col = mix_(floor, s, 0.5);
-        } else if (mode === 'family') {
-          var hex = blockHex_(b.color);
+        } else if (mode === 'project') {
+          // Floor of the block in its project color (v1: the color of the sketch).
+          var hex = projectHex_(blockProjects_(b)[0], state) || blockHex_(b.color);
           if (hex) col = mix_(floor, rgb_(hex), 0.4);
         } else {
           col = mix_(floor, [1, 1, 1], 0.12);
@@ -930,28 +1048,37 @@ function Twin3dModule_() {
       ghostGroup = new T.Group();
       ghostGroup.name = 'ghosts';
       scene.add(ghostGroup);
-      var n = Math.max(0, Math.min(MAX_GHOSTS, Math.round(num_((state.kpi || {}).pendingPallets, 0))));
+      var k = state.kpi || {};
+      var n = Math.max(0, Math.min(MAX_GHOSTS, Math.round(num_(k.pendingPallets, 0))));
+      // The oldest first along the conveyor: those waiting more than pendingHoursCrit are red.
+      var nCrit = Math.max(0, Math.min(n, Math.round(num_(k.pendingCrit, 0))));
       counts.ghosts = n;
+      counts.ghostsCrit = nCrit;
       if (!n) return;
-      var g = new GeoBuilder_(false), lines = [];
-      ghostSlots_(n).forEach(function (s) {
+      var sets = [{ g: new GeoBuilder_(false), lines: [], mat: matGhostCrit, line: matGhostCritLine },
+        { g: new GeoBuilder_(false), lines: [], mat: matGhost, line: matGhostLine }];
+      ghostSlots_(n).forEach(function (s, idx) {
+        var set = sets[idx < nCrit ? 0 : 1];
         var hx = s.along ? 0.4 : 0.6, hz = s.along ? 0.6 : 0.4, y0 = s.y, y1 = s.y + BASE_H + LOAD_H;
         var x0 = s.x - hx, x1 = s.x + hx, z0 = s.z - hz, z1 = s.z + hz;
-        g.box(x0, x1, y0, y1, z0, z1);
+        set.g.box(x0, x1, y0, y1, z0, z1);
         var c = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
         for (var i = 0; i < 4; i++) {
           var a = c[i], b = c[(i + 1) % 4];
-          lines.push(a[0], y0, a[1], b[0], y0, b[1], a[0], y1, a[1], b[0], y1, b[1], a[0], y0, a[1], a[0], y1, a[1]);
+          set.lines.push(a[0], y0, a[1], b[0], y0, b[1], a[0], y1, a[1], b[0], y1, b[1], a[0], y0, a[1], a[0], y1, a[1]);
         }
       });
-      var m = new T.Mesh(g.build(T), matGhost);
-      m.renderOrder = 3;
-      ghostGroup.add(m);
-      var lg = new T.BufferGeometry();
-      lg.setAttribute('position', new T.Float32BufferAttribute(lines, 3));
-      var ls = new T.LineSegments(lg, matGhostLine);
-      ls.renderOrder = 4;
-      ghostGroup.add(ls);
+      sets.forEach(function (set) {
+        if (!set.g.boxes) return;
+        var m = new T.Mesh(set.g.build(T), set.mat);
+        m.renderOrder = 3;
+        ghostGroup.add(m);
+        var lg = new T.BufferGeometry();
+        lg.setAttribute('position', new T.Float32BufferAttribute(set.lines, 3));
+        var ls = new T.LineSegments(lg, set.line);
+        ls.renderOrder = 4;
+        ghostGroup.add(ls);
+      });
     }
 
     // --- camera and orbit controls ---------------------------------------------------------------------
@@ -1339,9 +1466,10 @@ function Twin3dModule_() {
       opts.onPick({
         blockId: b.id,
         block: { id: b.id, label: sb.label || b.label, families: sb.families || b.families, capacity: num_(sb.capacity, b.cols * b.rows * b.levels),
-          pallets: num_(sb.pallets, 0), saturation: sb.saturation === undefined ? null : sb.saturation },
+          pallets: num_(sb.pallets, 0), saturation: sb.saturation === undefined ? null : sb.saturation,
+          title: blockTitle_(b), projects: blockProjects_(b).slice() },
         article: hit.entry ? { article: hit.entry.article, designation: hit.entry.designation, family: hit.entry.family,
-          pallets: hit.entry.pallets, ageMax: hit.entry.ageMax } : null,
+          project: hit.entry.project || '', pallets: hit.entry.pallets, ageMax: hit.entry.ageMax } : null,
         x: clientX - r.left,
         y: clientY - r.top
       });
@@ -1371,6 +1499,7 @@ function Twin3dModule_() {
       viewH = h;
       fontPx = num_(opts.labelPx, 0) > 0 ? num_(opts.labelPx, 0) : Math.max(10, Math.min(20, w / 92));
       overlay.style.fontSize = fontPx.toFixed(1) + 'px';
+      blockLabels.forEach(function (lab) { lab.size = null; });
       fit_ = null;
       if (!userMoved) {
         home = homeView_();
@@ -1423,8 +1552,8 @@ function Twin3dModule_() {
       },
       resize: resize,
       setMode: function (m) {
-        if (destroyed || MODES.indexOf(m) < 0) return;
-        mode = m;
+        if (destroyed) return;
+        mode = modeOf_(m);
         applyColors_();
         requestRender();
       },
@@ -1445,7 +1574,8 @@ function Twin3dModule_() {
         return { x: (tmpV.x + 1) / 2 * w, y: (1 - tmpV.y) / 2 * h, visible: tmpV.z > -1 && tmpV.z < 1 && Math.abs(tmpV.x) <= 1 && Math.abs(tmpV.y) <= 1 };
       },
       info: function () {
-        return { mode: mode, pallets: counts.pallets, capacity: capacity, ghosts: counts.ghosts, trucks: counts.trucks,
+        return { mode: mode, pallets: counts.pallets, capacity: capacity, ghosts: counts.ghosts, ghostsCrit: counts.ghostsCrit || 0,
+          trucks: counts.trucks,
           frames: frames, drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles,
           geometries: renderer.info.memory.geometries, programs: renderer.info.programs ? renderer.info.programs.length : null,
           lost: lost, view: { theta: view.theta, phi: view.phi, radius: view.radius, x: view.target.x, z: view.target.z } };
@@ -1476,7 +1606,7 @@ function Twin3dModule_() {
         });
         palletGeo.dispose();
         unitBox.dispose();
-        [matVC, matBase, matLoad, matGhost, matGhostLine, matShell, matShellLine].forEach(function (m) { m.dispose(); });
+        [matVC, matBase, matLoad, matGhost, matGhostLine, matGhostCrit, matGhostCritLine, matShell, matShellLine].forEach(function (m) { m.dispose(); });
         renderer.dispose();
         try { renderer.forceContextLoss(); } catch (err) { /* already lost */ }
         if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
@@ -1503,7 +1633,7 @@ function Twin3dModule_() {
     return handle;
   }
 
-  return { supported: supported, mount: mount, legend: legend, version: '1.0.0' };
+  return { supported: supported, mount: mount, legend: legend, version: '2.0.0' };
 }
 
 window.Twin3D = Twin3dModule_();

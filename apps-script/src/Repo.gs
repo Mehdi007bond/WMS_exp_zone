@@ -7,9 +7,21 @@
  *
  *   setup(opts)                       create / repair every tab (opts.resetParams: rewrite LAYOUT, rules, settings, docks)
  *   isInstalled()                     true once setup ran (MOUVEMENTS exists)
- *   readInput()                       engine input (docs/ARCHITECTURE.md section 4), dates 'yyyy-mm-dd', plus .layout
+ *   migrate(force)                    v1 sheet -> v2 (docs/SPEC_V2.md 3): appends missing headers, creates PROJETS, adds
+ *                                     missing PARAM_SEUILS rows; idempotent, never deletes; Script Property SCHEMA_VERSION
+ *   readInput()                       engine input (docs/ARCHITECTURE.md section 4, docs/SPEC_V2.md 4.1), dates
+ *                                     'yyyy-mm-dd', entry times 'yyyy-mm-dd hh:mm:ss', plus .layout
  *   readLayout()                      layout shaped like CFG.DEFAULT_LAYOUT (LAYOUT tab, defaults for missing parts)
  *   readDocks()                       current state of the docks (QUAIS_CAMIONS)
+ *   readSettings()                    { plant, asOf, thresholds } (PARAM_SEUILS)
+ *   readArticles()                    ARTICLES rows [{ article, designation, ..., family, project }]
+ *   readProjects()                    PROJETS rows [{ project, blocks: ['B1'], color, comment }] (names merged
+ *                                     case-insensitively)
+ *   saveArticleProjects(rows)         rows [{ article, project, designation }]: upsert of ARTICLES › Projet (designation
+ *                                     for new rows) -> { created, updated, unchanged }; the user owns those rows now
+ *   addProjects(names)                new PROJETS rows without blocks (names not there yet)
+ *   saveProjects(rows)                PROJETS replaced (the user owns the tab: PROJECTS_SOURCE cleared)
+ *   renameProjectRefs(from, to)       ARTICLES › Projet and PROJET rules of REGLES_PLACEMENT -> { articles, rules }
  *   writeCalcTables(tables)           CALC_* tabs from Engine.toTables
  *   saveState(state) / loadState()    compact state JSON: cache chunks + hidden _STATE tab
  *   saveLookups(version, rows)        per-article lookup data (hidden _LOOKUP tab): rows [{ article, designation, json }]
@@ -18,8 +30,10 @@
  *   getVersions() / bumpVersion(kind) { data, docks } stamps ('data' | 'docks'), copied in the script cache
  *   existingKeys()                    { key: true } for every MOUVEMENTS line
  *   appendMovements(lines, meta)      meta: { importId, source: 'IMPORT' | 'SIMULATION', fileName }
- *   replaceSimulation(data)           { movements, opening, articles, docks }: drops SIMULATION rows, keeps IMPORT rows
- *   clearSimulation()                 removes everything the simulation wrote
+ *   replaceSimulation(data)           { movements, opening, articles, projects, docks }: drops SIMULATION rows, keeps
+ *                                     IMPORT rows, and the articles / projects the user owns
+ *   clearSimulation()                 removes everything the simulation wrote (PROJETS rows only while PROJECTS_SOURCE
+ *                                     is still SIMULATION)
  *   replaceOpening(rows)              STOCK_INITIAL from an import
  *   replaceDocks(docks, source)       QUAIS_CAMIONS rewritten (simulation)
  *   saveDock(dock, who)               one dock + one VISITES_CAMIONS row
@@ -32,9 +46,11 @@
  *   cacheGet(key) / cachePut(key, v, seconds)  JSON values of any size (inline when small, else chunked)
  *   cachePutMany({ key: v }, seconds)  small JSON values in one putAll (values over one cache entry are skipped)
  *
- * Batch I/O only: one getValues / setValues per tab and per call, number formats per column group.
+ * Batch I/O only: one getValues / setValues per tab and per call, number formats per column group. Columns are found
+ * by their header label, so columns moved or added by hand never receive another column's values.
  */
 function RepoModule_() {
+  var SCHEMA_VERSION = 2;             // docs/SPEC_V2.md 3 (v2 columns appended, PROJETS, new PARAM_SEUILS rows)
   var TEXT = '@';
   var DATE = 'dd.mm.yyyy';
   var DATETIME = 'dd.mm.yyyy hh:mm';
@@ -51,19 +67,26 @@ function RepoModule_() {
   var SPARE_ROWS_ADMIN = 20;          // empty formatted rows kept in tabs edited by hand
   var KEY_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
   var PROPS = {
-    DATA: 'DATA_VERSION', DOCKS: 'DOCKS_VERSION', ADMIN_KEY: 'ADMIN_KEY', DOCKS_KEY: 'DOCKS_KEY', PREFIX: 'P_'
+    DATA: 'DATA_VERSION', DOCKS: 'DOCKS_VERSION', ADMIN_KEY: 'ADMIN_KEY', DOCKS_KEY: 'DOCKS_KEY', SCHEMA: 'SCHEMA_VERSION',
+    PREFIX: 'P_'
   };
   var STATE_CACHE_KEY = 'STATE';
   var SIM = 'SIMULATION';
+  var TS_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+  var TS_FR_RE = /^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/;
 
-  // Number formats per tab and header (columns not listed keep the automatic format).
+  // Number formats per tab and header (columns not listed keep the automatic format). 'Saisie le' is text
+  // 'yyyy-mm-dd hh:mm:ss' (SAP wall clock: no time-zone conversion), labels and SAP codes are text.
   var FORMATS = {
     MOUVEMENTS: { 'Clé': TEXT, 'Article': TEXT, 'Division': TEXT, 'Magasin': TEXT, 'MvT': TEXT, 'Texte code mvt': TEXT,
       'S': TEXT, 'Doc.article': TEXT, 'Poste': TEXT, 'Date cpt.': DATE, 'UQS': TEXT, 'Désignation article': TEXT,
-      'Nom utilisateur': TEXT, 'Source': TEXT, 'Import': TEXT, 'Ajouté le': DATETIME },
+      'Nom utilisateur': TEXT, 'Source': TEXT, 'Import': TEXT, 'Ajouté le': DATETIME, 'Saisie le': TEXT,
+      'Étiquette': TEXT, 'Texte en-tête': TEXT, 'Texte': TEXT, 'Référence': TEXT, 'Client': TEXT, 'Commande client': TEXT },
     STOCK_INITIAL: { 'Article': TEXT, 'Division': TEXT, 'Magasin': TEXT, 'Désignation article': TEXT, 'UQS': TEXT,
       'Date stock': DATE },
-    ARTICLES: { 'Article': TEXT, 'Désignation article': TEXT, 'UQS': TEXT, 'Type palette': TEXT, 'Famille': TEXT },
+    ARTICLES: { 'Article': TEXT, 'Désignation article': TEXT, 'UQS': TEXT, 'Type palette': TEXT, 'Famille': TEXT,
+      'Projet': TEXT },
+    PROJETS: { 'Projet': TEXT, 'Blocs': TEXT, 'Couleur': TEXT, 'Commentaire': TEXT },
     LAYOUT: { 'ID': TEXT, 'Type': TEXT, 'Libellé (sketch)': TEXT, 'Couleur': TEXT, 'Statut': TEXT },
     REGLES_PLACEMENT: { 'Critère': TEXT, 'Valeur': TEXT, 'Bloc cible': TEXT, 'Commentaire': TEXT },
     PARAM_MOUVEMENTS: { 'MvT': TEXT, 'Type': TEXT, 'Texte': TEXT, 'Signification': TEXT, 'Pris en compte': TEXT },
@@ -91,12 +114,21 @@ function RepoModule_() {
   var SETTING_LABELS = {
     satWarn: ['Seuil saturation - alerte', 'fraction', '0,85 = 85 % (blocs et entrepôt)'],
     satCrit: ['Seuil saturation - critique', 'fraction', '0,95 = 95 %'],
-    pendingDaysWarn: ['Seuil attente PRD2 - alerte', 'jours', 'Déclaré mais pas encore transféré vers EXP2'],
+    pendingDaysWarn: ['Seuil attente PRD2 en jours - alerte', 'jours',
+      'Lignes sans heure de saisie : déclaré mais pas encore transféré vers EXP2'],
     dockStagingWarn: ['Seuil zone quai - alerte', 'fraction', 'Palettes en zone quai / capacité de la zone'],
     freshWarnH: ['Fraîcheur des données - alerte', 'heures', 'Badge orange sur la TV après ce délai sans import'],
     freshCritH: ['Fraîcheur des données - critique', 'heures', 'Badge rouge sur la TV'],
     tvRefreshS: ['Rafraîchissement écran TV', 's', 'Période de vérification de la version des données'],
-    tvSceneS: ['Durée d\'une scène TV', 's', 'Rotation des scènes (vue, saturation, attente, quais)']
+    tvSceneS: ['Durée d\'une scène TV', 's', 'Rotation des scènes (vue, saturation, attente, quais)'],
+    pendingHoursWarn: ['Seuil attente PRD2 - pré-alerte', 'heures',
+      'Étiquette déclarée en PRD2 et pas encore transférée vers EXP2 depuis ce délai (heure de saisie SAP)'],
+    pendingHoursCrit: ['Seuil attente PRD2 - alerte', 'heures',
+      'Une référence en PRD2 depuis plus de 6 h est un vrai problème'],
+    labelIsPallet: ['1 étiquette = 1 palette', '1/0', '1 = chaque numéro d\'étiquette (contenant) compte pour une palette'],
+    importTrackedOnly: ['Import : produits finis seulement', '1/0',
+      '1 = l\'import ignore les articles absents de ARTICLES qui ne passent pas par EXP2'],
+    trackAll: ['Calcul : tous les articles', '1/0', '0 = produits finis seulement (ARTICLES ou passés par EXP2)']
   };
 
   var memo = {};      // per execution: spreadsheet, time zone check, state JSON
@@ -242,6 +274,68 @@ function RepoModule_() {
     return str_(v);
   }
 
+  // Entry time 'yyyy-mm-dd hh:mm:ss' (SAP wall clock) from the stored text ('Saisie le'), or from a cell Sheets turned
+  // into a date (typed by hand: read in the spreadsheet time zone) or an Excel serial; '' when empty or unreadable.
+  function tsOf_(v) {
+    if (v === null || v === undefined || v === '') return '';
+    var y, mo, d, h, mi, s;
+    if (isDate_(v)) {
+      if (isNaN(v.getTime())) return '';
+      if (!sameTz_()) return Utilities.formatDate(v, memo.tz, 'yyyy-MM-dd HH:mm:ss');
+      y = v.getFullYear();
+      mo = v.getMonth() + 1;
+      d = v.getDate();
+      h = v.getHours();
+      mi = v.getMinutes();
+      s = v.getSeconds();
+    } else if (typeof v === 'number') {
+      if (!(v >= 61 && v <= 2958465)) return '';
+      var t = new Date(Date.UTC(1899, 11, 30) + Math.round(v * 86400) * 1000);
+      y = t.getUTCFullYear();
+      mo = t.getUTCMonth() + 1;
+      d = t.getUTCDate();
+      h = t.getUTCHours();
+      mi = t.getUTCMinutes();
+      s = t.getUTCSeconds();
+    } else {
+      var text = str_(v);
+      var m = TS_RE.exec(text);
+      if (m) {
+        y = +m[1]; mo = +m[2]; d = +m[3]; h = +m[4]; mi = +m[5]; s = m[6] ? +m[6] : 0;
+      } else {
+        m = TS_FR_RE.exec(text);
+        if (!m) return '';
+        y = +m[3]; mo = +m[2]; d = +m[1]; h = +m[4]; mi = +m[5]; s = m[6] ? +m[6] : 0;
+      }
+      if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59) return '';
+      if (new Date(Date.UTC(y, mo - 1, d)).getUTCDate() !== d) return '';
+    }
+    return y + '-' + pad2_(mo) + '-' + pad2_(d) + ' ' + pad2_(h) + ':' + pad2_(mi) + ':' + pad2_(s);
+  }
+
+  // Project name as stored: trimmed, inner spaces collapsed (validated by Api.gs before a write).
+  function projectName_(v) {
+    return str_(v).replace(/\s+/g, ' ');
+  }
+
+  // Block ids of a 'Blocs' cell ('B1, B7', 'B1;B7', 'B1 B7') or an array, unique, in order.
+  function blockIds_(v) {
+    var list = Array.isArray(v) ? v : str_(v).split(/[,;\s]+/);
+    var out = [];
+    list.forEach(function (b) {
+      var id = code_(b, false);
+      if (id && out.indexOf(id) < 0) out.push(id);
+    });
+    return out;
+  }
+
+  // '#rrggbb' in lower case, '' when empty or not a color (automatic color).
+  function color_(v) {
+    var s = str_(v).toLowerCase();
+    if (/^[0-9a-f]{6}$/.test(s)) s = '#' + s;
+    return /^#[0-9a-f]{6}$/.test(s) ? s : '';
+  }
+
   // -------------------------------------------------------------------------------------------------------------
   // Sheet primitives (batch only)
   // -------------------------------------------------------------------------------------------------------------
@@ -267,6 +361,52 @@ function RepoModule_() {
   function ensureRows_(sh, lastNeeded) {
     var maxRows = sh.getMaxRows();
     if (maxRows < lastNeeded) sh.insertRowsAfter(maxRows, lastNeeded - maxRows);
+  }
+
+  function ensureCols_(sh, lastNeeded) {
+    var maxCols = sh.getMaxColumns();
+    if (maxCols < lastNeeded) sh.insertColumnsAfter(maxCols, lastNeeded - maxCols);
+  }
+
+  // Header labels of row 1 ([] for an empty tab).
+  function headerRow_(sh) {
+    var lastCol = sh.getLastColumn();
+    return lastCol > 0 ? sh.getRange(1, 1, 1, lastCol).getValues()[0].map(str_) : [];
+  }
+
+  // Appends the labels of 'header' missing from row 1 after the last used column (never over data), with their
+  // number formats on every row. -> the labels added. 'have': row 1 already read, else read here.
+  function appendHeaders_(name, sh, header, have) {
+    have = have || headerRow_(sh);
+    var missing = header.filter(function (h) { return have.indexOf(h) < 0; });
+    if (!missing.length) return [];
+    var empty = !have.some(function (h) { return h; }) && sh.getLastRow() === 0;
+    var start = empty ? 1 : Math.max(sh.getLastColumn(), have.length) + 1;
+    var labels = empty ? header.slice() : missing;
+    ensureCols_(sh, start + labels.length - 1);
+    var range = sh.getRange(1, start, 1, labels.length);
+    range.setValues([labels]);
+    range.setFontWeight('bold').setBackground('#e8edf2').setFontColor('#1f2a37');
+    if (sh.getFrozenRows() !== 1) sh.setFrozenRows(1);
+    if (sh.getMaxRows() > 1) {
+      var full = [];
+      for (var i = 1; i < start; i++) full.push('');
+      applyFormats_(sh, FORMATS[name], full.concat(labels), 2, sh.getMaxRows() - 1);
+    }
+    return missing;
+  }
+
+  // Sheet column (0-based) of every CFG label of the tab; labels missing from row 1 are appended first.
+  // -> { idx: [col per CFG label], width, aligned (CFG labels are the first columns, in order), labels: row 1 }
+  function columnsOf_(name, sh, header) {
+    var have = headerRow_(sh);
+    var aligned = header.every(function (h, i) { return have[i] === h; });
+    if (aligned) {
+      return { idx: header.map(function (h, i) { return i; }), width: header.length, aligned: true, labels: have };
+    }
+    if (appendHeaders_(name, sh, header, have).length) have = headerRow_(sh);
+    var idx = header.map(function (h) { return have.indexOf(h); });
+    return { idx: idx, width: Math.max(have.length, Math.max.apply(null, idx) + 1), aligned: false, labels: have };
   }
 
   // One setNumberFormat per run of consecutive columns sharing a format.
@@ -345,21 +485,50 @@ function RepoModule_() {
     sh.getRange(1, 1, n + 1, width).setValues([header].concat(rows.map(function (r) { return fixWidth_(r, width); })));
   }
 
+  // Appends rows given in the CFG column order of the tab. Columns are matched by header label: a tab whose columns
+  // were moved or extended by hand gets each value under its own header (one setValues either way).
   function appendRows_(name, rows) {
     if (!rows.length) return 0;
     var sh = ensureSheet_(name);
     var header = headers_(name);
     var width = header.length;
     var start = sh.getLastRow() + 1;
+    var cols;
     if (start < 2) {
+      ensureCols_(sh, width);
       sh.getRange(1, 1, 1, width).setValues([header]);
       styleHeader_(sh, width);
       start = 2;
+      cols = { aligned: true };
+    } else {
+      cols = columnsOf_(name, sh, header);
     }
     ensureRows_(sh, start + rows.length - 1);
-    applyFormats_(sh, FORMATS[name], header, start, rows.length);
-    sh.getRange(start, 1, rows.length, width).setValues(rows.map(function (r) { return fixWidth_(r, width); }));
+    if (cols.aligned) {
+      applyFormats_(sh, FORMATS[name], header, start, rows.length);
+      sh.getRange(start, 1, rows.length, width).setValues(rows.map(function (r) { return fixWidth_(r, width); }));
+      return rows.length;
+    }
+    var labels = [];
+    for (var c = 0; c < cols.width; c++) labels.push('');
+    header.forEach(function (h, i) { labels[cols.idx[i]] = h; });
+    applyFormats_(sh, FORMATS[name], labels, start, rows.length);
+    sh.getRange(start, 1, rows.length, cols.width).setValues(rows.map(function (r) {
+      var src = fixWidth_(r, width), out = fixWidth_([], cols.width);
+      for (var i = 0; i < width; i++) out[cols.idx[i]] = src[i];
+      return out;
+    }));
     return rows.length;
+  }
+
+  // Rewrites one column of the data rows (rows 2..n+1) by header label: values[i] goes to row i + 2.
+  function writeColumn_(name, sh, label, values) {
+    if (!values.length) return;
+    var col = headerRow_(sh).indexOf(label);
+    if (col < 0) throw new Error('Colonne « ' + label + ' » introuvable dans l\'onglet ' + name + '.');
+    var range = sh.getRange(2, col + 1, values.length, 1);
+    if (FORMATS[name] && FORMATS[name][label]) range.setNumberFormat(FORMATS[name][label]);
+    range.setValues(values.map(function (v) { return [v === null || v === undefined ? '' : v]; }));
   }
 
   function fixWidth_(r, width) {
@@ -448,9 +617,15 @@ function RepoModule_() {
   // -------------------------------------------------------------------------------------------------------------
   function tabOrder_() {
     var t = T_();
-    return [t.HOME, t.MOVEMENTS, t.OPENING, t.ARTICLES, t.LAYOUT, t.RULES, t.MVT, t.SETTINGS, t.DOCKS, t.VISITS,
+    return [t.HOME, t.MOVEMENTS, t.OPENING, t.ARTICLES, t.PROJECTS, t.LAYOUT, t.RULES, t.MVT, t.SETTINGS, t.DOCKS, t.VISITS,
       t.CALC_STOCK, t.CALC_PENDING, t.CALC_FIFO, t.CALC_EXITS, t.CALC_DAILY, t.CALC_BLOCKS, t.CALC_KPI, t.IMPORT_LOG,
       t.STATE, t.LOOKUP];
+  }
+
+  // Tabs edited by hand (blue tab, spare formatted rows).
+  function adminTabs_() {
+    var t = T_();
+    return [t.ARTICLES, t.PROJECTS, t.LAYOUT, t.RULES, t.MVT, t.SETTINGS, t.DOCKS];
   }
 
   // Hidden tabs of the app (one text column of JSON chunks, never edited by hand).
@@ -500,8 +675,11 @@ function RepoModule_() {
     });
     if (reset) props_().deleteProperty(PROPS.PREFIX + 'DOCKS_SOURCE');
 
+    // A sheet installed with v1: v2 headers appended, PARAM_SEUILS rows added (data never moved).
+    migrate_(true);
+
     // Headers, formats, trimming of every data tab.
-    var adminTabs = [t.ARTICLES, t.LAYOUT, t.RULES, t.MVT, t.SETTINGS, t.DOCKS];
+    var adminTabs = adminTabs_();
     tabOrder_().forEach(function (name) {
       if (name === t.HOME || hiddenTabs_().indexOf(name) >= 0) return;
       var sh = ss.getSheetByName(name);
@@ -530,7 +708,7 @@ function RepoModule_() {
         sh.protect().setDescription('Onglet calculé : réécrit à chaque recalcul').setWarningOnly(true);
       }
     });
-    [t.ARTICLES, t.LAYOUT, t.RULES, t.MVT, t.SETTINGS].forEach(function (name) {
+    [t.ARTICLES, t.PROJECTS, t.LAYOUT, t.RULES, t.MVT, t.SETTINGS].forEach(function (name) {
       ss.getSheetByName(name).setTabColor('#5b8def');
     });
     [t.DOCKS, t.VISITS].forEach(function (name) {
@@ -569,12 +747,97 @@ function RepoModule_() {
     hiddenTabs_().forEach(function (name) { ss.getSheetByName(name).hideSheet(); });
 
     ensureKeys();
-    memo = { ss: ss };
+    memo = { ss: ss, migrated: memo.migrated };
     return { created: created, reset: reset };
   }
 
   function isInstalled() {
     return !!sheet_(T_().MOVEMENTS);
+  }
+
+  // -------------------------------------------------------------------------------------------------------------
+  // Migration of a sheet installed with v1 (docs/SPEC_V2.md 3)
+  // -------------------------------------------------------------------------------------------------------------
+  // Quick check once the migration ran (Script Property): no getValues, only the sizes of two tabs.
+  function schemaCurrent_() {
+    var H = C_().HEADERS;
+    var mv = sheet_(T_().MOVEMENTS), art = sheet_(T_().ARTICLES);
+    return !!sheet_(T_().PROJECTS) && !!mv && mv.getLastColumn() >= H.MOUVEMENTS.length &&
+      (!art || art.getLastColumn() >= H.ARTICLES.length);
+  }
+
+  // PROJETS after ARTICLES: formatted header and spare rows (empty: no project until the user or a simulation adds one).
+  function ensureProjectsTab_() {
+    var name = T_().PROJECTS;
+    var sh = sheet_(name);
+    if (sh) return appendHeaders_(name, sh, headers_(name)).length > 0;
+    var ss = ss_();
+    var active = null;
+    try {
+      active = ss.getActiveSheet();
+    } catch (e) {
+      active = null;
+    }
+    var after = sheet_(T_().ARTICLES);
+    sh = after ? ss.insertSheet(name, after.getIndex()) : ss.insertSheet(name);
+    var header = headers_(name);
+    fitSize_(sh, 1 + SPARE_ROWS_ADMIN, header.length);
+    sh.getRange(1, 1, 1, header.length).setValues([header]);
+    styleHeader_(sh, header.length);
+    applyFormats_(sh, FORMATS[name], header, 2, SPARE_ROWS_ADMIN);
+    sh.setTabColor('#5b8def');
+    // insertSheet activates the new tab: give the person in the sheet their tab back.
+    if (active) {
+      try {
+        ss.setActiveSheet(active);
+      } catch (e) {
+        // Cosmetic.
+      }
+    }
+    return true;
+  }
+
+  // PARAM_SEUILS rows of keys added since the tab was written (CFG.THRESHOLDS, plant, asOf). -> keys added.
+  function addMissingSettings_() {
+    var t = readTable_(T_().SETTINGS);
+    if (!t.found || !has_(t.col, 'Clé')) return [];
+    var have = {};
+    t.rows.forEach(function (r) {
+      var k = str_(r[t.col['Clé']]);
+      if (k) have[k] = true;
+    });
+    var rows = defaultSettingRows_().filter(function (r) { return !has_(have, r[1]); });
+    appendRows_(T_().SETTINGS, rows);
+    return rows.map(function (r) { return r[1]; });
+  }
+
+  /**
+   * Brings a sheet installed with an older version to the current schema: appends the missing headers of
+   * MOUVEMENTS, ARTICLES and CALC_*, creates PROJETS, adds the missing PARAM_SEUILS rows. Never deletes or moves a
+   * column or a row; idempotent. Run by setup (force), readInput and before every write to MOUVEMENTS, ARTICLES or
+   * PROJETS; once done, Script Property SCHEMA_VERSION = 2 and the next runs only check two tab sizes.
+   * -> { version, changed: [tab names], settings: [keys added] } (null before setup).
+   */
+  function migrate_(force) {
+    if (memo.migrated && !force) return memo.migrated;
+    if (!isInstalled()) return null;
+    var p = props_();
+    if (!force && Number(p.getProperty(PROPS.SCHEMA)) >= SCHEMA_VERSION && schemaCurrent_()) {
+      memo.migrated = { version: SCHEMA_VERSION, changed: [], settings: [] };
+      return memo.migrated;
+    }
+    var t = T_();
+    var changed = [];
+    [t.MOVEMENTS, t.ARTICLES].concat(calcTabs_()).forEach(function (name) {
+      var sh = sheet_(name);
+      if (sh && appendHeaders_(name, sh, headers_(name)).length) changed.push(name);
+    });
+    if (ensureProjectsTab_()) changed.push(t.PROJECTS);
+    var settings = addMissingSettings_();
+    if (settings.length) changed.push(t.SETTINGS);
+    p.setProperty(PROPS.SCHEMA, String(SCHEMA_VERSION));
+    memo.migrated = { version: SCHEMA_VERSION, changed: changed, settings: settings };
+    return memo.migrated;
   }
 
   // -------------------------------------------------------------------------------------------------------------
@@ -610,6 +873,8 @@ function RepoModule_() {
     return n ? out : clone_(C_().MVT_KINDS);
   }
 
+  // MOUVEMENTS rows as movement lines (v2 fields '' on a row written before the migration). Free texts stay as typed
+  // (a number cell becomes its digits); client and sales order lose their leading zeros like the import.
   function readMovements_() {
     var t = readTable_(T_().MOVEMENTS);
     var g = getter_(t);
@@ -629,7 +894,14 @@ function RepoModule_() {
         uqs: str_(g(r, 'UQS')),
         designation: str_(g(r, 'Désignation article')),
         user: str_(g(r, 'Nom utilisateur')),
-        source: str_(g(r, 'Source')).toUpperCase() || 'IMPORT'
+        source: str_(g(r, 'Source')).toUpperCase() || 'IMPORT',
+        ts: tsOf_(g(r, 'Saisie le')),
+        label: code_(g(r, 'Étiquette'), false),
+        headerText: code_(g(r, 'Texte en-tête'), false),
+        itemText: code_(g(r, 'Texte'), false),
+        reference: code_(g(r, 'Référence'), false),
+        client: code_(g(r, 'Client'), true),
+        salesOrder: code_(g(r, 'Commande client'), true)
       };
     });
   }
@@ -654,7 +926,7 @@ function RepoModule_() {
     return out;
   }
 
-  function readArticles_() {
+  function readArticles() {
     var t = readTable_(T_().ARTICLES);
     var g = getter_(t);
     return t.rows.map(function (r) {
@@ -666,9 +938,33 @@ function RepoModule_() {
         palletType: str_(g(r, 'Type palette')),
         heightCm: numOrNull_(g(r, 'Hauteur palette (cm)')),
         levels: numOrNull_(g(r, 'Niveaux gerbage max')),
-        family: str_(g(r, 'Famille'))
+        family: str_(g(r, 'Famille')),
+        project: projectName_(g(r, 'Projet'))
       };
     }).filter(function (a) { return a.article; });
+  }
+
+  // PROJETS rows; a name written twice (any case) is one project: blocks united, first color and comment.
+  function readProjects() {
+    var t = readTable_(T_().PROJECTS);
+    var g = getter_(t);
+    var out = [], byKey = {};
+    t.rows.forEach(function (r) {
+      var name = projectName_(g(r, 'Projet'));
+      if (!name) return;
+      var blocks = blockIds_(g(r, 'Blocs')), color = color_(g(r, 'Couleur')), comment = str_(g(r, 'Commentaire'));
+      var p = byKey[name.toLowerCase()];
+      if (!p) {
+        p = byKey[name.toLowerCase()] = { project: name, blocks: [], color: color, comment: comment };
+        out.push(p);
+      }
+      blocks.forEach(function (b) {
+        if (p.blocks.indexOf(b) < 0) p.blocks.push(b);
+      });
+      if (!p.color) p.color = color;
+      if (!p.comment) p.comment = comment;
+    });
+    return out;
   }
 
   function readRules_() {
@@ -708,7 +1004,18 @@ function RepoModule_() {
     return docks.length ? docks : defaultDocks_();
   }
 
+  // Block ids typed by hand in another case ('b1') take the LAYOUT spelling.
+  function layoutIds_(projects, blocks) {
+    var ids = {};
+    blocks.forEach(function (b) { ids[String(b.id).toUpperCase()] = b.id; });
+    projects.forEach(function (p) {
+      p.blocks = p.blocks.map(function (b) { return ids[String(b).toUpperCase()] || b; });
+    });
+    return projects;
+  }
+
   function readInput() {
+    migrate_();
     var settings = readSettings_();
     var plant = settings.plant || C_().PLANT;
     var layout = readLayout();
@@ -717,7 +1024,8 @@ function RepoModule_() {
       plant: plant,
       movements: readMovements_(),
       opening: readOpening_(plant),
-      articles: readArticles_(),
+      articles: readArticles(),
+      projects: layoutIds_(readProjects(), layout.blocks),
       blocks: layout.blocks.map(function (b) {
         return { id: b.id, label: b.label, x: b.x, y: b.y, w: b.w, h: b.h, cols: b.cols, rows: b.rows, levels: b.levels,
           color: b.color, capacity: b.capacity };
@@ -1220,15 +1528,19 @@ function RepoModule_() {
     return out;
   }
 
+  // One MOUVEMENTS row in the CFG column order (v1 columns, then the v2 ones: entry time as text, label, texts).
   function movementRow_(l, source, importId, now) {
     var q = typeof l.qty === 'number' ? l.qty : num_(l.qty);
     return [str_(l.key), code_(l.article, true), str_(l.division), str_(l.magasin), code_(l.mvt, false), str_(l.text),
       str_(l.s), code_(l.doc, true), code_(l.poste, true), dateOf_(l.date), isFinite(q) ? q : '', str_(l.uqs),
-      str_(l.designation), str_(l.user), source, str_(importId), now];
+      str_(l.designation), str_(l.user), source, str_(importId), now,
+      tsOf_(l.ts), code_(l.label, false), code_(l.headerText, false), code_(l.itemText, false), code_(l.reference, false),
+      code_(l.client, true), code_(l.salesOrder, true)];
   }
 
   function appendMovements(lines, meta) {
     meta = meta || {};
+    migrate_();
     var source = str_(meta.source).toUpperCase() || 'IMPORT';
     var now = new Date();
     return appendRows_(T_().MOVEMENTS, (lines || []).map(function (l) {
@@ -1244,13 +1556,50 @@ function RepoModule_() {
 
   function articleRow_(a) {
     return [code_(a.article, true), str_(a.designation), str_(a.uqs), cellNum_(numOrNull_(a.qpp)), str_(a.palletType),
-      cellNum_(numOrNull_(a.heightCm)), cellNum_(numOrNull_(a.levels)), str_(a.family)];
+      cellNum_(numOrNull_(a.heightCm)), cellNum_(numOrNull_(a.levels)), str_(a.family), projectName_(a.project)];
+  }
+
+  function projectRow_(p) {
+    return [projectName_(p.project), blockIds_(p.blocks).join(', '), color_(p.color), str_(p.comment)];
+  }
+
+  // PROJETS rows with their extra columns (added by hand), and the full header to write them back.
+  function projectTable_() {
+    var name = T_().PROJECTS;
+    var t = readTable_(name);
+    var header = headers_(name).concat(extraLabels_(t, headers_(name)));
+    return { header: header, rows: remap_(t, header) };
+  }
+
+  // Rewrites PROJETS: rows in CFG order; extra columns kept for the names (any case) that stay.
+  function writeProjectRows_(table, rows) {
+    var width = headers_(T_().PROJECTS).length;
+    var extras = {};
+    table.rows.forEach(function (r) {
+      var k = projectName_(r[0]).toLowerCase();
+      if (k && !has_(extras, k)) extras[k] = r.slice(width);
+    });
+    writeRows_(T_().PROJECTS, rows.map(function (r) {
+      var k = projectName_(r[0]).toLowerCase();
+      return fixWidth_(r, width).concat(has_(extras, k) ? extras[k] : []);
+    }), SPARE_ROWS_ADMIN, table.header);
+  }
+
+  // Article codes released by the simulation (the user owns those ARTICLES rows from now on).
+  function releaseSimArticles_(codes) {
+    var sim = getProp('SIM_ARTICLES');
+    if (!sim || !sim.length) return;
+    var mine = {};
+    codes.forEach(function (a) { mine[String(a).toUpperCase()] = true; });
+    var left = sim.filter(function (a) { return !mine[String(a).toUpperCase()]; });
+    if (left.length !== sim.length) setProp('SIM_ARTICLES', left.length ? left : null);
   }
 
   function replaceSimulation(data) {
     data = data || {};
+    migrate_();
     var t = T_();
-    var out = { removed: 0, added: 0, opening: 0, articles: 0, docks: 0 };
+    var out = { removed: 0, added: 0, opening: 0, articles: 0, projects: 0, docks: 0 };
     if (data.movements) {
       var table = readTable_(t.MOVEMENTS);
       var header = headers_(t.MOVEMENTS).concat(extraLabels_(table, headers_(t.MOVEMENTS)));
@@ -1278,6 +1627,32 @@ function RepoModule_() {
       setProp('SIM_ARTICLES', ids);
       out.articles = ids.length;
     }
+    if (Array.isArray(data.projects)) {
+      // Simulated projects replace the previous simulated ones and same-named rows; the user's other rows stay.
+      var names = [], dropP = {};
+      data.projects.forEach(function (p) {
+        var n = projectName_(p && p.project);
+        if (n && !has_(dropP, n.toLowerCase())) names.push(n);
+        if (n) dropP[n.toLowerCase()] = true;
+      });
+      (getProp('SIM_PROJECTS') || []).forEach(function (n) { dropP[String(n).toLowerCase()] = true; });
+      var pt = projectTable_();
+      var keptP = pt.rows.filter(function (r) {
+        var k = projectName_(r[0]).toLowerCase();
+        return k && !has_(dropP, k);
+      });
+      var seenP = {};
+      var simRows = data.projects.filter(function (p) {
+        var k = projectName_(p && p.project).toLowerCase();
+        if (!k || has_(seenP, k)) return false;
+        seenP[k] = true;
+        return true;
+      }).map(projectRow_);
+      writeProjectRows_(pt, keptP.concat(simRows));
+      setProp('SIM_PROJECTS', names);
+      setProp('PROJECTS_SOURCE', SIM);
+      out.projects = simRows.length;
+    }
     if (Array.isArray(data.docks) && data.docks.length) {
       replaceDocks(data.docks, SIM);
       out.docks = data.docks.length;
@@ -1286,8 +1661,9 @@ function RepoModule_() {
   }
 
   function clearSimulation() {
+    migrate_();
     var t = T_();
-    var out = { removed: 0, opening: false, articles: 0, docks: false };
+    var out = { removed: 0, opening: false, articles: 0, projects: 0, docks: false };
     var table = readTable_(t.MOVEMENTS);
     var header = headers_(t.MOVEMENTS).concat(extraLabels_(table, headers_(t.MOVEMENTS)));
     var srcCol = header.indexOf('Source');
@@ -1311,9 +1687,139 @@ function RepoModule_() {
       writeRows_(t.ARTICLES, keptArticles, SPARE_ROWS_ADMIN, aHeader);
       setProp('SIM_ARTICLES', null);
     }
+    // PROJETS: only while the simulation still owns it (a save from the projects panel gives it to the user).
+    if (getProp('PROJECTS_SOURCE') === SIM) {
+      var simNames = getProp('SIM_PROJECTS');
+      var pt = projectTable_();
+      var dropP = {};
+      (simNames || []).forEach(function (n) { dropP[String(n).toLowerCase()] = true; });
+      var keptP = simNames ? pt.rows.filter(function (r) {
+        var k = projectName_(r[0]).toLowerCase();
+        return k && !has_(dropP, k);
+      }) : [];
+      out.projects = pt.rows.filter(function (r) { return projectName_(r[0]); }).length - keptP.length;
+      writeProjectRows_(pt, keptP);
+      setProp('PROJECTS_SOURCE', null);
+      setProp('SIM_PROJECTS', null);
+    }
     if (getProp('DOCKS_SOURCE') === SIM) {
       replaceDocks(defaultDocks_(), null);
       out.docks = true;
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------------------------------------------------------
+  // References -> projects (projects panel and page). Validation and spelling are done by Api.gs.
+  // -------------------------------------------------------------------------------------------------------------
+  /**
+   * Upsert of ARTICLES › Projet: rows [{ article, project, designation }] (project '' removes it). An article is
+   * matched case-insensitively (every row of a code written twice); a new article gets a new row with the given
+   * designation. One write of the Projet column plus one append. The user owns these rows from now on (removed
+   * from SIM_ARTICLES) and owns PROJETS (PROJECTS_SOURCE cleared). -> { created, updated, unchanged, articles }
+   */
+  function saveArticleProjects(rows) {
+    migrate_();
+    var name = T_().ARTICLES;
+    var t = readTable_(name, true);
+    if (t.found && !has_(t.col, 'Projet') && appendHeaders_(name, t.sheet, headers_(name)).length) t = readTable_(name, true);
+    var aCol = t.col['Article'], pCol = t.col['Projet'];
+    var at = {};
+    t.rows.forEach(function (r, i) {
+      var a = aCol === undefined ? '' : code_(r[aCol], true).toUpperCase();
+      if (a) (at[a] = at[a] || []).push(i);
+    });
+    var column = t.rows.map(function (r) { return pCol === undefined ? '' : r[pCol]; });
+    var out = { created: 0, updated: 0, unchanged: 0, articles: [] };
+    var fresh = [], seen = {};
+    (rows || []).forEach(function (row) {
+      var art = code_(row.article, true);
+      var k = art.toUpperCase();
+      if (!art || has_(seen, k)) return;
+      seen[k] = true;
+      out.articles.push(art);
+      var project = projectName_(row.project);
+      if (!has_(at, k)) {
+        // No row to take a project away from (a new row would make the article tracked by the engine).
+        if (!project) {
+          out.unchanged++;
+          return;
+        }
+        fresh.push(articleRow_({ article: art, designation: row.designation, project: project }));
+        out.created++;
+        return;
+      }
+      var changed = false;
+      at[k].forEach(function (i) {
+        if (projectName_(column[i]) !== project) {
+          column[i] = project;
+          changed = true;
+        }
+      });
+      if (changed) out.updated++;
+      else out.unchanged++;
+    });
+    if (out.updated) writeColumn_(name, t.sheet, 'Projet', column);
+    appendRows_(name, fresh);
+    releaseSimArticles_(out.articles);
+    setProp('PROJECTS_SOURCE', null);
+    return out;
+  }
+
+  // New PROJETS rows without blocks (names already there, any case, are skipped). -> names added.
+  function addProjects(names) {
+    migrate_();
+    var have = {};
+    readProjects().forEach(function (p) { have[p.project.toLowerCase()] = true; });
+    var added = [];
+    (names || []).forEach(function (n) {
+      var name = projectName_(n);
+      if (!name || has_(have, name.toLowerCase())) return;
+      have[name.toLowerCase()] = true;
+      added.push(name);
+    });
+    appendRows_(T_().PROJECTS, added.map(function (n) { return projectRow_({ project: n }); }));
+    setProp('PROJECTS_SOURCE', null);
+    return added;
+  }
+
+  // PROJETS replaced by rows [{ project, blocks, color, comment }]: the user owns the tab from now on.
+  function saveProjects(rows) {
+    migrate_();
+    writeProjectRows_(projectTable_(), (rows || []).filter(function (p) {
+      return projectName_(p && p.project);
+    }).map(projectRow_));
+    setProp('PROJECTS_SOURCE', null);
+    setProp('SIM_PROJECTS', null);
+    return (rows || []).length;
+  }
+
+  // Every ARTICLES › Projet and every PROJET rule of REGLES_PLACEMENT equal to 'from' (any case) becomes 'to'.
+  function renameProjectRefs(from, to) {
+    migrate_();
+    var key = projectName_(from).toLowerCase(), target = projectName_(to);
+    var out = { articles: 0, rules: 0 };
+    if (!key || !target) return out;
+    var at = readTable_(T_().ARTICLES, true);
+    if (has_(at.col, 'Projet')) {
+      var col = at.rows.map(function (r) {
+        var p = r[at.col['Projet']];
+        if (projectName_(p).toLowerCase() !== key || projectName_(p) === target) return p;
+        out.articles++;
+        return target;
+      });
+      if (out.articles) writeColumn_(T_().ARTICLES, at.sheet, 'Projet', col);
+    }
+    var rt = readTable_(T_().RULES, true);
+    if (has_(rt.col, 'Critère') && has_(rt.col, 'Valeur')) {
+      var vals = rt.rows.map(function (r) {
+        var v = r[rt.col['Valeur']];
+        if (str_(r[rt.col['Critère']]).toUpperCase() !== 'PROJET' || projectName_(v).toLowerCase() !== key ||
+          projectName_(v) === target) return v;
+        out.rules++;
+        return target;
+      });
+      if (out.rules) writeColumn_(T_().RULES, rt.sheet, 'Valeur', vals);
     }
     return out;
   }
@@ -1450,9 +1956,17 @@ function RepoModule_() {
   return {
     setup: setup,
     isInstalled: isInstalled,
+    migrate: migrate_,
     readInput: readInput,
     readLayout: readLayout,
     readDocks: readDocks,
+    readSettings: readSettings_,
+    readArticles: readArticles,
+    readProjects: readProjects,
+    saveArticleProjects: saveArticleProjects,
+    addProjects: addProjects,
+    saveProjects: saveProjects,
+    renameProjectRefs: renameProjectRefs,
     writeCalcTables: writeCalcTables,
     saveState: saveState,
     loadState: loadState,

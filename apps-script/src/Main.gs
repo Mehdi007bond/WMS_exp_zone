@@ -5,9 +5,11 @@
  *   Web app:   doGet(e); include_(name), moduleSource_(name) for the Index.html scriptlets (docs/ARCHITECTURE.md section 9)
  *   Sheet:     onOpen() menu "EXP2 Jumeau", onEdit(e) (QUAIS_CAMIONS edited by hand -> docks version), ACCUEIL tab
  *              (status + 4 image buttons), modal "Ouvrir le jumeau"
- *   Buttons:   installerLaBase, simulerDonnees, simulerJourSuivant, effacerSimulation, recalculer, ouvrirPanneau,
- *              ouvrirJumeau, regenererLesCles (no parameters: menu items and images with an assigned script)
+ *   Buttons:   installerLaBase, simulerDonnees, simulerJourSuivant, effacerSimulation, recalculer, ouvrirProjets,
+ *              ouvrirPanneau, ouvrirJumeau, regenererLesCles (no parameters: menu items and images with an assigned script)
  *   Sidebar:   sidebar_status, sidebar_simulate, sidebar_nextDay, sidebar_recompute, sidebar_links, sidebar_setWebAppUrl
+ *   Projects:  sidebar_getProjects, sidebar_saveReferences, sidebar_saveProjects (panel SidebarProjets.html,
+ *              docs/SPEC_V2.md 5.3)
  *
  * Every sheet action and sidebar function first checks that it runs from the spreadsheet (SpreadsheetApp.getUi()
  * only works there): the web app executes as the owner and google.script.run can call any public function, so this
@@ -17,7 +19,7 @@
  */
 
 var HOME_LAYOUT_ = {
-  rows: 34,
+  rows: 35,
   cols: 4,
   title: 2,
   subtitle: 3,
@@ -32,26 +34,36 @@ var HOME_STATUS_LABELS_ = ['Source des données', 'Données au', 'Dernier import
   'Palettes EXP2', 'Saturation EXP2', 'En attente PRD2', 'Quais occupés', 'Alertes', 'Lien TV', 'Lien PC',
   'Clé administrateur', 'Clé quais'];
 
+// Number of days of « Générer » (menu, ACCUEIL button, sidebar default): the simulator's default.
+var SIM_MENU_DAYS_ = 7;
+
 var HOME_HELP_ = [
-  '1. « Générer 14 jours » crée une base simulée réaliste (données fictives) et calcule l\'état de l\'entrepôt.',
-  '2. « Simuler +1 jour » ajoute la journée ouvrée suivante ; « Recalculer » relit les onglets après une modification.',
+  '1. « Générer ' + SIM_MENU_DAYS_ + ' jours » crée une base simulée réaliste (données fictives) et calcule l\'état de l\'entrepôt.',
+  '2. « Simuler +1 jour » ajoute la journée suivante ; « Recalculer » relit les onglets après une modification.',
   '3. « Ouvrir le jumeau » donne les liens de l\'écran TV et des pages PC, et les clés à saisir pour les actions.',
   '4. Données réelles : menu EXP2 Jumeau › Simulation › Effacer la simulation, puis page PC « Import » (fichiers SAP MB51).',
-  '5. Paramètres modifiables : ARTICLES, LAYOUT, REGLES_PLACEMENT, PARAM_MOUVEMENTS, PARAM_SEUILS, puis « Recalculer ».',
-  '6. Les onglets CALC_* sont réécrits à chaque calcul : ne pas les modifier à la main.',
-  '7. Menu EXP2 Jumeau › Panneau de contrôle : paramètres de simulation, état, lien de l\'application Web et clés.'
+  '5. Menu EXP2 Jumeau › Projets & références (ou page PC « Projets ») : chaque référence a un projet, chaque projet ses blocs.',
+  '6. Paramètres modifiables : ARTICLES, PROJETS, LAYOUT, REGLES_PLACEMENT, PARAM_MOUVEMENTS, PARAM_SEUILS, puis « Recalculer ».',
+  '7. Les onglets CALC_* sont réécrits à chaque calcul : ne pas les modifier à la main.',
+  '8. Menu EXP2 Jumeau › Panneau de contrôle : paramètres de simulation, état, lien de l\'application Web et clés.'
 ];
 
 var KEYS_HIDDEN_TEXT_ = '•••• (menu EXP2 Jumeau › Ouvrir le jumeau)';
 
 // PC pages of PagesPc.html (?page=...). 'twin' is the 3D view of the PC app.
-var WEB_PAGES_ = ['twin', 'lookup', 'pending', 'plan', 'docks', 'import', 'simulation'];
+var WEB_PAGES_ = ['twin', 'lookup', 'pending', 'plan', 'projects', 'docks', 'import', 'simulation'];
+
+// Labels of the PC pages in the links (same order as WEB_PAGES_).
+var WEB_PAGE_LABELS_ = {
+  twin: 'Jumeau 3D', lookup: 'Recherche article', pending: 'En attente', plan: 'Plan 2D', projects: 'Projets',
+  docks: 'Quais & camions', import: 'Import SAP', simulation: 'Simulation'
+};
 
 // ---------------------------------------------------------------------------------------------------------------
 // Web app
 // ---------------------------------------------------------------------------------------------------------------
 
-/** ?mode=tv (TV, read only, &rotate=1 rotates the scenes) or ?page=twin|lookup|pending|plan|docks|import|simulation (PC). */
+/** ?mode=tv (TV, read only, &rotate=1 rotates the scenes) or ?page=twin|lookup|pending|plan|projects|docks|import|simulation (PC). */
 function doGet(e) {
   var p = (e && e.parameter) || {};
   var mode = String(p.mode || '').toLowerCase() === 'tv' ? 'tv' : 'pc';
@@ -118,11 +130,12 @@ function onOpen() {
   ui.createMenu('EXP2 Jumeau')
     .addItem('Installer / réinitialiser la base', 'installerLaBase')
     .addSubMenu(ui.createMenu('Simulation')
-      .addItem('Générer 14 jours', 'simulerDonnees')
+      .addItem('Générer ' + SIM_MENU_DAYS_ + ' jours', 'simulerDonnees')
       .addItem('Simuler +1 jour', 'simulerJourSuivant')
       .addItem('Effacer la simulation', 'effacerSimulation'))
     .addSeparator()
     .addItem('Recalculer', 'recalculer')
+    .addItem('Projets & références', 'ouvrirProjets')
     .addItem('Panneau de contrôle', 'ouvrirPanneau')
     .addItem('Ouvrir le jumeau', 'ouvrirJumeau')
     .addSeparator()
@@ -151,8 +164,8 @@ function installerLaBase() {
     var answer = ui.alert('Installer / réinitialiser la base',
       'La base est déjà installée.\n\n' +
       'OUI : remettre les paramètres par défaut (LAYOUT, REGLES_PLACEMENT, PARAM_MOUVEMENTS, PARAM_SEUILS, QUAIS_CAMIONS).\n' +
-      'NON : réparer seulement (onglets manquants, en-têtes, formats).\n\n' +
-      'Dans les deux cas, les mouvements, le stock initial, les articles et le journal des imports sont conservés.',
+      'NON : réparer seulement (onglets manquants, en-têtes, formats, nouvelles colonnes).\n\n' +
+      'Dans les deux cas, les mouvements, le stock initial, les articles, les projets et le journal des imports sont conservés.',
       ui.ButtonSet.YES_NO_CANCEL);
     if (answer !== ui.Button.YES && answer !== ui.Button.NO) return;
     resetParams = answer === ui.Button.YES;
@@ -166,15 +179,15 @@ function installerLaBase() {
     buildHome_();
     return {
       message: 'Base installée' + (res.created.length ? ' (' + res.created.length + ' onglets créés)' : '') + '. ' +
-        'Étape suivante : « Générer 14 jours » (démonstration) ou un import SAP depuis la page PC.'
+        'Étape suivante : « Générer ' + SIM_MENU_DAYS_ + ' jours » (démonstration) ou un import SAP depuis la page PC.'
     };
   });
 }
 
 function simulerDonnees() {
   requireSheet_();
-  runFromSheet_('Simulation de 14 jours', function () {
-    return runSimulation_({ days: 14, seed: 2026 });
+  runFromSheet_('Simulation de ' + SIM_MENU_DAYS_ + ' jours', function () {
+    return runSimulation_({ days: SIM_MENU_DAYS_, seed: 2026 });
   });
 }
 
@@ -201,6 +214,13 @@ function recalculer() {
 function ouvrirPanneau() {
   requireSheet_();
   var out = HtmlService.createHtmlOutputFromFile('Sidebar').setTitle('EXP2 · Panneau de contrôle');
+  SpreadsheetApp.getUi().showSidebar(out);
+}
+
+/** Menu « Projets & références »: the projects panel (references -> projects, blocks per project). */
+function ouvrirProjets() {
+  requireSheet_();
+  var out = HtmlService.createHtmlOutputFromFile('SidebarProjets').setTitle('EXP2 · Projets & références');
   SpreadsheetApp.getUi().showSidebar(out);
 }
 
@@ -242,7 +262,8 @@ function sidebar_status() {
     appName: CFG.APP_NAME,
     installed: Repo.isInstalled(),
     versions: Repo.getVersions(),
-    defaults: { days: 14, endDate: lastWorkingDayBefore_(isoToday_()), palletsPerDay: '', seed: 2026 },
+    defaults: { days: SIM_MENU_DAYS_, endDate: simEndDefault_(), palletsPerDay: '', seed: 2026 },
+    limits: simLimits_(),
     state: null,
     lastImport: null,
     simulation: null
@@ -263,6 +284,8 @@ function sidebar_status() {
     s.computedAt = state.computedAt;
     s.importedAt = state.importedAt;
     s.oldestPendingDays = k.oldestPendingDays;
+    s.projects = k.projects === undefined ? null : k.projects;
+    s.noProjectArticles = k.noProjectArticles === undefined ? null : k.noProjectArticles;
     s.docksOccupied = k.docksOccupied;
     s.docksTotal = k.docksTotal;
     s.alertsList = (state.alerts || []).slice(0, 5);
@@ -291,6 +314,54 @@ function sidebar_recompute() {
 function sidebar_links() {
   requireSheet_();
   return { links: webLinks_(), keys: Repo.isInstalled() ? Repo.ensureKeys() : { admin: '', docks: '' } };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Projects panel (google.script.run from SidebarProjets.html; editors of the sheet, no key)
+// ---------------------------------------------------------------------------------------------------------------
+/**
+ * api_getProjects plus what the panel needs without the state on the client: designations and pallets of the
+ * tracked articles (state.articles), project colors (state.projects) and the link of the PC page « Projets ».
+ */
+function sidebar_getProjects() {
+  requireSheet_();
+  if (!Repo.isInstalled()) return { installed: false };
+  var out = getProjects_();
+  out.installed = true;
+  var state = Repo.loadState();
+  out.articles = state && state.articles ? state.articles.map(function (a) {
+    return { article: a.a, designation: a.d, project: a.p, exp2: a.e, pending: a.w };
+  }) : [];
+  out.colors = state && state.projects ? state.projects : {};
+  out.asOf = state ? state.asOf : null;
+  var links = webLinks_();
+  var page = links.pages.filter(function (p) { return p.page === 'projects'; })[0];
+  out.link = page ? page.url : '';
+  out.linkHelp = page ? '' : links.instructions;
+  return out;
+}
+
+/** References -> projects from the panel: same rules as api_saveReferences; answers with the panel data. */
+function sidebar_saveReferences(rows) {
+  requireSheet_();
+  return sidebarProjectsRun_(function () { return saveReferences_(rows); });
+}
+
+/** Blocks and colors of the projects from the panel: same rules as api_saveProjects. */
+function sidebar_saveProjects(projects) {
+  requireSheet_();
+  return sidebarProjectsRun_(function () { return saveProjects_(projects); });
+}
+
+function sidebarProjectsRun_(fn) {
+  var out = fn() || {};
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(out.message || 'Terminé.', CFG.APP_NAME, 8);
+  } catch (e) {
+    // Toast is cosmetic.
+  }
+  out.data = sidebar_getProjects();
+  return out;
 }
 
 /**
@@ -378,10 +449,7 @@ function webLinks_() {
   var dev = /\/dev$/.test(url);
   var deployed = !!url && !dev;
   var sep = url.indexOf('?') >= 0 ? '&' : '?';
-  var pages = [
-    ['twin', 'Jumeau 3D'], ['lookup', 'Recherche article'], ['pending', 'En attente'], ['plan', 'Plan 2D'], ['docks', 'Quais & camions'],
-    ['import', 'Import SAP'], ['simulation', 'Simulation']
-  ];
+  var pages = WEB_PAGES_.map(function (p) { return [p, WEB_PAGE_LABELS_[p] || p]; });
   var instructions = '';
   if (dev) {
     instructions = 'Collez l\u2019URL /exec du déploiement (Déployer › Gérer les déploiements) dans le panneau de contrôle ' +
@@ -494,7 +562,7 @@ function buildHome_() {
   sh.getRange(L.helpFirst, 2, HOME_HELP_.length, 1).setFontColor('#33404d');
 
   var buttons = [
-    ['SIMULATE', 'simulerDonnees', 2, L.buttons[0], 'Générer 14 jours'],
+    ['SIMULATE', 'simulerDonnees', 2, L.buttons[0], 'Générer ' + SIM_MENU_DAYS_ + ' jours'],
     ['NEXTDAY', 'simulerJourSuivant', 3, L.buttons[0], 'Simuler +1 jour'],
     ['RECOMPUTE', 'recalculer', 2, L.buttons[1], 'Recalculer'],
     ['OPEN', 'ouvrirJumeau', 3, L.buttons[1], 'Ouvrir le jumeau']
@@ -548,17 +616,26 @@ function homeStatus_() {
   var crit = alerts.filter(function (a) { return a.level === 'crit'; }).length;
   var notDeployed = links.dev ? 'Lien /dev (test) : collez l\u2019URL /exec dans le panneau de contrôle'
     : 'Non déployé : Déployer › Nouveau déploiement › Application Web';
+  // En attente PRD2: pallets, then « PRD2 > 6 h : n » (threshold of PARAM_SEUILS) and the oldest wait.
+  var pending = '—';
+  if (state) {
+    var s = summary_(state);
+    var oldest = k.oldestPendingHours !== null && k.oldestPendingHours !== undefined ? frHours_(k.oldestPendingHours)
+      : (k.oldestPendingDays ? plural_(k.oldestPendingDays, 'jour', 'jours') : '');
+    pending = plural_(k.pendingPallets || 0, 'palette', 'palettes') + ' · PRD2 > ' + frNum_(s.pendingHoursCrit, 1).replace(/,0$/, '') +
+      ' h : ' + frNum_(s.pendingCrit, 0) + (oldest ? ' (plus ancienne : ' + oldest + ')' : '');
+  }
+  var asOfTs = state && state.asOfTs ? ' ' + String(state.asOfTs).slice(11, 16) : '';
   return [
     { text: !state ? 'Aucune donnée' : state.source === 'SIMULATION' ? 'Simulation (données fictives)' : 'SAP (imports MB51)' },
-    { text: state ? frDate_(state.asOf) : '—' },
+    { text: state ? frDate_(state.asOf) + asOfTs : '—' },
     { text: last ? when(last.at) + ' · ' + last.kind + (last.fresh !== null && last.fresh !== undefined ?
       ' · ' + plural_(last.fresh, 'ligne', 'lignes') : '') : '—' },
     { text: state ? when(state.computedAt) : '—' },
     { text: 'Données ' + versions.data + ' · quais ' + versions.docks },
     { text: state ? frNum_(k.exp2Pallets || 0, 0) + ' palettes sur ' + frNum_(k.capacity || 0, 0) + ' places' : '—' },
     { text: state && k.saturation !== null && k.saturation !== undefined ? frPct_(k.saturation) : '—' },
-    { text: state ? plural_(k.pendingPallets || 0, 'palette', 'palettes') +
-      (k.oldestPendingDays ? ' (plus ancienne : ' + plural_(k.oldestPendingDays, 'jour', 'jours') + ')' : '') : '—' },
+    { text: pending },
     { text: state ? (k.docksOccupied || 0) + ' sur ' + (k.docksTotal || 0) : '—' },
     { text: state ? alerts.length + (crit ? ' dont ' + crit + ' critique' + (crit > 1 ? 's' : '') : '') : '—' },
     { text: links.deployed ? links.tv : notDeployed, link: links.deployed ? links.tv : '' },

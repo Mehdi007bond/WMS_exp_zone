@@ -4,11 +4,12 @@
  *
  *   PagesPc.mount(root, page, params)   app bar + the page; in-app navigation through App.go / App.onRoute
  *   PagesPc.has(page)
+ *   PagesPc.parsePaste(text, project)    references pasted in the Projets page (also used by the tests)
  *
  * Pages (?page=...): twin (Jumeau 3D), plan (Plan 2D), lookup (Recherche article), pending (En attente),
- * docks (Quais & camions), import (Import SAP MB51), simulation (Simulation). Each page implementation is
- * function (el, params) -> { route(params)?, update(store)?, destroy()? }.
- * Write actions go through App.withKey (key asked once per session in a modal).
+ * projects (Projets: references -> projects, blocks per project), docks (Quais & camions), import (Import SAP MB51),
+ * simulation (Simulation). Each page implementation is function (el, params) -> { route(params)?, update(store)?,
+ * destroy()? }. Write actions go through App.withKey (key asked once per session in a modal).
  */
 (function () {
   'use strict';
@@ -18,12 +19,14 @@
   // not checked. Compute it on a PC that can reach the CDN, and paste it here:
   //   curl -s https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js | openssl dgst -sha384 -binary | openssl base64 -A
   var SHEETJS_SRI = '';
-  var CHUNK = 500;
+  var CHUNK = 500;          // MB51 lines per api_importLines call
+  var REF_CHUNK = 2000;     // references per api_saveReferences call (server limit)
   var PAGES = [
     { id: 'twin', label: 'Jumeau 3D' },
     { id: 'plan', label: 'Plan 2D' },
     { id: 'lookup', label: 'Recherche article' },
     { id: 'pending', label: 'En attente' },
+    { id: 'projects', label: 'Projets' },
     { id: 'docks', label: 'Quais & camions' },
     { id: 'import', label: 'Import' },
     { id: 'simulation', label: 'Simulation' }
@@ -44,6 +47,10 @@
     return arguments.length > 1 ? f.num(n, dec) : f.num(n, 0);
   }
 
+  function isNum(n) {
+    return n !== null && n !== undefined && n !== '' && isFinite(Number(n));
+  }
+
   var NO_QPP_HINT = 'Article absent de l’onglet ARTICLES : ajoutez sa quantité par palette dans ARTICLES, puis « Recalculer » (onglet ACCUEIL)';
 
   function pal(n) {
@@ -60,8 +67,49 @@
     return t.charAt(0).toUpperCase() + t.slice(1);
   }
 
-  function stat(l, v, s) {
-    return '<div class="stat"><div class="l">' + esc(l) + '</div><div class="v">' + v + '</div>' + (s ? '<div class="s">' + s + '</div>' : '') + '</div>';
+  function stat(l, v, s, cls) {
+    return '<div class="stat' + (cls ? ' ' + cls : '') + '"><div class="l">' + esc(l) + '</div><div class="v">' + v + '</div>' + (s ? '<div class="s">' + s + '</div>' : '') + '</div>';
+  }
+
+  // Project of an article or a block, with its color swatch ('—' when none).
+  function projTag(s, name) {
+    if (!name) return '<span class="muted">—</span>';
+    return '<span class="ptag"><i style="background:' + esc(App.projectColor(s, name)) + '"></i>' + esc(name) + '</span>';
+  }
+
+  // Title of a block on the screens: its projects (state title), '' when free or unnamed.
+  function blockTitle(b) {
+    var t = String((b && b.title) || '');
+    return t && t !== 'Libre' ? t : '';
+  }
+
+  function levelChip(lvl) {
+    return lvl === 'crit' ? 'c' : lvl === 'warn' ? 'w' : 'n';
+  }
+
+  // SheetJS (read and write .xlsx), loaded once from the CDN.
+  function loadSheetJs() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    return App.loadScript(SHEETJS_URL, 'XLSX', 20000, SHEETJS_SRI);
+  }
+
+  // Why pallets are 'À PLACER' (sentence end): their projects' blocks are full, they have no project, or (v1) the
+  // blocks of their family are full.
+  function toPlaceWhy(s) {
+    var list = ((s.blockContents || {})['À PLACER'] || []);
+    var named = [], none = false;
+    list.forEach(function (e) {
+      if (e.project && e.project !== App.NO_PROJECT) {
+        if (named.indexOf(e.project) < 0) named.push(e.project);
+      } else {
+        none = true;
+      }
+    });
+    if (!App.hasProjects(s)) return 'la capacité des blocs de leur famille est dépassée';
+    var parts = [];
+    if (named.length) parts.push('blocs du projet ' + named.join(', ') + ' pleins');
+    if (none) parts.push('références sans projet et aucun bloc libre (page Projets)');
+    return parts.join(' ; ') || 'capacité des blocs dépassée';
   }
 
   /** Notice for pages that need data. Returns true when the page cannot render the state. */
@@ -72,14 +120,14 @@
       html = '<div class="empty-card"><div class="marking"></div><h2>Chargement…</h2><p>Lecture de l’état de l’entrepôt dans Google Sheets.</p></div>';
     } else if (store.status === 'notInstalled') {
       html = '<div class="empty-card"><div class="marking"></div><h2>Base non installée</h2><p>' + esc(bodyMessage(store.message)) + '</p>' +
-        '<p>Ensuite, générez une simulation (page <b>Simulation</b> ou bouton <b>Générer 14 jours</b> de l’onglet ACCUEIL) ou importez les extractions SAP (page <b>Import</b>).</p></div>';
+        '<p>Ensuite, générez une simulation (page <b>Simulation</b> ou bouton de l’onglet ACCUEIL) ou importez les extractions SAP (page <b>Import</b>).</p></div>';
     } else if (store.status === 'error') {
       html = '<div class="empty-card"><div class="marking"></div><h2>Connexion impossible</h2><p>' + esc(store.message) + '</p>' +
         '<p>Nouvel essai automatique dans la minute. <button type="button" class="btn" data-retry>Réessayer maintenant</button></p></div>';
     } else {
       html = '<div class="empty-card"><div class="marking"></div><h2>Aucune donnée pour l’instant</h2>' +
         '<p>La base est installée mais ne contient encore aucun mouvement SAP. Pour une démonstration, ouvrez la page <b>Simulation</b> ' +
-        '(ou cliquez sur <b>Générer 14 jours</b> dans l’onglet ACCUEIL du classeur). Pour les données réelles, déposez les extractions MB51 sur la page <b>Import</b>.</p>' +
+        '(ou utilisez le bouton de simulation de l’onglet ACCUEIL du classeur). Pour les données réelles, déposez les extractions MB51 sur la page <b>Import</b>.</p>' +
         '<p><button type="button" class="btn p" data-go="simulation">Ouvrir la page Simulation</button> <button type="button" class="btn" data-go="import">Ouvrir la page Import</button></p></div>';
     }
     el.innerHTML = html;
@@ -119,7 +167,7 @@
       var conn = App.connection();
       var sim = !!(s && s.source === 'SIMULATION');
       R.fresh.innerHTML = '<span class="dot ' + (conn ? 'crit' : sim ? 'ok' : fr.level) + '"></span><span class="lbl">' + (s ? esc(fr.lead) : 'Données SAP du') + '</span><b>' +
-        esc(s ? f.date(s.asOf) : '—') + '</b>' + (s && fr.imported ? '<span class="lbl"> · ' + esc(fr.verb + ' ' + fr.imported) + '</span>' : '') +
+        esc(s ? fr.asOfLabel : '—') + '</b>' + (s && fr.imported ? '<span class="lbl"> · ' + esc(fr.verb + ' ' + fr.imported) + '</span>' : '') +
         (sim ? '<span class="tag sim">SIMULÉES</span>' : '');
       R.fresh.title = s ? fr.text + (fr.ago ? ' (' + fr.ago + ')' : '') + ' · ' + fr.label : 'Aucune donnée';
       R.sim.hidden = !sim;
@@ -180,26 +228,31 @@
   // Jumeau 3D
   // ---------------------------------------------------------------------------------------------------------------
   P.twin = function (el) {
-    var MODES = [['family', 'Famille'], ['age', 'Âge'], ['saturation', 'Saturation']];
-    var mode = App.session.get('exp2.twinMode') || 'family';
-    if (!MODES.some(function (m) { return m[0] === mode; })) mode = 'family';
+    var MODES = [['project', 'Projet'], ['age', 'Âge'], ['saturation', 'Saturation']];
+    var mode = App.session.get('exp2.twinMode') || 'project';
+    if (!MODES.some(function (m) { return m[0] === mode; })) mode = 'project';
     var twin = null, shown = null, picked = null;
-    el.innerHTML = '<div class="page-head"><h1>Jumeau 3D</h1><p>Palettes par bloc (position théorique, placement par famille), camions à quai, palettes en attente au convoyeur.</p></div>' +
+    el.innerHTML = '<div class="page-head"><h1>Jumeau 3D</h1><p>Palettes par bloc (position théorique, blocs nommés par projet), camions à quai, palettes en attente au convoyeur (rouges au-delà du seuil d’attente).</p></div>' +
       '<div data-r="body"></div>';
     var body = App.$('[data-r="body"]', el);
 
     function legendHtml(s) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
       var items = twin ? twin.legend(s) : (window.IsoView ? window.IsoView.legend(mode, s) : []);
       return '<div class="legend">' + items.map(function (x) { return '<span><i style="background:' + esc(x.color) + '"></i>' + esc(x.label) + '</span>'; }).join('') +
-        '<span><i class="ghost"></i>en attente PRD2</span></div>';
+        '<span><i class="ghost"></i>en attente PRD2</span>' +
+        (Number(k.pendingCrit) > 0 ? '<span><i class="ghost crit"></i>en attente &gt; ' + esc(App.hText(thr.pendingHoursCrit)) + ' h</span>' : '') + '</div>';
     }
 
     function pickHtml() {
-      if (!picked) return '<p class="small">' + (twin && twin.kind === '3d' ? 'Cliquez sur une palette ou un bloc pour l\u2019identifier.' : 'Les blocs sont détaillés sur la page Plan 2D.') + '</p>';
+      if (!picked) return '<p class="small">' + (twin && twin.kind === '3d' ? 'Cliquez sur une palette ou un bloc pour l’identifier.' : 'Les blocs sont détaillés sur la page Plan 2D.') + '</p>';
       var b = picked.block || {}, a = picked.article;
-      return '<dl class="kv"><dt>Bloc</dt><dd>' + esc(b.id || picked.blockId) + (b.label ? ' · ' + esc(b.label) : '') + '</dd>' +
+      var s = shown || {};
+      var title = blockTitle(b);
+      return '<dl class="kv"><dt>Bloc</dt><dd>' + esc(b.id || picked.blockId) + (title ? ' · ' + esc(title) : '') + (b.label ? ' <span class="small">' + esc(b.label) + '</span>' : '') + '</dd>' +
         '<dt>Occupation</dt><dd>' + num(b.pallets) + ' / ' + num(b.capacity) + ' pal · ' + f.pctInt(b.saturation) + '</dd>' +
         (a ? '<dt>Article</dt><dd class="mono">' + esc(a.article) + '</dd><dt>Désignation</dt><dd>' + esc(a.designation || '') + '</dd>' +
+          (App.hasProjects(s) ? '<dt>Projet</dt><dd>' + projTag(s, a.project) + '</dd>' : '') +
           '<dt>Palettes</dt><dd>' + num(a.pallets) + ' · âge max ' + f.days(a.ageMax) + '</dd>' : '') + '</dl>' +
         '<div class="actions">' + (a ? '<button type="button" class="btn" data-go-article="' + esc(a.article) + '">Fiche article</button>' : '') +
         '<button type="button" class="btn" data-go-block="' + esc(b.id || picked.blockId) + '">Voir le bloc sur le plan</button></div>';
@@ -219,17 +272,21 @@
       var t = App.$('[data-r="side"]', body);
       if (!t) return;
       var docks = s.docks || [];
-      t.innerHTML = '<div class="panel"><h2>Légende<small>' + esc({ family: 'famille de produit', age: 'âge de la palette la plus ancienne', saturation: 'saturation du bloc' }[mode]) + '</small></h2>' + legendHtml(s) + '</div>' +
+      var projects = App.hasProjects(s);
+      var waits = isNum(k.oldestPendingHours) ? 'max ' + f.hm(k.oldestPendingHours) + (Number(k.pendingCrit) > 0 ? ' · <b class="bad-t">' + num(k.pendingCrit) + ' &gt; ' + esc(App.hText(thr.pendingHoursCrit)) + ' h</b>' : '')
+        : f.days(k.oldestPendingDays);
+      t.innerHTML = '<div class="panel"><h2>Légende<small>' + esc({ project: projects ? 'couleur du projet' : 'famille de produit', age: 'âge de la palette la plus ancienne', saturation: 'saturation du bloc' }[mode]) + '</small></h2>' + legendHtml(s) + '</div>' +
         '<div class="panel" data-r="pick"><h2>Sélection</h2>' + pickHtml() + '</div>' +
         '<div class="panel"><h2>Chiffres clés</h2><dl class="kv">' +
         '<dt>Stock EXP2</dt><dd>' + num(k.exp2Pallets) + ' / ' + num(k.capacity) + ' pal</dd>' +
         '<dt>Saturation</dt><dd><span class="chipd ' + App.satLevel(k.saturation, thr) + '">' + f.pct(k.saturation) + '</span></dd>' +
-        '<dt>En attente PRD2</dt><dd>' + num(k.pendingPallets) + ' pal · ' + f.days(k.oldestPendingDays) + '</dd>' +
+        '<dt>En attente PRD2</dt><dd>' + num(k.pendingPallets) + ' pal · ' + waits + '</dd>' +
         '<dt>EMRT</dt><dd>' + num(k.emrtPallets) + ' pal</dd>' +
         '<dt>Quais occupés</dt><dd>' + num(k.docksOccupied) + ' / ' + num(k.docksTotal || docks.length) + '</dd>' +
         '<dt>Plus ancienne palette</dt><dd>' + f.days(k.oldestExp2Days) + '</dd></dl></div>' +
         '<div class="panel"><h2>Blocs</h2><table class="tbl"><tbody>' + (s.blocks || []).map(function (b) {
-          return '<tr><td><b>' + esc(b.id) + '</b> <span class="small">' + esc(b.families || '') + '</span></td><td class="num">' + num(b.pallets) + ' / ' + num(b.capacity) +
+          var title = blockTitle(b);
+          return '<tr><td><b>' + esc(b.id) + '</b> <span class="small">' + esc(title || b.families || '') + '</span></td><td class="num">' + num(b.pallets) + ' / ' + num(b.capacity) +
             '</td><td class="num"><span class="chipd ' + App.satLevel(b.saturation, thr) + '">' + f.pctInt(b.saturation) + '</span></td></tr>';
         }).join('') + '</tbody></table></div>';
       bindPick(t);
@@ -242,7 +299,7 @@
     }
 
     function build(s) {
-      body.innerHTML = '<div class="actions" style="margin-bottom:12px"><span class="small">Couleur des palettes :</span><div class="seg" role="group" aria-label="Couleur des palettes">' +
+      body.innerHTML = '<div class="actions"><span class="small">Couleur des palettes :</span><div class="seg" role="group" aria-label="Couleur des palettes">' +
         MODES.map(function (m) { return '<button type="button" data-mode="' + m[0] + '" aria-pressed="' + (m[0] === mode) + '">' + m[1] + '</button>'; }).join('') +
         '</div><span class="small" data-r="kind"></span></div>' +
         '<div class="twin-grid"><div class="twin-stage" data-r="stage"></div><div class="col" data-r="side"></div></div>';
@@ -305,57 +362,74 @@
   P.plan = function (el, params) {
     var selected = params.block || '';
     var shown = null;
-    el.innerHTML = '<div class="page-head"><h1>Plan 2D</h1><p>Blocs colorés selon leur saturation. Cliquez sur un bloc pour voir son contenu. Positions théoriques (placement par famille).</p></div><div data-r="body"></div>';
+    el.innerHTML = '<div class="page-head"><h1>Plan 2D</h1><p>Blocs colorés selon leur saturation et nommés par leur projet. Cliquez sur un bloc pour voir son contenu. Positions théoriques.</p></div><div data-r="body"></div>';
     var body = App.$('[data-r="body"]', el);
 
     function render(s) {
-      var thr = App.thresholds(s);
+      var thr = App.thresholds(s), k = s.kpi || {};
       var blocks = s.blocks || [];
+      var projects = App.hasProjects(s);
       if (!selected || !blocks.some(function (b) { return b.id === selected; })) {
         selected = blocks.slice().sort(function (a, b) { return (b.saturation || 0) - (a.saturation || 0); })[0];
         selected = selected ? selected.id : '';
       }
       var sat = {};
       blocks.forEach(function (b) { sat[b.id] = b.saturation; });
-      body.innerHTML = '<div class="plan-grid"><div class="panel plan-panel"><h2>Plan 2D · saturation par bloc<small>placement théorique par famille</small></h2>' +
-        '<svg data-r="svg" aria-label="Plan 2D de l’entrepôt EXP2, blocs colorés selon leur saturation"></svg>' +
-        '<div class="actions">' + window.Plan2D.legendHtml(thr) + '</div>' +
-        '<div class="panel-note">Seuils réglables dans le classeur. Libellés d’allée à confirmer (relevé terrain).</div></div>' +
+      body.innerHTML = '<div class="plan-grid"><div class="panel plan-panel"><h2>Plan 2D · saturation par bloc<small>' +
+        (projects ? 'blocs nommés par projet · placement théorique' : 'placement théorique par famille') + '</small></h2>' +
+        '<svg data-r="svg" aria-label="Plan 2D de l’entrepôt EXP2, blocs colorés selon leur saturation et nommés par projet"></svg>' +
+        '<div class="actions">' + window.Plan2D.legendHtml(thr) + window.Plan2D.projectLegendHtml(App.projectLegend(s)) + '</div>' +
+        '<div class="panel-note">Seuils réglables dans le classeur. Projets et zones : page <a href="#" data-go="projects">Projets</a>. Libellés d’allée à confirmer (relevé terrain).</div></div>' +
         '<div class="col" data-r="side"></div></div>';
       // Full plan (dock numbers, Zone camion, zones, conveyor, dimensions): the panel is wide enough.
       window.Plan2D.build(App.$('[data-r="svg"]', body), s.layout, {
-        compact: false, sat: sat, thresholds: thr, select: selected, trucks: s.docks || [], ghosts: (s.kpi || {}).pendingPallets || 0,
+        compact: false, sat: sat, thresholds: thr, select: selected, trucks: s.docks || [], ghosts: k.pendingPallets || 0,
+        ghostsCrit: k.pendingCrit || 0, projectColors: projects ? s.projects : null,
         onBlockClick: function (id) { App.go('plan', { block: id }, { replace: true }); }
+      });
+      App.$$('[data-go]', body).forEach(function (a) {
+        a.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          App.go(a.getAttribute('data-go'), {});
+        });
       });
       side(s);
     }
 
     function side(s) {
       var thr = App.thresholds(s);
+      var projects = App.hasProjects(s);
       var b = (s.blocks || []).filter(function (x) { return x.id === selected; })[0];
       var t = App.$('[data-r="side"]', body);
       var html = '';
       if (b) {
         var rows = ((s.blockContents || {})[b.id] || []).slice().sort(function (x, y) { return (y.pallets - x.pallets) || ((y.ageMax || 0) - (x.ageMax || 0)); });
         var lvl = App.satLevel(b.saturation, thr);
-        html += '<div class="panel"><h2>Bloc ' + esc(b.id) + (b.label ? ' · ' + esc(b.label) : '') + '</h2>' +
+        var title = blockTitle(b);
+        var who;
+        if ((b.projects || []).length) who = 'Projet' + (b.projects.length > 1 ? 's' : '') + ' : ' + b.projects.map(function (p) { return projTag(s, p); }).join(' ');
+        else if (b.families) who = 'Famille(s) prévue(s) : ' + esc(b.families);
+        else who = projects ? 'Bloc libre : reçoit les références sans projet' : 'Aucune famille prévue';
+        html += '<div class="panel"><h2>Bloc ' + esc(b.id) + (title ? ' · ' + esc(title) : '') + (b.label ? '<small>' + esc(b.label) + '</small>' : '') + '</h2>' +
           '<div class="blk-head"><span class="big">' + num(b.pallets) + '</span><span class="muted">/ ' + num(b.capacity) + ' emplacements</span><span class="chipd ' + lvl + '">' + f.pct(b.saturation) + '</span></div>' +
           '<div class="bar2"><i style="width:' + Math.min(100, (b.saturation || 0) * 100) + '%;background:' + App.satColor(b.saturation, thr) + '"></i></div>' +
-          '<div class="small">Famille(s) prévue(s) : ' + esc(b.families || '—') + ' · ' + f.plural(rows.length, 'article', 'articles') + '</div>' +
+          '<div class="small">' + who + ' · ' + f.plural(rows.length, 'article', 'articles') + '</div>' +
           (rows.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Article</th><th class="num">Pal</th><th class="num">Âge max</th></tr></thead><tbody>' +
             rows.map(function (r) {
-              return '<tr class="link" data-article="' + esc(r.article) + '" tabindex="0"><td>' + esc(r.designation || '—') + '<span class="sub">' + esc(r.article) + ' · ' + esc(r.family || '') + '</span></td>' +
+              var tagTxt = projects ? (r.project || App.NO_PROJECT) : (r.family || '');
+              return '<tr class="link" data-article="' + esc(r.article) + '" tabindex="0"><td>' + esc(r.designation || '—') + '<span class="sub">' + esc(r.article) + (tagTxt ? ' · ' + esc(tagTxt) : '') + '</span></td>' +
                 '<td class="num">' + num(r.pallets) + '</td><td class="num">' + f.days(r.ageMax) + '</td></tr>';
             }).join('') + '</tbody></table></div>' : '<div class="empty-note">Bloc vide.</div>') + '</div>';
       }
       var k = s.kpi || {};
       var tp = (s.blockContents || {})['À PLACER'] || [];
       if (k.toPlacePallets) {
-        html += '<div class="alert-box"><b>' + f.plural(k.toPlacePallets, 'palette à placer', 'palettes à placer') + '</b> : la capacité des blocs de leur famille est dépassée' +
+        html += '<div class="alert-box"><b>' + f.plural(k.toPlacePallets, 'palette à placer', 'palettes à placer') + '</b> : ' + esc(toPlaceWhy(s)) +
           (tp.length ? ' (' + tp.slice(0, 4).map(function (x) { return esc(x.article) + ' · ' + num(x.pallets) + ' pal'; }).join(', ') + (tp.length > 4 ? '…' : '') + ')' : '') + '.</div>';
       }
       html += '<div class="panel"><h2>Tous les blocs</h2><table class="tbl"><tbody>' + (s.blocks || []).map(function (x) {
-        return '<tr class="link" data-block="' + esc(x.id) + '" tabindex="0"' + (x.id === selected ? ' aria-current="true"' : '') + '><td><b>' + esc(x.id) + '</b> <span class="small">' + esc(x.label || '') + '</span></td>' +
+        var tt = blockTitle(x);
+        return '<tr class="link" data-block="' + esc(x.id) + '" tabindex="0"' + (x.id === selected ? ' aria-current="true"' : '') + '><td><b>' + esc(x.id) + '</b> <span class="small">' + esc(tt || x.label || '') + '</span></td>' +
           '<td class="num">' + num(x.pallets) + ' / ' + num(x.capacity) + '</td><td class="num"><span class="chipd ' + App.satLevel(x.saturation, thr) + '">' + f.pctInt(x.saturation) + '</span></td></tr>';
       }).join('') + '</tbody></table></div>';
       t.innerHTML = html;
@@ -392,7 +466,7 @@
   // Recherche article
   // ---------------------------------------------------------------------------------------------------------------
   P.lookup = function (el, params) {
-    el.innerHTML = '<div class="page-head"><h1>Recherche article</h1><p>Stock EXP2, en attente PRD2 et EMRT, dates d’entrée (FIFO), sorties et lignes SAP d’un article.</p></div>' +
+    el.innerHTML = '<div class="page-head"><h1>Recherche article</h1><p>Projet, stock EXP2 par étiquette, en attente PRD2 et EMRT, heures d’entrée (FIFO), sorties et lignes SAP d’un article.</p></div>' +
       '<div class="search"><div class="combo"><label class="sr-only" for="lk-q">Numéro d’article ou désignation</label>' +
       '<input id="lk-q" type="search" autocomplete="off" spellcheck="false" placeholder="N° d’article ou désignation" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="lk-sugg">' +
       '<ul id="lk-sugg" role="listbox" aria-label="Suggestions" hidden></ul></div>' +
@@ -534,6 +608,11 @@
       });
     }
 
+    // Entry time of a row ('05/10 14:22') or its date ('05.10.2026') when the time is unknown.
+    function when(ts, date) {
+      return ts ? f.stampShort(ts) : f.date(date);
+    }
+
     function renderResult(res) {
       var s = App.store.state;
       var thr = App.thresholds(s);
@@ -543,67 +622,105 @@
         return;
       }
       var st = res.stock || {};
+      var project = res.project || st.project || '';
       var uqs = st.uqs || ((res.movements || [])[0] || {}).uqs || '';
       var E = st.EXP2 || { qty: 0, pallets: 0 }, Pd = st.PRD2 || { qty: 0, pallets: 0 }, M = st.EMRT || { qty: 0, pallets: 0 };
-      var fifo = (res.fifo || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.doc) < String(b.doc) ? -1 : 1; });
-      var pend = (res.pending || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; });
-      var exits = (res.exits || []).slice().sort(function (a, b) { return a.dateOut < b.dateOut ? 1 : a.dateOut > b.dateOut ? -1 : 0; });
+      function byTime(a, b) {
+        return a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.ts || '') < String(b.ts || '') ? -1 : String(a.ts || '') > String(b.ts || '') ? 1 : String(a.doc) < String(b.doc) ? -1 : 1;
+      }
+      var fifo = (res.fifo || []).slice().sort(byTime);
+      var pend = (res.pending || []).slice().sort(byTime);
+      var exits = (res.exits || []).slice().sort(function (a, b) {
+        var x = String(a.dateOut) + String(a.tsOut || ''), y = String(b.dateOut) + String(b.tsOut || '');
+        return x < y ? 1 : x > y ? -1 : 0;
+      });
+      var labeled = fifo.concat(pend).concat(exits).some(function (r) { return r.label || r.ts || r.tsIn || r.tsOut; });
       var locs = (res.locations || []).filter(function (l) { return l.block !== 'À PLACER'; });
       var toPlace = (res.locations || []).filter(function (l) { return l.block === 'À PLACER'; })[0];
-      var blocksTxt = locs.map(function (l) { return l.block; }).join(' / ');
+      var blockTitles = {};
+      ((s && s.blocks) || []).forEach(function (b) { blockTitles[b.id] = blockTitle(b); });
+      var blocksTxt = locs.map(function (l) { return l.block + (blockTitles[l.block] ? ' ' + blockTitles[l.block] : ''); }).join(' / ');
+      var qppSrc = st.qppSource === 'ARTICLES' ? 'onglet ARTICLES' : st.qppSource === 'ÉTIQUETTES' ? 'apprise des étiquettes' : '';
       desc.innerHTML = esc(res.designation || '—') + '<small>' + (uqs ? 'UQS ' + esc(uqs) + ' · ' : '') +
-        (st.qpp ? num(st.qpp, undefined) + ' ' + esc(uqs) + ' / palette' : '<span class="bad-t">absent de l’onglet ARTICLES : ajoutez sa quantité par palette dans ARTICLES, puis « Recalculer » (onglet ACCUEIL)</span>') +
-        (st.family ? ' · famille ' + esc(st.family) : '') + '</small>';
+        (st.qpp ? num(st.qpp, undefined) + ' ' + esc(uqs) + ' / palette' + (qppSrc ? ' (' + esc(qppSrc) + ')' : '') :
+          '<span class="bad-t">quantité par palette inconnue : ajoutez-la dans l’onglet ARTICLES, puis « Recalculer » (onglet ACCUEIL)</span>') +
+        (st.family ? ' · famille ' + esc(st.family) : '') + '</small>' +
+        '<span class="lk-proj">Projet : ' + (project ? projTag(s, project) : '<b class="warn-t">sans projet</b>') +
+        ' <button type="button" class="btn sm" data-go-projects>' + (project ? 'Changer' : 'Affecter') + '</button></span>';
       var oldest = fifo[0];
+      var pendOld = pend.filter(function (p) { return isNum(p.hours); }).sort(function (a, b) { return b.hours - a.hours; })[0];
       var html = '<div class="stats">' +
-        stat('EXP2 · notre entrepôt', pal(E.pallets) + ' <small>pal</small>', num(E.qty, undefined) + ' ' + esc(uqs)) +
-        stat('En attente · PRD2', pal(Pd.pallets) + ' <small>pal</small>', num(Pd.qty, undefined) + ' ' + esc(uqs) + (pend[0] ? ' · depuis le ' + f.date(pend[0].date) : '')) +
+        stat('EXP2 · notre entrepôt', pal(E.pallets) + ' <small>pal</small>', num(E.qty, undefined) + ' ' + esc(uqs) + (labeled ? ' · ' + f.plural(fifo.filter(function (r) { return r.label; }).length, 'étiquette', 'étiquettes') : '')) +
+        stat('En attente · PRD2', pal(Pd.pallets) + ' <small>pal</small>', num(Pd.qty, undefined) + ' ' + esc(uqs) +
+          (pendOld ? ' · depuis ' + esc(f.hm(pendOld.hours)) : pend[0] ? ' · depuis le ' + f.date(pend[0].date) : ''), pendOld && pendOld.level === 'crit' ? 'crit' : '') +
         stat('EMRT · externe', pal(M.pallets) + ' <small>pal</small>', num(M.qty, undefined) + ' ' + esc(uqs)) +
-        stat('Plus ancienne entrée EXP2', oldest ? num(oldest.age) + ' <small>jours</small>' : '—', oldest ? 'entrée le ' + f.date(oldest.date) : 'aucun stock en EXP2') +
+        stat('Plus ancienne entrée EXP2', oldest ? (isNum(oldest.ageHours) && oldest.ageHours < 48 ? esc(f.hm(oldest.ageHours)) : num(oldest.age) + ' <small>jours</small>') : '—',
+          oldest ? 'entrée le ' + esc(when(oldest.ts, oldest.date)) : 'aucun stock en EXP2') +
         '</div>';
       html += '<div class="cols"><div class="col">';
-      html += '<div class="panel"><h2>Stock EXP2 par date d’entrée<small>FIFO · ' + f.plural(fifo.length, 'ligne', 'lignes') + '</small></h2>' +
-        (fifo.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date entrée</th><th>Doc.article</th><th>Origine</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Âge (j)</th><th>Emplacement</th></tr></thead><tbody>' +
-          fifo.map(function (r) {
-            return '<tr><td>' + esc(f.date(r.date)) + '</td><td class="mono">' + esc(r.doc || '—') + '</td><td>' + esc(r.origin || '') + '</td><td class="num">' + num(r.qty, undefined) +
-              '</td><td class="num">' + pal(r.pallets) + '</td><td class="num">' + num(r.age) + '</td><td>' +
-              (blocksTxt ? '<span class="tag tbd">' + esc(blocksTxt) + ' · théorique</span>' : toPlace ? '<span class="tag warn">à placer</span>' : '—') + '</td></tr>';
-          }).join('') + '</tbody></table></div>' + PAL_NOTE : '<div class="empty-note">Aucun stock de cet article en EXP2.</div>') + '</div>';
+      var place = function () {
+        return blocksTxt ? '<span class="tag tbd">' + esc(blocksTxt) + ' · théorique</span>' : toPlace ? '<span class="tag warn">à placer</span>' : '—';
+      };
+      if (labeled) {
+        html += '<div class="panel"><h2>Stock EXP2 par étiquette<small>FIFO · ' + f.plural(fifo.length, 'ligne', 'lignes') + ' · âge à l’heure des données</small></h2>' +
+          (fifo.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Étiquette</th><th>Entrée le</th><th>Origine</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Âge</th><th>Emplacement</th></tr></thead><tbody>' +
+            fifo.map(function (r) {
+              return '<tr><td class="mono">' + (r.label ? esc(r.label) : '<span class="muted">sans étiquette</span>') + '<span class="sub">' + esc(r.doc || '') + '</span></td>' +
+                '<td>' + esc(when(r.ts, r.date)) + '</td><td>' + esc(r.origin || '') + '</td><td class="num">' + num(r.qty, undefined) + '</td><td class="num">' + pal(r.pallets) + '</td>' +
+                '<td class="num">' + (isNum(r.ageHours) ? esc(f.hm(r.ageHours)) : f.days(r.age)) + '</td><td>' + place() + '</td></tr>';
+            }).join('') + '</tbody></table></div>' + PAL_NOTE : '<div class="empty-note">Aucun stock de cet article en EXP2.</div>') + '</div>';
+      } else {
+        html += '<div class="panel"><h2>Stock EXP2 par date d’entrée<small>FIFO · ' + f.plural(fifo.length, 'ligne', 'lignes') + '</small></h2>' +
+          (fifo.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date entrée</th><th>Doc.article</th><th>Origine</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Âge (j)</th><th>Emplacement</th></tr></thead><tbody>' +
+            fifo.map(function (r) {
+              return '<tr><td>' + esc(f.date(r.date)) + '</td><td class="mono">' + esc(r.doc || '—') + '</td><td>' + esc(r.origin || '') + '</td><td class="num">' + num(r.qty, undefined) +
+                '</td><td class="num">' + pal(r.pallets) + '</td><td class="num">' + num(r.age) + '</td><td>' + place() + '</td></tr>';
+            }).join('') + '</tbody></table></div>' + PAL_NOTE : '<div class="empty-note">Aucun stock de cet article en EXP2.</div>') + '</div>';
+      }
       if (pend.length) {
-        html += '<div class="panel"><h2>En attente en PRD2<small>déclaré, pas encore transféré en EXP2</small></h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Déclarée le</th><th>Doc.article</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Attente</th></tr></thead><tbody>' +
+        html += '<div class="panel"><h2>En attente en PRD2<small>déclaré, pas encore transféré en EXP2 · rouge au-delà de ' + esc(App.hText(thr.pendingHoursCrit)) + ' h</small></h2><div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+          (labeled ? '<th>Étiquette</th>' : '') + '<th>Déclarée le</th><th>Doc.article</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Attente</th></tr></thead><tbody>' +
           pend.map(function (p) {
-            var c = p.days >= thr.pendingDaysCrit ? 'c' : p.days >= thr.pendingDaysWarn ? 'w' : 'n';
-            return '<tr><td>' + esc(f.date(p.date)) + '</td><td class="mono">' + esc(p.doc || '') + '</td><td class="num">' + num(p.qty, undefined) + '</td><td class="num">' + pal(p.pallets) +
-              '</td><td class="num"><span class="chipd ' + c + '">' + f.days(p.days) + '</span></td></tr>';
+            var lvl = App.pendingLevel(p, thr);
+            return '<tr class="' + (lvl ? 'lv-' + lvl : '') + '">' + (labeled ? '<td class="mono">' + (p.label ? esc(p.label) : '<span class="muted">sans étiquette</span>') + '</td>' : '') +
+              '<td>' + esc(when(p.ts, p.date)) + '</td><td class="mono">' + esc(p.doc || '') + '</td><td class="num">' + num(p.qty, undefined) + '</td><td class="num">' + pal(p.pallets) +
+              '</td><td class="num"><span class="chipd ' + levelChip(lvl) + '">' + (isNum(p.hours) ? esc(f.hm(p.hours)) : f.days(p.days)) + '</span></td></tr>';
           }).join('') + '</tbody></table></div>' + PAL_NOTE + '</div>';
       }
-      html += '<div class="panel"><h2>Sorties d’EXP2<small>date d’entrée → date de sortie · ' + f.plural(exits.length, 'ligne', 'lignes') + '</small></h2>' +
-        (exits.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Entrée</th><th>Sortie</th><th class="num">Qté</th><th class="num">Pal (équiv.)</th><th>Destination</th><th class="num">Séjour (j)</th><th>Doc.article</th></tr></thead><tbody>' +
+      html += '<div class="panel"><h2>Sorties d’EXP2<small>entrée → sortie · ' + f.plural(exits.length, 'ligne', 'lignes') + '</small></h2>' +
+        (exits.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' + (labeled ? '<th>Étiquette</th>' : '') + '<th>Entrée</th><th>Sortie</th><th class="num">Qté</th><th class="num">Pal (équiv.)</th><th>Destination</th><th class="num">Séjour</th><th>Doc.article</th></tr></thead><tbody>' +
           exits.map(function (r) {
-            return '<tr><td>' + esc(f.date(r.dateIn)) + '</td><td>' + esc(f.date(r.dateOut)) + '</td><td class="num">' + num(r.qty, undefined) + '</td><td class="num">' +
-              (r.pallets === null || r.pallets === undefined ? '?' : num(r.pallets, 1)) + '</td><td>' + esc(r.destination || '') + '</td><td class="num">' + num(r.stay) +
-              '</td><td class="mono">' + esc(r.doc || '') + '</td></tr>';
+            return '<tr>' + (labeled ? '<td class="mono">' + (r.label ? esc(r.label) : '<span class="muted">—</span>') + '</td>' : '') +
+              '<td>' + esc(when(r.tsIn, r.dateIn)) + '</td><td>' + esc(when(r.tsOut, r.dateOut)) + '</td><td class="num">' + num(r.qty, undefined) + '</td><td class="num">' +
+              (r.pallets === null || r.pallets === undefined ? '?' : num(r.pallets, 1)) + '</td><td>' + esc(r.destination || '') + '</td><td class="num">' +
+              (isNum(r.stayHours) ? esc(f.hm(r.stayHours)) : f.days(r.stay)) + '</td><td class="mono">' + esc(r.doc || '') + '</td></tr>';
           }).join('') + '</tbody></table></div><div class="panel-note">Pal (équiv.) : quantité sortie ÷ quantité par palette (0,4 = 40 % d’une palette).</div>' :
           '<div class="empty-note">Aucune sortie d’EXP2 sur la période.</div>') + '</div>';
       html += '</div><div class="col">';
       html += '<div class="panel mini"><h2>Où est-il ?<small>position théorique</small></h2><svg data-r="mini" role="img" aria-label="Plan miniature : blocs de l’article en surbrillance"></svg>' +
-        '<div class="small">' + (locs.length ? locs.map(function (l) { return 'Bloc <b>' + esc(l.block) + '</b> : ' + f.plural(l.pallets, 'palette', 'palettes') + ' (âge max ' + f.days(l.ageMax) + ')'; }).join('<br>') :
-          'Aucune palette placée dans un bloc.') + (toPlace ? '<br><span class="bad-t">' + f.plural(toPlace.pallets, 'palette', 'palettes') + ' à placer (blocs de la famille pleins).</span>' : '') +
+        '<div class="small">' + (locs.length ? locs.map(function (l) {
+          return 'Bloc <b>' + esc(l.block) + '</b>' + (blockTitles[l.block] ? ' (' + esc(blockTitles[l.block]) + ')' : '') + ' : ' + f.plural(l.pallets, 'palette', 'palettes') + ' (âge max ' + f.days(l.ageMax) + ')';
+        }).join('<br>') : 'Aucune palette placée dans un bloc.') +
+        (toPlace ? '<br><span class="bad-t">' + f.plural(toPlace.pallets, 'palette', 'palettes') + ' à placer (' +
+          (project ? 'blocs du projet pleins' : App.hasProjects(s) ? 'sans projet : affectez-le dans la page Projets' : 'blocs de la famille pleins') + ').</span>' : '') +
         '<br>Position exacte dès que les règles de placement seront fournies.</div></div>';
       var mv = res.movements || [];
       html += '<div class="panel"><h2>Lignes SAP<small>MB51 · ' + f.plural(res.movementsTotal || mv.length, 'ligne', 'lignes') + (mv.length < (res.movementsTotal || 0) ? ', ' + mv.length + ' affichées' : '') + '</small></h2>' +
         (mv.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date cpt. · Doc.</th><th>MvT</th><th>Mag.</th><th class="num">Qté</th><th>Saisie</th></tr></thead><tbody>' +
           mv.map(function (m) {
-            return '<tr><td>' + esc(f.date(m.date)) + '<span class="sub">' + esc(m.doc) + '</span></td><td class="mono" title="' + esc(m.text || '') + '">' + esc(m.mvt) + (m.s ? ' ' + esc(m.s) : '') +
+            return '<tr><td>' + esc(m.ts ? f.stamp(m.ts) : f.date(m.date)) + '<span class="sub">' + esc(m.doc) + (m.label ? ' · étiq. ' + esc(m.label) : '') + '</span></td><td class="mono" title="' + esc(m.text || '') + '">' + esc(m.mvt) + (m.s ? ' ' + esc(m.s) : '') +
               '</td><td>' + esc(m.magasin) + '</td><td class="num">' + num(m.qty, undefined) + '</td><td>' + esc(m.user || '') + '</td></tr>';
           }).join('') + '</tbody></table></div>' : '<div class="empty-note">Aucune ligne SAP.</div>') + '</div>';
       html += '</div></div>';
       out.innerHTML = html;
+      var gp = App.$('[data-go-projects]', desc);
+      if (gp) gp.addEventListener('click', function () { App.go('projects', { article: res.article }); });
       var mini = App.$('[data-r="mini"]', out);
       var layout = (s && s.layout) || App.CFG.DEFAULT_LAYOUT;
       var hl = locs.map(function (l) { return l.block; });
-      if (!hl.length && st.family && s) {
-        hl = (s.blocks || []).filter(function (b) { return String(b.families || '').split(/[,\s]+/).indexOf(st.family) >= 0; }).map(function (b) { return b.id; });
+      if (!hl.length && s) {
+        if (project) hl = (s.blocks || []).filter(function (b) { return (b.projects || []).some(function (p) { return App.fold(p) === App.fold(project); }); }).map(function (b) { return b.id; });
+        else if (st.family) hl = (s.blocks || []).filter(function (b) { return String(b.families || '').split(/[,\s]+/).indexOf(st.family) >= 0; }).map(function (b) { return b.id; });
       }
       window.Plan2D.build(mini, layout, { compact: true, highlight: hl.length ? hl : ['__none__'], trucks: s ? s.docks : undefined });
     }
@@ -641,14 +758,146 @@
   };
 
   // ---------------------------------------------------------------------------------------------------------------
-  // En attente
+  // En attente: one row per label, waits in hours (v2); one row per declared line in days (v1 data)
   // ---------------------------------------------------------------------------------------------------------------
-  P.pending = function (el) {
+  P.pending = function (el, params) {
     var shown = null;
-    el.innerHTML = '<div class="page-head"><h1>En attente</h1><p>Déclarées en production (PRD2), pas encore transférées en EXP2. La plus ancienne d’abord.</p></div><div data-r="body"></div>';
+    var filter = { project: params.project || '', level: params.level || '' };
+    el.innerHTML = '<div class="page-head"><h1>En attente</h1><p>Étiquettes déclarées en production (PRD2), pas encore transférées en EXP2. La plus ancienne d’abord.</p></div><div data-r="body"></div>';
     var body = App.$('[data-r="body"]', el);
 
+    function bindRows() {
+      App.$$('tr[data-article]', body).forEach(function (tr) {
+        function go() { App.go('lookup', { article: tr.getAttribute('data-article') }); }
+        tr.addEventListener('click', go);
+        tr.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go(); });
+      });
+    }
+
     function render(s) {
+      var ps = App.pendingStats(s);
+      if (!ps.timed) renderDays(s);
+      else renderHours(s, ps);
+      bindRows();
+    }
+
+    function projectOf(p) {
+      return p.project || App.NO_PROJECT;
+    }
+
+    function renderHours(s, ps) {
+      var k = s.kpi || {}, thr = App.thresholds(s);
+      var crit = App.hText(thr.pendingHoursCrit), warn = App.hText(thr.pendingHoursWarn);
+      var o = ps.oldest;
+      // Header: « 128 étiquettes en attente · 86 depuis plus de 6 h · plus ancienne 44 h 02 » at the time of the data.
+      var head = '<div class="pend-sum" role="status"><span><b data-r="pendCount">' + num(ps.labels) + '</b> ' + (ps.labels > 1 ? 'étiquettes' : 'étiquette') + ' en attente</span>' +
+        (ps.unlabeled ? '<span class="muted">+ ' + f.plural(ps.unlabeled, 'ligne', 'lignes') + ' sans étiquette</span>' : '') +
+        '<span class="sep">·</span><span class="' + (ps.crit ? 'bad-t' : '') + '"><b data-r="critCount">' + num(ps.crit) + '</b> depuis plus de ' + esc(crit) + ' h</span>' +
+        (ps.critUnlabeled ? '<span class="muted">(+ ' + f.plural(ps.critUnlabeled, 'ligne', 'lignes') + ' sans étiquette)</span>' : '') +
+        '<span class="sep">·</span><span>plus ancienne <b data-r="oldest">' + (o && isNum(o.hours) ? esc(f.hm(o.hours)) : '—') + '</b></span>' +
+        '<span class="muted">à l’heure des données (' + esc(s.asOfTs ? f.stampShort(s.asOfTs) : f.date(s.asOf)) + ')</span></div>';
+      var dwell = isNum(k.dwellMedianH) ? esc(f.hm(k.dwellMedianH)) : '—';
+      var html = head + '<div class="stats">' +
+        stat('Palettes en attente (PRD2)', num(k.pendingPallets) + ' <small>pal</small>', f.plural(ps.labels, 'étiquette', 'étiquettes') +
+          (ps.unlabeled ? ' · ' + f.plural(ps.unlabeled, 'ligne', 'lignes') + ' sans étiquette' : '')) +
+        stat('Depuis plus de ' + crit + ' h', num(ps.crit) + ' <small>' + (ps.crit > 1 ? 'étiquettes' : 'étiquette') + '</small>',
+          f.plural(Number(k.pendingCrit) || 0, 'palette', 'palettes') + ' · à transférer d’urgence', ps.crit || Number(k.pendingCrit) ? 'crit' : '') +
+        stat('De ' + warn + ' à ' + crit + ' h', num(ps.warn) + ' <small>' + (ps.warn > 1 ? 'étiquettes' : 'étiquette') + '</small>',
+          f.plural(Number(k.pendingWarn) || 0, 'palette', 'palettes') + ' · à surveiller', ps.warn ? 'warn' : '') +
+        stat('Délai PRD2 → EXP2 du jour', dwell + ' <small>médiane</small>', isNum(k.dwellP90H) ? '90 % en moins de ' + esc(f.hm(k.dwellP90H)) : 'aucun transfert étiqueté ce jour') +
+        '</div>';
+      // Filters: project, level.
+      var names = [], seen = {};
+      ps.rows.forEach(function (p) {
+        var n = projectOf(p);
+        if (!seen[n]) {
+          seen[n] = true;
+          names.push(n);
+        }
+      });
+      names.sort(function (a, b) {
+        return ((a === App.NO_PROJECT ? 1 : 0) - (b === App.NO_PROJECT ? 1 : 0)) || a.localeCompare(b, 'fr');
+      });
+      if (filter.project && !seen[filter.project]) filter.project = '';
+      var rows = ps.rows.filter(function (p) {
+        if (filter.project && projectOf(p) !== filter.project) return false;
+        var lvl = App.pendingLevel(p, thr);
+        if (filter.level === 'crit' && lvl !== 'crit') return false;
+        if (filter.level === 'warn' && !lvl) return false;
+        return true;
+      });
+      html += '<div class="cols side-400"><div class="panel"><h2>Déclarées en PRD2, pas encore transférées en EXP2<small>une ligne par étiquette · la plus ancienne d’abord · cliquez pour ouvrir la fiche article</small></h2>' +
+        '<div class="toolbar"><label class="field inline"><span>Projet</span><select data-r="fProject"><option value="">Tous les projets</option>' +
+        names.map(function (n) { return '<option value="' + esc(n) + '"' + (n === filter.project ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') + '</select></label>' +
+        '<label class="field inline"><span>Attente</span><select data-r="fLevel"><option value="">Toutes</option>' +
+        '<option value="crit"' + (filter.level === 'crit' ? ' selected' : '') + '>Plus de ' + esc(crit) + ' h</option>' +
+        '<option value="warn"' + (filter.level === 'warn' ? ' selected' : '') + '>' + esc(warn) + ' h et plus</option></select></label>' +
+        '<span class="small" data-r="shownCount">' + f.plural(rows.length, 'ligne affichée', 'lignes affichées') + '</span></div>' +
+        (rows.length ? '<div class="tbl-wrap tall"><table class="tbl pend"><thead><tr><th>Étiquette</th><th>Article</th><th>Désignation</th><th>Projet</th><th>Déclarée le</th><th class="num">Attente</th><th>Saisie</th></tr></thead><tbody>' +
+          rows.map(function (p) {
+            var lvl = App.pendingLevel(p, thr);
+            return '<tr class="link' + (lvl ? ' lv-' + lvl : '') + '" tabindex="0" data-article="' + esc(p.article) + '" data-level="' + esc(lvl) + '" data-hours="' + esc(isNum(p.hours) ? p.hours : '') + '">' +
+              '<td class="mono">' + (p.label ? esc(p.label) : '<span class="muted">sans étiquette</span><span class="sub">' + num(p.qty, undefined) + ' ' + esc(p.uqs || '') + '</span>') + '</td>' +
+              '<td class="mono">' + esc(p.article) + '</td><td>' + esc(p.designation || '') + '</td><td>' + projTag(s, p.project) + '</td>' +
+              '<td>' + esc(p.ts ? f.stampShort(p.ts) : f.date(p.date)) + '</td>' +
+              '<td class="num"><span class="chipd ' + levelChip(lvl) + '">' + (isNum(p.hours) ? esc(f.hm(p.hours)) : f.days(p.days)) + '</span></td>' +
+              '<td>' + esc(p.user || '') + '</td></tr>';
+          }).join('') + '</tbody></table></div>' :
+          '<div class="empty-note">' + (ps.rows.length ? 'Aucune ligne pour ce filtre.' : 'Aucune palette en attente : tout ce qui a été déclaré est transféré en EXP2.') + '</div>') +
+        (ps.truncated ? '<div class="panel-note">Liste limitée aux ' + num(ps.rows.length) + ' plus anciennes (' + num(ps.total) + ' au total).</div>' : '') +
+        '<div class="panel-note">Rouge : en PRD2 depuis plus de ' + esc(crit) + ' h · orange : depuis ' + esc(warn) + ' h (seuils de l’onglet PARAM_SEUILS). Attente = heure des données − heure de déclaration.</div></div>';
+      // Side: waiting time chart and per project counts.
+      var buckets = App.pendingBuckets(ps.rows, thr);
+      var per = {}, order = [];
+      ps.rows.forEach(function (p) {
+        var n = projectOf(p);
+        if (!per[n]) {
+          per[n] = { n: 0, crit: 0, warn: 0 };
+          order.push(n);
+        }
+        per[n].n++;
+        var lvl = App.pendingLevel(p, thr);
+        if (lvl === 'crit') per[n].crit++;
+        else if (lvl === 'warn') per[n].warn++;
+      });
+      order.sort(function (a, b) { return (per[b].crit - per[a].crit) || (per[b].n - per[a].n) || a.localeCompare(b, 'fr'); });
+      html += '<div class="col"><div class="panel"><h2>Étiquettes par durée d’attente</h2>' +
+        App.barChart(buckets.map(function (b) {
+          return { label: b.label, value: b.value, color: b.color, title: b.label + ' : ' + f.plural(b.value, 'ligne', 'lignes') };
+        }), { w: 380, h: 210, ariaLabel: 'Étiquettes en attente par durée d’attente' }) +
+        '<div class="panel-note">Une étiquette déclarée est normalement transférée en EXP2 dans l’heure (délai médian du jour : ' + dwell + '). Au-delà de ' + esc(crit) +
+        ' h, c’est un vrai problème : palette oubliée en production.</div></div>' +
+        (order.length ? '<div class="panel"><h2>Par projet</h2><table class="tbl"><thead><tr><th>Projet</th><th class="num">En attente</th><th class="num">&gt; ' + esc(crit) + ' h</th></tr></thead><tbody>' +
+          order.map(function (n) {
+            return '<tr class="link" tabindex="0" data-filter-project="' + esc(n) + '"><td>' + (n === App.NO_PROJECT ? '<span class="muted">' + esc(n) + '</span>' : projTag(s, n)) + '</td><td class="num">' + num(per[n].n) +
+              '</td><td class="num">' + (per[n].crit ? '<span class="chipd c">' + num(per[n].crit) + '</span>' : '0') + '</td></tr>';
+          }).join('') + '</tbody></table></div>' : '') + '</div></div>';
+      body.innerHTML = html;
+      var fp = App.$('[data-r="fProject"]', body), fl = App.$('[data-r="fLevel"]', body);
+      fp.addEventListener('change', function () {
+        filter.project = fp.value;
+        render(s);
+        var x = App.$('[data-r="fProject"]', body);
+        if (x) x.focus();
+      });
+      fl.addEventListener('change', function () {
+        filter.level = fl.value;
+        render(s);
+        var x = App.$('[data-r="fLevel"]', body);
+        if (x) x.focus();
+      });
+      App.$$('[data-filter-project]', body).forEach(function (tr) {
+        function go() {
+          filter.project = filter.project === tr.getAttribute('data-filter-project') ? '' : tr.getAttribute('data-filter-project');
+          render(s);
+        }
+        tr.addEventListener('click', go);
+        tr.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go(); });
+      });
+    }
+
+    // v1 data (no entry time): one row per declared line, waits in days.
+    function renderDays(s) {
       var k = s.kpi || {}, thr = App.thresholds(s);
       var rows = (s.pending || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : (b.days - a.days); });
       var arts = {};
@@ -668,7 +917,7 @@
       html += '<div class="cols side-400"><div class="panel"><h2>Déclarées en PRD2, pas encore transférées en EXP2<small>la plus ancienne d’abord · cliquez sur une ligne pour ouvrir la fiche article</small></h2>' +
         (rows.length ? '<div class="tbl-wrap tall"><table class="tbl"><thead><tr><th>Article</th><th>Désignation</th><th>Déclarée le</th><th>Doc.article</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Attente</th></tr></thead><tbody>' +
           rows.map(function (p) {
-            var c = p.days >= thr.pendingDaysCrit ? 'c' : p.days >= thr.pendingDaysWarn ? 'w' : 'n';
+            var c = levelChip(App.pendingLevel(p, thr));
             return '<tr class="link" tabindex="0" data-article="' + esc(p.article) + '"><td class="mono">' + esc(p.article) + '</td><td>' + esc(p.designation || '') + '</td><td>' + esc(f.date(p.date)) +
               '</td><td class="mono">' + esc(p.doc || '') + '</td><td class="num">' + num(p.qty, undefined) + '</td><td class="num">' + pal(p.pallets) + '</td><td class="num"><span class="chipd ' + c + '">' + f.days(p.days) + '</span></td></tr>';
           }).join('') + '</tbody></table></div>' + PAL_NOTE : '<div class="empty-note">Aucune palette en attente : tout ce qui a été déclaré est transféré en EXP2.</div>') +
@@ -677,14 +926,13 @@
         (chart.length ? App.barChart(chart, { w: 360, h: 220, ariaLabel: 'Palettes en attente par date de déclaration' }) : '<div class="empty-note">—</div>') +
         '<div class="panel-note">La barre bleue est la journée en cours : ces palettes sont normalement transférées dans les heures qui suivent. Les autres méritent un contrôle.</div></div></div>';
       body.innerHTML = html;
-      App.$$('tr[data-article]', body).forEach(function (tr) {
-        function go() { App.go('lookup', { article: tr.getAttribute('data-article') }); }
-        tr.addEventListener('click', go);
-        tr.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go(); });
-      });
     }
 
     return {
+      route: function (p) {
+        filter.project = p.project || filter.project;
+        if (shown) render(shown);
+      },
       update: function (store) {
         if (needData(body, store)) {
           shown = null;
@@ -693,6 +941,1016 @@
         if (store.state === shown) return;
         shown = store.state;
         render(shown);
+      }
+    };
+  };
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Projets: references -> projects, blocks (zones) per project (docs/SPEC_V2.md 5 and 7)
+  // ---------------------------------------------------------------------------------------------------------------
+  var ARTICLE_RE = /^[0-9A-Za-z._\/-]{1,40}$/;
+  // First pasted line taken as a header (Excel column titles), compared without accents or case.
+  var HEADER_RE = /^(articles?|references?|ref\.?|code( article)?|code produit|n[o°]\.? ?(d')?article|numero( d'article)?|materiel|material|part ?number|pn)$/;
+  var MAX_PROJECT_LEN = 40;
+
+  // Spaces of every kind (no-break, thin, figure, BOM) -> one plain space, trimmed.
+  function cleanSpaces(v) {
+    return String(v === null || v === undefined ? '' : v).replace(/[\u00a0\u202f\u2007\u2009\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function unquote(s) {
+    var m = /^"([\s\S]*)"$/.exec(s);
+    return m ? m[1].replace(/""/g, '"').trim() : s;
+  }
+
+  /**
+   * Article code as the server stores it: trimmed, upper case, leading zeros removed from all-digit codes,
+   * ^[0-9A-Za-z._/-]{1,40}$. Digits grouped by Excel or a mail ('73 871 645') are joined. -> { code, error }
+   */
+  function normArticle(raw) {
+    var s = unquote(cleanSpaces(raw));
+    if (/^\d{1,3}( \d{3})+$/.test(s)) s = s.replace(/ /g, '');
+    var code = s.toUpperCase();
+    if (/^\d+$/.test(code)) code = code.replace(/^0+(?=\d)/, '');
+    var error = '';
+    if (!code) error = 'Référence vide';
+    else if (/^\d+([.,]\d+)?E[+-]?\d+$/.test(code)) error = 'Référence affichée en notation scientifique par Excel (ex. 7,39E+07) : mettez la colonne au format Texte, puis recopiez-la';
+    else if (/\s/.test(code)) error = 'Espace dans la référence : séparez la référence et le projet par une tabulation (copie Excel) ou un point-virgule';
+    else if (!ARTICLE_RE.test(code)) error = 'Référence invalide : lettres, chiffres et . _ / - seulement, 40 caractères au plus';
+    return { code: code, error: error };
+  }
+
+  /**
+   * Project name as the server stores it: trimmed, spaces collapsed, at most 40 characters, no , ; |.
+   * 'Sans projet' means: remove the project. -> { name, given, remove, error }
+   */
+  function normProjectName(raw) {
+    var s = unquote(cleanSpaces(raw));
+    if (!s || s === '-' || s === '—') return { name: '', given: false, remove: false, error: '' };
+    if (App.fold(s) === App.fold(App.NO_PROJECT)) return { name: '', given: true, remove: true, error: '' };
+    if (s.length > MAX_PROJECT_LEN) return { name: s, given: true, remove: false, error: 'Nom de projet trop long (' + MAX_PROJECT_LEN + ' caractères au plus)' };
+    if (/[,;|]/.test(s)) return { name: s, given: true, remove: false, error: 'Nom de projet invalide : pas de virgule, point-virgule ni barre verticale' };
+    return { name: s, given: true, remove: false, error: '' };
+  }
+
+  function sameName(a, b) {
+    return App.fold(a) === App.fold(b);
+  }
+
+  /**
+   * References pasted in the Projets page. One reference per line, or two columns copied from Excel
+   * (Référence ⇥ Projet; « ; » separates too). Blank lines, surrounding spaces and a header line are ignored; a
+   * reference given twice is merged (its last project wins, conflicts are listed); numeric codes lose their leading
+   * zeros like on the server. A line without its own project takes defaultProject.
+   * -> { rows: [{ article, error, project, remove, projectError, source: 'colonne' | 'champ' | '', line, count,
+   *      conflict: [project names] }], blank, header (true when a header line was skipped), lines, merged }
+   */
+  function parsePaste(text, defaultProject) {
+    var def = normProjectName(defaultProject);
+    var out = { rows: [], blank: 0, header: false, lines: 0, merged: 0 };
+    var byCode = {};
+    var first = true;
+    String(text || '').split(/\r\n|\r|\n/).forEach(function (line, i) {
+      var t = String(line).replace(/\ufeff/g, '');
+      if (!cleanSpaces(t)) {
+        out.blank++;
+        return;
+      }
+      var cols = t.indexOf('\t') >= 0 ? t.split('\t') : t.indexOf(';') >= 0 ? t.split(';') : [t];
+      while (cols.length > 1 && !cleanSpaces(cols[cols.length - 1])) cols.pop();
+      if (first) {
+        first = false;
+        var c0 = App.fold(cleanSpaces(cols[0])).replace(/[’`]/g, '\'');
+        var c1 = cols.length > 1 ? App.fold(cleanSpaces(cols[1])) : '';
+        if (HEADER_RE.test(c0) || /^(projets?|projects?)$/.test(c1)) {
+          out.header = true;
+          return;
+        }
+      }
+      out.lines++;
+      var a = normArticle(cols[0]);
+      var p = cols.length > 1 ? normProjectName(cols[1]) : { name: '', given: false, remove: false, error: '' };
+      var use = p.given ? p : def;
+      var row = { article: a.code, error: a.error, project: use.name, remove: !!use.remove, projectError: use.error || '',
+        source: p.given ? 'colonne' : def.given ? 'champ' : '', line: i + 1, count: 1, conflict: [] };
+      if (!a.error) {
+        var prev = byCode[a.code];
+        if (prev) {
+          prev.count++;
+          out.merged++;
+          if (row.source) {
+            var before = prev.remove ? App.NO_PROJECT : prev.project, after = row.remove ? App.NO_PROJECT : row.project;
+            if (prev.source && !sameName(before, after)) {
+              if (prev.conflict.indexOf(before) < 0) prev.conflict.push(before);
+              if (prev.conflict.indexOf(after) < 0) prev.conflict.push(after);
+            }
+            prev.project = row.project;
+            prev.remove = row.remove;
+            prev.projectError = row.projectError;
+            prev.source = row.source;
+          }
+          return;
+        }
+        byCode[a.code] = row;
+      }
+      out.rows.push(row);
+    });
+    return out;
+  }
+
+  // Colors of the projects as the engine gives them: PROJETS › Couleur, else the palette in sorted name order.
+  function autoColors(projects) {
+    var palette = (App.CFG.COLORS && App.CFG.COLORS.projects) || ['#7fb3e0', '#f2b27a', '#8fd19e', '#e79ac0', '#c3a6e8', '#f3d36b'];
+    var names = projects.map(function (p) { return p.project; }).sort(function (a, b) {
+      var x = a.toLowerCase(), y = b.toLowerCase();
+      return x < y ? -1 : x > y ? 1 : a < b ? -1 : a > b ? 1 : 0;
+    });
+    var out = {};
+    names.forEach(function (n, i) {
+      var p = projects.filter(function (x) { return x.project === n; })[0];
+      out[n] = /^#[0-9a-fA-F]{6}$/.test(p.color || '') ? p.color.toLowerCase() : palette[i % palette.length];
+    });
+    return out;
+  }
+
+  P.projects = function (el, params) {
+    var data = null;          // api_getProjects() (or a read-only copy built from the state)
+    var dataError = '';
+    var loading = false, loadSeq = 0;
+    var shown = null;         // state rendered
+    var draft = null;         // zones being edited: { projects: [{ project, blocks, color, comment }] }
+    var draftBase = '';       // JSON of the saved zones, to know when the draft differs
+    var pasted = null;        // parsePaste() result shown in the preview
+    var pasteResult = null;   // { kind, html } message of the last save from the paste box
+    var selectedNone = {};    // section 4: checked articles
+    var edits = {};           // section 5: article -> new project ('' = none)
+    var allFilter = { q: params.article || '', project: '' };
+    var busy = false;
+
+    el.innerHTML = '<div class="page-head"><h1>Projets</h1><p>Affectez les références (n° d’article) à un projet et les blocs de l’entrepôt à chaque projet : ' +
+      'les noms de projet remplacent B1, B2… sur tous les écrans.</p></div>' +
+      '<div data-r="status"></div>' +
+      '<div class="stats" data-r="stats"></div>' +
+      '<nav class="toc" aria-label="Sections de la page Projets" data-r="toc"></nav>' +
+      '<datalist id="pj-names"></datalist>' +
+      '<section class="panel" id="pj-paste" aria-labelledby="pj-paste-h"><h2 id="pj-paste-h"><span class="step">1</span>Coller des références<small>une par ligne, ou deux colonnes copiées d’Excel : Référence ⇥ Projet</small></h2>' +
+      '<div class="pj-paste"><div class="form">' +
+      '<label class="field"><span>Références</span><textarea data-r="pasteText" rows="9" spellcheck="false" autocomplete="off" ' +
+      'placeholder="LF23855&#10;LF23857&#10;73871645&#9;ATLAS"></textarea></label>' +
+      '<label class="field"><span>Projet (pour les lignes sans projet)</span><input data-r="pasteProject" list="pj-names" maxlength="40" autocomplete="off" placeholder="ex. ATLAS"></label>' +
+      '<p class="small">Un nouveau nom crée le projet. « Sans projet » retire le projet. Lignes vides, espaces et doublons ignorés. Ctrl+Entrée : aperçu.</p>' +
+      '<div class="actions"><button type="button" class="btn p" data-act="preview">Aperçu</button><button type="button" class="btn" data-act="clearPaste">Effacer</button></div></div>' +
+      '<div data-r="preview" class="pj-preview" aria-live="polite"></div></div></section>' +
+      '<section class="panel" id="pj-zones" aria-labelledby="pj-zones-h"><h2 id="pj-zones-h"><span class="step">2</span>Zones par projet<small>blocs de l’entrepôt de chaque projet (un bloc peut servir à plusieurs projets)</small></h2><div data-r="zones"></div></section>' +
+      '<section class="panel" id="pj-list" aria-labelledby="pj-list-h"><h2 id="pj-list-h"><span class="step">3</span>Projets</h2><div data-r="list"></div></section>' +
+      '<section class="panel" id="pj-none" aria-labelledby="pj-none-h"><h2 id="pj-none-h"><span class="step">4</span>Références sans projet<small>articles suivis (produits finis) sans projet</small></h2><div data-r="none"></div></section>' +
+      '<section class="panel" id="pj-all" aria-labelledby="pj-all-h"><h2 id="pj-all-h"><span class="step">5</span>Toutes les références</h2>' +
+      '<div class="toolbar"><label class="field inline grow"><span>Rechercher</span><input type="search" data-r="allQ" autocomplete="off" spellcheck="false" placeholder="N° d’article ou mot de la désignation"></label>' +
+      '<label class="field inline"><span>Projet</span><select data-r="allProject"></select></label>' +
+      '<span class="small" data-r="allCount"></span><span class="spacer"></span>' +
+      '<span class="small warn-t" data-r="allDirty"></span><button type="button" class="btn" data-r="allCancel" hidden>Annuler</button>' +
+      '<button type="button" class="btn p" data-r="allSave" hidden>Enregistrer</button></div><div data-r="all"></div></section>';
+    var R = {};
+    App.$$('[data-r]', el).forEach(function (e) { R[e.getAttribute('data-r')] = e; });
+    R.allQ.value = allFilter.q;
+
+    // ---- data ----------------------------------------------------------------------------------------------
+    function state() {
+      return App.store.status === 'ok' ? App.store.state : null;
+    }
+
+    // Read-only data from the state when the server has no api_getProjects (old deployment).
+    function dataFromState(s) {
+      var layoutBlocks = ((s && s.layout && s.layout.blocks) || (App.CFG.DEFAULT_LAYOUT || {}).blocks || []);
+      return {
+        fromState: true,
+        projects: ((s && s.projectsList) || []).filter(function (p) { return p.project !== App.NO_PROJECT; }).map(function (p) {
+          return { project: p.project, blocks: (p.blocks || []).slice(), color: '', comment: '' };
+        }),
+        references: ((s && s.articles) || []).filter(function (a) { return a.p; }).map(function (a) { return { article: a.a, designation: a.d, project: a.p }; }),
+        blocks: layoutBlocks.map(function (b) {
+          return { id: b.id, label: b.label || '', capacity: b.capacity || (b.cols || 1) * (b.rows || 1) * (b.levels || 1) };
+        })
+      };
+    }
+
+    function load() {
+      var my = ++loadSeq;
+      loading = true;
+      renderStatus();
+      return App.call('api_getProjects').then(function (res) {
+        if (my !== loadSeq) return;
+        loading = false;
+        dataError = '';
+        data = res || {};
+        data.projects = (data.projects || []).map(function (p) {
+          return { project: String(p.project || ''), blocks: (p.blocks || []).map(String), color: p.color || '', comment: p.comment || '',
+            listed: p.listed !== false };
+        }).filter(function (p) { return p.project; });
+        data.references = data.references || [];
+        data.blocks = (data.blocks && data.blocks.length) ? data.blocks : dataFromState(state()).blocks;
+        resetDraft();
+        renderAll();
+      }, function (err) {
+        if (my !== loadSeq) return;
+        loading = false;
+        dataError = err.message;
+        if (!data || data.fromState) {
+          data = dataFromState(state());
+          resetDraft();
+        }
+        renderAll();
+      });
+    }
+
+    function resetDraft() {
+      draft = { projects: (data ? data.projects : []).map(function (p) {
+        return { project: p.project, blocks: p.blocks.slice(), color: p.color || '', comment: p.comment || '' };
+      }) };
+      draftBase = JSON.stringify(draft.projects);
+    }
+
+    function draftDirty() {
+      return !!draft && JSON.stringify(draft.projects) !== draftBase;
+    }
+
+    // Every project name known on the page: PROJETS, the state, the zones being edited.
+    function projectNames() {
+      var out = [];
+      function add(n) {
+        if (n && n !== App.NO_PROJECT && !out.some(function (x) { return sameName(x, n); })) out.push(n);
+      }
+      (data ? data.projects : []).forEach(function (p) { add(p.project); });
+      ((state() || {}).projectsList || []).forEach(function (p) { add(p.project); });
+      (draft ? draft.projects : []).forEach(function (p) { add(p.project); });
+      (data ? data.references : []).forEach(function (r) { add(r.project); });
+      return out.sort(function (a, b) { return a.localeCompare(b, 'fr', { sensitivity: 'base' }); });
+    }
+
+    // Spelling already used for a name (case-insensitive), else the name as typed.
+    function canonical(name) {
+      var found = projectNames().filter(function (n) { return sameName(n, name); })[0];
+      return found || name;
+    }
+
+    function isKnownProject(name) {
+      return projectNames().some(function (n) { return sameName(n, name); });
+    }
+
+    /**
+     * Every reference of the page: tracked articles of the state (statistics) and ARTICLES rows (project).
+     * -> { CODE: { article, designation, project, inArticles, tracked, e, w, m, q, qs, t } }
+     */
+    function refs() {
+      var map = {};
+      var s = state();
+      ((s && s.articles) || []).forEach(function (a) {
+        var code = normArticle(a.a).code;
+        map[code] = { article: String(a.a), designation: a.d || '', project: a.p || '', inArticles: false, tracked: true,
+          e: a.e, w: a.w, m: a.m, q: a.q, qs: a.qs || '', t: a.t || '' };
+      });
+      (data ? data.references : []).forEach(function (r) {
+        var code = normArticle(r.article).code;
+        if (!code) return;
+        var x = map[code] || (map[code] = { article: String(r.article), designation: '', project: '', tracked: false, e: null, w: null, m: null, q: null, qs: '', t: '' });
+        x.inArticles = true;
+        x.project = r.project || '';
+        if (!x.designation) x.designation = r.designation || '';
+      });
+      if (data && data.fromState) {
+        Object.keys(map).forEach(function (k) { map[k].inArticles = !!map[k].project; });
+      }
+      return map;
+    }
+
+    // ---- writes ---------------------------------------------------------------------------------------------
+    // Saves [{ article, project }] by batches of REF_CHUNK with the admin key; resolves to the summed answer.
+    function saveRefs(rows) {
+      var chunks = [];
+      for (var i = 0; i < rows.length; i += REF_CHUNK) chunks.push(rows.slice(i, i + REF_CHUNK));
+      return App.withKey('admin', function (key) {
+        var total = { created: 0, updated: 0, unchanged: 0, invalid: [], newProjects: [], message: '' };
+        var p = Promise.resolve();
+        chunks.forEach(function (c) {
+          p = p.then(function () {
+            return App.call('api_saveReferences', key, c).then(function (res) {
+              res = res || {};
+              total.created += Number(res.created) || 0;
+              total.updated += Number(res.updated) || 0;
+              total.unchanged += Number(res.unchanged) || 0;
+              total.invalid = total.invalid.concat(res.invalid || []);
+              (res.newProjects || []).forEach(function (n) { if (total.newProjects.indexOf(n) < 0) total.newProjects.push(n); });
+              total.message = res.message || total.message;
+            });
+          });
+        });
+        return p.then(function () { return total; });
+      });
+    }
+
+    // While a write runs every action is disabled; afterwards the sections redraw their buttons from their own state.
+    function setBusy(b) {
+      busy = b;
+      if (b) {
+        App.$$('[data-act], [data-save]', el).forEach(function (x) { if (!x.hasAttribute('data-keep')) x.disabled = true; });
+        R.allSave.disabled = true;
+        return;
+      }
+      App.$$('[data-act]', el).forEach(function (x) { x.disabled = false; });
+      renderPreview();
+      renderZones();
+      renderNone();
+      updateDirty();
+    }
+
+    // After any write: new state (block titles) and fresh PROJETS / ARTICLES.
+    function afterWrite() {
+      App.refresh(true);
+      return load();
+    }
+
+    function resultText(res) {
+      var parts = [];
+      parts.push(f.plural(res.created, 'référence ajoutée', 'références ajoutées'));
+      parts.push(f.plural(res.updated, 'modifiée', 'modifiées'));
+      if (res.unchanged) parts.push(f.plural(res.unchanged, 'inchangée', 'inchangées'));
+      if (res.invalid.length) parts.push(f.plural(res.invalid.length, 'refusée', 'refusées'));
+      return parts.join(', ') + '.' + (res.newProjects.length ? ' Nouveau' + (res.newProjects.length > 1 ? 'x projets' : ' projet') + ' : ' + res.newProjects.join(', ') +
+        ' (sans bloc : affectez ses zones en 2).' : '');
+    }
+
+    function invalidHtml(list) {
+      if (!list || !list.length) return '';
+      return '<ul class="inv">' + list.slice(0, 20).map(function (x) {
+        return '<li><b class="mono">' + esc(x.article || '?') + '</b> : ' + esc(x.reason || 'refusée') + '</li>';
+      }).join('') + (list.length > 20 ? '<li>… et ' + (list.length - 20) + ' autres</li>' : '') + '</ul>';
+    }
+
+    // ---- status, stats, table of contents ---------------------------------------------------------------------
+    function renderStatus() {
+      var html = '';
+      if (loading && !data) html = '<div class="info-box"><span class="spinner"></span> Lecture des projets (onglets PROJETS, ARTICLES, LAYOUT)…</div>';
+      else if (dataError) {
+        var unknownFn = /inconnue|unknown|not a function|is not defined/i.test(dataError);
+        html = '<div class="alert-box"><b>Projets non lus depuis le classeur</b> : ' + esc(dataError) +
+          (unknownFn ? ' Le script Apps Script déployé est antérieur à la page Projets : mettez-le à jour (clasp push) et redéployez l’application Web.' : '') +
+          ' Affichage en lecture seule depuis le dernier calcul. <button type="button" class="btn sm" data-act="reload" data-keep>Réessayer</button></div>';
+      }
+      R.status.innerHTML = html;
+      var r = App.$('[data-act="reload"]', R.status);
+      if (r) r.addEventListener('click', load);
+    }
+
+    function counts() {
+      var map = refs();
+      var tracked = 0, none = 0;
+      Object.keys(map).forEach(function (k) {
+        if (!map[k].tracked) return;
+        tracked++;
+        if (!map[k].project) none++;
+      });
+      var used = {};
+      (draft ? draft.projects : []).forEach(function (p) { p.blocks.forEach(function (b) { used[b] = true; }); });
+      var blocks = (data ? data.blocks : []);
+      return { tracked: tracked, none: none, refs: Object.keys(map).length, projects: projectNames().length,
+        freeBlocks: blocks.filter(function (b) { return !used[b.id]; }).length, blocks: blocks.length, map: map };
+    }
+
+    function renderStats() {
+      var c = counts();
+      R.stats.innerHTML = stat('Projets', num(c.projects), f.plural((draft ? draft.projects : []).filter(function (p) { return p.blocks.length; }).length, 'projet avec des zones', 'projets avec des zones')) +
+        stat('Références suivies', num(c.tracked), 'produits finis (passent par EXP2) · ' + f.plural(c.refs, 'référence', 'références') + ' au total') +
+        stat('Sans projet', num(c.none), c.none ? 'à affecter (section 4)' : 'toutes les références suivies ont un projet', c.none ? 'warn' : '') +
+        stat('Blocs sans projet', num(c.freeBlocks) + ' <small>/ ' + num(c.blocks) + '</small>', c.freeBlocks ? 'reçoivent les références sans projet' : 'chaque bloc a un projet');
+      R.toc.innerHTML = [['pj-paste', '1 Coller'], ['pj-zones', '2 Zones'], ['pj-list', '3 Projets'], ['pj-none', '4 Sans projet (' + c.none + ')'],
+        ['pj-all', '5 Toutes (' + c.refs + ')']].map(function (x) {
+        return '<a href="#' + x[0] + '" data-jump="' + x[0] + '">' + esc(x[1]) + '</a>';
+      }).join('');
+      App.$$('[data-jump]', R.toc).forEach(function (a) {
+        a.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          var t = document.getElementById(a.getAttribute('data-jump'));
+          if (t && t.scrollIntoView) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          var focus = t ? App.$('textarea, input, select, button', t) : null;
+          if (focus) focus.focus({ preventScroll: true });
+        });
+      });
+      var dl = document.getElementById('pj-names');
+      if (dl) dl.innerHTML = projectNames().map(function (n) { return '<option value="' + esc(n) + '"></option>'; }).join('');
+    }
+
+    // ---- 1. paste -----------------------------------------------------------------------------------------------
+    function pasteStatus(row, map) {
+      if (row.error) return { kind: 'invalid', text: 'Invalide', why: row.error };
+      if (row.projectError) return { kind: 'invalid', text: 'Invalide', why: row.projectError };
+      if (!row.source) return { kind: 'invalid', text: 'Invalide', why: 'Projet manquant : saisissez-le dans « Projet » ou en deuxième colonne' };
+      var ref = map[row.article];
+      var target = row.remove ? '' : canonical(row.project);
+      var cur = ref ? ref.project || '' : '';
+      if (!ref || !ref.inArticles) {
+        if (!target) return { kind: 'same', text: 'Inchangée', why: 'déjà sans projet', target: target };
+        return { kind: 'new', text: 'Nouvelle', why: 'ajoutée à l’onglet ARTICLES', target: target };
+      }
+      if (sameName(cur, target)) return { kind: 'same', text: 'Inchangée', why: '', target: target };
+      return { kind: 'change', text: 'Changement', why: '', target: target };
+    }
+
+    function renderPreview() {
+      var box = R.preview;
+      if (!pasted) {
+        box.innerHTML = (pasteResult ? '<div class="' + pasteResult.kind + '">' + pasteResult.html + '</div>' : '') +
+          '<div class="empty-note">Collez une colonne de références copiée d’Excel, choisissez le projet, puis « Aperçu ». Rien n’est enregistré avant « Enregistrer ».</div>';
+        return;
+      }
+      var map = refs();
+      var tally = { 'new': 0, change: 0, same: 0, invalid: 0 };
+      var fresh = [];
+      var rows = pasted.rows.map(function (r) {
+        var st = pasteStatus(r, map);
+        tally[st.kind]++;
+        if ((st.kind === 'new' || st.kind === 'change') && st.target && !isKnownProject(st.target) && fresh.indexOf(st.target) < 0) fresh.push(st.target);
+        return { row: r, st: st, ref: map[r.article] };
+      });
+      var toSave = tally['new'] + tally.change;
+      var notes = [];
+      if (pasted.header) notes.push('ligne d’en-tête ignorée');
+      if (pasted.blank) notes.push(f.plural(pasted.blank, 'ligne vide ignorée', 'lignes vides ignorées'));
+      if (pasted.merged) notes.push(f.plural(pasted.merged, 'doublon fusionné', 'doublons fusionnés'));
+      var order = { invalid: 0, change: 1, 'new': 2, same: 3 };
+      rows.sort(function (a, b) { return (order[a.st.kind] - order[b.st.kind]) || (a.row.line - b.row.line); });
+      box.innerHTML = '<div class="pj-sum" data-r="pasteSummary"><b>' + f.plural(pasted.rows.length, 'référence', 'références') + '</b> : ' +
+        '<span class="chipd b">' + num(tally['new']) + ' ' + (tally['new'] > 1 ? 'nouvelles' : 'nouvelle') + '</span> ' +
+        '<span class="chipd w">' + num(tally.change) + ' ' + (tally.change > 1 ? 'changements' : 'changement') + '</span> ' +
+        '<span class="chipd n">' + num(tally.same) + ' ' + (tally.same > 1 ? 'inchangées' : 'inchangée') + '</span> ' +
+        '<span class="chipd c">' + num(tally.invalid) + ' ' + (tally.invalid > 1 ? 'invalides' : 'invalide') + '</span>' +
+        (fresh.length ? ' · <span class="new-proj">nouveau' + (fresh.length > 1 ? 'x projets' : ' projet') + ' : ' + esc(fresh.join(', ')) + '</span>' : '') +
+        (notes.length ? '<div class="small">' + esc(notes.join(' · ')) + '</div>' : '') + '</div>' +
+        '<div class="tbl-wrap"><table class="tbl" data-r="pasteTable"><thead><tr><th>Référence</th><th>Désignation</th><th>Projet actuel</th><th>Nouveau projet</th><th>Statut</th></tr></thead><tbody>' +
+        rows.map(function (x) {
+          var r = x.row, st = x.st, ref = x.ref;
+          var designation = ref && ref.designation ? esc(ref.designation) : '<span class="muted"><i>jamais vue dans les données</i></span>';
+          var curProj = ref && ref.project ? projTag(state(), ref.project) : '<span class="muted">—</span>';
+          var target = st.kind === 'invalid' ? '<span class="muted">' + esc(r.remove ? App.NO_PROJECT : r.project || '—') + '</span>' :
+            (st.target ? projTag(state(), st.target) + (!isKnownProject(st.target) ? ' <span class="tag new">nouveau</span>' : '') : '<span class="muted">Sans projet</span>');
+          var chip = { 'new': 'b', change: 'w', same: 'n', invalid: 'c' }[st.kind];
+          var extra = [];
+          if (st.why) extra.push(esc(st.why));
+          if (r.count > 1) extra.push('collée ' + r.count + ' fois');
+          if (r.conflict.length) extra.push('projets différents : ' + esc(r.conflict.join(', ')) + ' (le dernier est retenu)');
+          return '<tr class="st-' + st.kind + '" data-article="' + esc(r.article) + '" data-status="' + st.kind + '"><td class="mono">' + esc(r.article || '(vide)') + '<span class="sub">ligne ' + r.line + '</span></td>' +
+            '<td>' + designation + '</td><td>' + curProj + '</td><td>' + target + '</td>' +
+            '<td><span class="chipd ' + chip + '">' + st.text + '</span>' + (extra.length ? '<span class="sub">' + extra.join(' · ') + '</span>' : '') + '</td></tr>';
+        }).join('') + '</tbody></table></div>' +
+        '<div class="actions"><button type="button" class="btn p lg" data-save="paste"' + (toSave && !busy ? '' : ' disabled') + '>' +
+        (toSave ? 'Enregistrer (' + toSave + ')' : 'Rien à enregistrer') + '</button>' +
+        (tally.invalid ? '<span class="small bad-t">Les lignes invalides ne sont pas enregistrées : corrigez-les puis « Aperçu ».</span>' : '') + '</div>';
+      var btn = App.$('[data-save="paste"]', box);
+      if (btn) btn.addEventListener('click', function () {
+        savePaste(rows.filter(function (x) { return x.st.kind === 'new' || x.st.kind === 'change'; }).map(function (x) {
+          return { article: x.row.article, project: x.st.target || '' };
+        }));
+      });
+    }
+
+    function preview() {
+      pasteResult = null;
+      var text = R.pasteText.value;
+      if (!cleanSpaces(text)) {
+        pasted = null;
+        renderPreview();
+        R.pasteText.focus();
+        return;
+      }
+      pasted = parsePaste(text, R.pasteProject.value);
+      renderPreview();
+    }
+
+    function savePaste(rows) {
+      if (busy || !rows.length) return;
+      setBusy(true);
+      saveRefs(rows).then(function (res) {
+        setBusy(false);
+        pasteResult = { kind: res.invalid.length ? 'alert-box' : 'info-box', html: '<b>Enregistré</b> : ' + esc(resultText(res)) + invalidHtml(res.invalid) };
+        pasted = null;
+        R.pasteText.value = '';
+        App.toast('Projets enregistrés : ' + resultText(res), 'ok');
+        renderPreview();
+        afterWrite();
+      }, function (err) {
+        setBusy(false);
+        renderPreview();
+        if (err && err.cancelled) return;
+        pasteResult = { kind: 'alert-box', html: '<b>Échec de l’enregistrement</b> : ' + esc(err.message) };
+        var box = R.preview;
+        box.insertAdjacentHTML('afterbegin', '<div class="alert-box">' + pasteResult.html + '</div>');
+        App.toast(err.message, 'error');
+      });
+    }
+
+    App.$('[data-act="preview"]', el).addEventListener('click', preview);
+    App.$('[data-act="clearPaste"]', el).addEventListener('click', function () {
+      R.pasteText.value = '';
+      pasted = null;
+      pasteResult = null;
+      renderPreview();
+      R.pasteText.focus();
+    });
+    R.pasteText.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
+        ev.preventDefault();
+        preview();
+      }
+    });
+    R.pasteProject.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        preview();
+      }
+    });
+    // Keep the preview in step with what is typed once it is shown.
+    var livePreview = App.debounce(function () { if (pasted) preview(); }, 300);
+    R.pasteText.addEventListener('input', livePreview);
+    R.pasteProject.addEventListener('input', livePreview);
+
+    // ---- 2. zones -------------------------------------------------------------------------------------------------
+    function draftProject(name) {
+      return draft.projects.filter(function (p) { return sameName(p.project, name); })[0] || null;
+    }
+
+    function blockProjects(id) {
+      return draft.projects.filter(function (p) { return p.blocks.indexOf(id) >= 0; });
+    }
+
+    function draftColors() {
+      var s = state();
+      var auto = autoColors(draft.projects);
+      var out = {};
+      draft.projects.forEach(function (p) {
+        out[p.project] = p.color || (s && s.projects && s.projects[p.project] && !draftDirty() ? s.projects[p.project] : auto[p.project]);
+      });
+      return out;
+    }
+
+    function addToBlock(id, raw) {
+      var n = normProjectName(raw);
+      if (n.error) return n.error;
+      if (!n.name) return 'Saisissez un nom de projet.';
+      var p = draftProject(n.name);
+      if (!p) {
+        p = { project: canonical(n.name), blocks: [], color: '', comment: '' };
+        draft.projects.push(p);
+      }
+      if (p.blocks.indexOf(id) < 0) p.blocks.push(id);
+      return '';
+    }
+
+    function removeFromBlock(id, name) {
+      var p = draftProject(name);
+      if (p) p.blocks = p.blocks.filter(function (b) { return b !== id; });
+    }
+
+    function renderZones(focusBlock) {
+      if (!data || !draft) {
+        R.zones.innerHTML = '<div class="empty-note">' + (loading ? 'Chargement…' : 'Zones indisponibles.') + '</div>';
+        return;
+      }
+      var colors = draftColors();
+      var dirty = draftDirty();
+      var blocks = data.blocks || [];
+      var list = draft.projects.slice().sort(function (a, b) { return a.project.localeCompare(b.project, 'fr', { sensitivity: 'base' }); });
+      R.zones.innerHTML = '<div class="pj-zones"><div><table class="tbl zones"><thead><tr><th>Bloc</th><th>Libellé (sketch)</th><th class="num">Capacité</th><th>Projets</th></tr></thead><tbody>' +
+        blocks.map(function (b) {
+          var projs = blockProjects(b.id);
+          return '<tr data-block="' + esc(b.id) + '"><td><b>' + esc(b.id) + '</b></td><td class="small">' + esc(b.label || '—') + '</td><td class="num">' + num(b.capacity) + ' pal</td>' +
+            '<td><div class="chips">' + projs.map(function (p) {
+              return '<span class="chip" style="--c:' + esc(colors[p.project] || App.NO_PROJECT_COLOR) + '"><i></i>' + esc(p.project) +
+                '<button type="button" data-remove="' + esc(p.project) + '" aria-label="Retirer ' + esc(p.project) + ' du bloc ' + esc(b.id) + '">×</button></span>';
+            }).join('') + (projs.length ? '' : '<span class="muted small">libre</span>') +
+            '<input class="chip-in" list="pj-names" maxlength="40" autocomplete="off" placeholder="+ projet" aria-label="Ajouter un projet au bloc ' + esc(b.id) + '" data-add="' + esc(b.id) + '"></div></td></tr>';
+        }).join('') + '</tbody></table>' +
+        '<div class="small zone-err" data-r="zoneErr" role="alert"></div>' +
+        '<div class="actions"><button type="button" class="btn p" data-save="zones"' + (dirty && !busy ? '' : ' disabled') + '>Enregistrer les zones</button>' +
+        '<button type="button" class="btn" data-act="zonesCancel"' + (dirty ? '' : ' disabled') + '>Annuler les changements</button>' +
+        '<span class="small ' + (dirty ? 'warn-t' : 'muted') + '">' + (dirty ? 'Modifications non enregistrées' : 'Zones enregistrées dans l’onglet PROJETS') + '</span></div>' +
+        '<p class="small">Entrée ajoute le projet saisi · Retour arrière dans un champ vide retire le dernier projet du bloc. Un bloc sans projet reçoit les références sans projet.</p></div>' +
+        '<div class="pj-plan"><svg data-r="zonePlan" role="img" aria-label="Aperçu du plan : noms des projets sur les blocs"></svg>' +
+        '<div class="pj-colors"><h3>Couleurs des projets</h3>' + (list.length ? list.map(function (p) {
+          return '<label class="pc"><input type="color" value="' + esc(colors[p.project] || '#cccccc') + '" data-color="' + esc(p.project) + '" aria-label="Couleur du projet ' + esc(p.project) + '">' +
+            '<span>' + esc(p.project) + '</span><span class="small muted">' + (p.blocks.length ? esc(p.blocks.join(', ')) : 'aucun bloc') + '</span>' +
+            (p.color ? '<button type="button" class="btn sm" data-auto="' + esc(p.project) + '" title="Couleur automatique">auto</button>' : '<span class="small muted">auto</span>') + '</label>';
+        }).join('') : '<p class="small muted">Aucun projet : collez des références avec un projet (1) ou saisissez un nom sur un bloc.</p>') + '</div></div></div>';
+      var layout = (state() && state().layout) || App.CFG.DEFAULT_LAYOUT;
+      var titles = {}, byBlock = {};
+      blocks.forEach(function (b) {
+        var names = blockProjects(b.id).map(function (p) { return p.project; });
+        titles[b.id] = names.length ? names.join(' / ') : 'Libre';
+        byBlock[b.id] = names;
+      });
+      window.Plan2D.build(App.$('[data-r="zonePlan"]', R.zones), layout, { compact: true, titles: titles, projects: byBlock, projectColors: colors, fill: 'project', titleSize: 13 });
+      var err = App.$('[data-r="zoneErr"]', R.zones);
+      App.$$('[data-add]', R.zones).forEach(function (inp) {
+        var id = inp.getAttribute('data-add');
+        function commit() {
+          if (!cleanSpaces(inp.value)) return;
+          var problem = addToBlock(id, inp.value);
+          if (problem) {
+            err.textContent = 'Bloc ' + id + ' : ' + problem;
+            return;
+          }
+          renderZones(id);
+          renderStats();
+        }
+        inp.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            commit();
+          } else if (ev.key === 'Backspace' && !inp.value) {
+            var projs = blockProjects(id);
+            if (projs.length) {
+              removeFromBlock(id, projs[projs.length - 1].project);
+              renderZones(id);
+              renderStats();
+            }
+          }
+        });
+        // A pick in the list of existing projects adds it at once.
+        inp.addEventListener('change', function () {
+          if (projectNames().some(function (n) { return n === inp.value.trim(); })) commit();
+        });
+      });
+      App.$$('[data-remove]', R.zones).forEach(function (b) {
+        b.addEventListener('click', function () {
+          var id = b.closest('tr').getAttribute('data-block');
+          removeFromBlock(id, b.getAttribute('data-remove'));
+          renderZones(id);
+          renderStats();
+        });
+      });
+      App.$$('[data-color]', R.zones).forEach(function (inp) {
+        inp.addEventListener('change', function () {
+          var p = draftProject(inp.getAttribute('data-color'));
+          if (p) p.color = inp.value.toLowerCase();
+          renderZones();
+        });
+      });
+      App.$$('[data-auto]', R.zones).forEach(function (b) {
+        b.addEventListener('click', function () {
+          var p = draftProject(b.getAttribute('data-auto'));
+          if (p) p.color = '';
+          renderZones();
+        });
+      });
+      App.$('[data-save="zones"]', R.zones).addEventListener('click', saveZones);
+      App.$('[data-act="zonesCancel"]', R.zones).addEventListener('click', function () {
+        resetDraft();
+        renderZones();
+        renderStats();
+      });
+      if (focusBlock) {
+        var again = App.$('[data-add="' + focusBlock + '"]', R.zones);
+        if (again) again.focus();
+      }
+    }
+
+    function saveZones() {
+      if (busy || !draftDirty()) return;
+      var rows = draft.projects.map(function (p) { return { project: p.project, blocks: p.blocks.slice(), color: p.color || '', comment: p.comment || '' }; });
+      setBusy(true);
+      App.withKey('admin', function (key) { return App.call('api_saveProjects', key, rows); }).then(function (res) {
+        setBusy(false);
+        App.toast((res && res.message) || 'Zones enregistrées.', 'ok');
+        draftBase = JSON.stringify(draft.projects);
+        afterWrite();
+      }, function (err) {
+        setBusy(false);
+        renderZones();
+        if (err && err.cancelled) return;
+        var e = App.$('[data-r="zoneErr"]', R.zones);
+        if (e) e.textContent = 'Échec de l’enregistrement : ' + err.message;
+        App.toast(err.message, 'error');
+      });
+    }
+
+    // ---- 3. projects ---------------------------------------------------------------------------------------------
+    function renderList() {
+      var s = state();
+      var stats = {};
+      ((s && s.projectsList) || []).forEach(function (p) { stats[App.fold(p.project)] = p; });
+      var map = refs();
+      var refCount = {};
+      Object.keys(map).forEach(function (k) {
+        var p = map[k].project;
+        if (p) refCount[App.fold(p)] = (refCount[App.fold(p)] || 0) + 1;
+      });
+      var thr = App.thresholds(s);
+      var names = projectNames();
+      var saved = {};
+      (data ? data.projects : []).forEach(function (p) { saved[App.fold(p.project)] = p; });
+      var noneRow = stats[App.fold(App.NO_PROJECT)];
+      if (!names.length && !noneRow) {
+        R.list.innerHTML = '<div class="empty-note">Aucun projet pour l’instant : collez des références avec un nom de projet (section 1).</div>';
+        return;
+      }
+      R.list.innerHTML = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Projet</th><th>Blocs</th><th class="num">Références</th><th class="num">Palettes EXP2</th>' +
+        '<th class="num">En attente</th><th class="num">&gt; ' + esc(App.hText(thr.pendingHoursCrit)) + ' h</th><th></th></tr></thead><tbody>' +
+        names.map(function (n) {
+          var st = stats[App.fold(n)] || {}, sv = saved[App.fold(n)];
+          var blocks = sv ? sv.blocks : (st.blocks || []);
+          return '<tr data-project="' + esc(n) + '"><td>' + projTag(s, n) + (sv && sv.listed !== false ? '' : ' <span class="small muted">(absent de l’onglet PROJETS)</span>') + '</td>' +
+            '<td>' + (blocks.length ? esc(blocks.join(', ')) : '<span class="warn-t small">aucun bloc</span>') + '</td>' +
+            '<td class="num">' + num(refCount[App.fold(n)] || 0) + '</td><td class="num">' + num(st.exp2Pallets || 0) + '</td><td class="num">' + num(st.pendingPallets || 0) + '</td>' +
+            '<td class="num">' + (st.pendingCrit ? '<span class="chipd c">' + num(st.pendingCrit) + '</span>' : '0') + '</td>' +
+            '<td class="num"><button type="button" class="btn sm" data-rename="' + esc(n) + '">Renommer</button></td></tr>';
+        }).join('') +
+        (noneRow ? '<tr class="none-row"><td><span class="muted">' + esc(App.NO_PROJECT) + '</span></td><td>' + esc(((noneRow.blocks || []).join(', ')) || 'blocs libres') + '</td><td class="num">' +
+          num(noneRow.articles || 0) + '</td><td class="num">' + num(noneRow.exp2Pallets || 0) + '</td><td class="num">' + num(noneRow.pendingPallets || 0) + '</td><td class="num">' +
+          (noneRow.pendingCrit ? '<span class="chipd c">' + num(noneRow.pendingCrit) + '</span>' : '0') + '</td><td></td></tr>' : '') +
+        '</tbody></table></div><div class="panel-note">Palettes et attentes au dernier calcul. Renommer change aussi le projet des références ; un nom déjà pris fusionne les deux projets.</div>';
+      App.$$('[data-rename]', R.list).forEach(function (b) {
+        b.addEventListener('click', function () { rename(b.getAttribute('data-rename')); });
+      });
+    }
+
+    function rename(from) {
+      var id = App.uid('rn');
+      var body = h('form', { 'class': 'form', autocomplete: 'off' });
+      body.innerHTML = '<label class="field"><span>Nouveau nom du projet « ' + esc(from) + ' »</span><input id="' + id + '" list="pj-names" maxlength="40" value="' + esc(from) + '"></label>' +
+        '<p class="small" data-r="merge"></p>';
+      var inp = null, hint = null;
+      var m = App.modal({
+        title: 'Renommer un projet',
+        body: body,
+        actions: [{ label: 'Annuler', kind: 'ghost', value: null }, { label: 'Renommer', kind: 'primary', value: 'ok', submit: true }],
+        onAction: function () { return go(); },
+        initialFocus: '#' + id
+      });
+      inp = App.$('#' + id, body);
+      hint = App.$('[data-r="merge"]', body);
+      function check() {
+        var n = normProjectName(inp.value);
+        if (n.error) return n.error;
+        if (!n.name || n.remove) return 'Saisissez le nouveau nom.';
+        return '';
+      }
+      function target() {
+        var n = normProjectName(inp.value).name;
+        var other = projectNames().filter(function (x) { return sameName(x, n) && !sameName(x, from); })[0];
+        return { name: other || n, merge: !!other };
+      }
+      inp.addEventListener('input', function () {
+        m.setError('');
+        var t = target();
+        hint.textContent = t.merge ? 'Fusion : les références et les blocs de « ' + from + ' » passent dans le projet existant « ' + t.name + ' ».' : '';
+      });
+      function go() {
+        var problem = check();
+        if (problem) {
+          m.setError(problem);
+          return false;
+        }
+        var t = target();
+        if (t.name === from) return true;
+        return App.withKey('admin', function (key) { return App.call('api_renameProject', key, from, t.name); }).then(function (res) {
+          App.toast((res && res.message) || ('Projet renommé : ' + from + ' → ' + t.name), 'ok');
+          afterWrite();
+          return true;
+        }, function (err) {
+          if (err && err.cancelled) return false;
+          throw err;
+        });
+      }
+      body.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var r = go();
+        if (r === true) m.close('ok');
+        else if (r && r.then) {
+          m.setBusy(true);
+          r.then(function (ok) {
+            m.setBusy(false);
+            if (ok) m.close('ok');
+          }, function (err) {
+            m.setBusy(false);
+            m.setError(err.message);
+          });
+        }
+      });
+    }
+
+    // ---- 4. references without a project --------------------------------------------------------------------------
+    function renderNone() {
+      var map = refs();
+      var list = Object.keys(map).map(function (k) { return map[k]; }).filter(function (r) { return r.tracked && !r.project; });
+      list.sort(function (a, b) { return ((Number(b.e) || 0) + (Number(b.w) || 0)) - ((Number(a.e) || 0) + (Number(a.w) || 0)) || (a.article < b.article ? -1 : 1); });
+      Object.keys(selectedNone).forEach(function (k) { if (!map[k] || map[k].project) delete selectedNone[k]; });
+      if (!list.length) {
+        R.none.innerHTML = '<div class="empty-note">Toutes les références suivies ont un projet.</div>';
+        return;
+      }
+      var n = Object.keys(selectedNone).length;
+      R.none.innerHTML = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th class="ck"><input type="checkbox" data-all aria-label="Tout sélectionner"' + (n === list.length ? ' checked' : '') + '></th>' +
+        '<th>Référence</th><th>Désignation</th><th class="num">Palettes EXP2</th><th class="num">En attente</th><th>Dernier mouvement</th></tr></thead><tbody>' +
+        list.map(function (r) {
+          var code = normArticle(r.article).code;
+          return '<tr><td class="ck"><input type="checkbox" data-pick="' + esc(code) + '"' + (selectedNone[code] ? ' checked' : '') + ' aria-label="Sélectionner ' + esc(r.article) + '"></td>' +
+            '<td class="mono">' + esc(r.article) + '</td><td>' + esc(r.designation || '') + '</td><td class="num">' + pal(r.e) + '</td><td class="num">' + pal(r.w) + '</td>' +
+            '<td>' + esc(/\d{2}:\d{2}/.test(r.t) ? f.stamp(r.t) : f.date(r.t)) + '</td></tr>';
+        }).join('') + '</tbody></table></div>' +
+        '<div class="actions"><label class="field inline"><span>Affecter à</span><input data-r="noneProject" list="pj-names" maxlength="40" autocomplete="off" placeholder="projet"></label>' +
+        '<button type="button" class="btn p" data-save="none"' + (n && !busy ? '' : ' disabled') + '>Affecter (' + n + ')</button><span class="small" data-r="noneErr" role="alert"></span></div>';
+      var all = App.$('[data-all]', R.none);
+      all.addEventListener('change', function () {
+        list.forEach(function (r) {
+          var code = normArticle(r.article).code;
+          if (all.checked) selectedNone[code] = true;
+          else delete selectedNone[code];
+        });
+        renderNone();
+        var x = App.$('[data-all]', R.none);
+        if (x) x.focus();
+      });
+      App.$$('[data-pick]', R.none).forEach(function (c) {
+        c.addEventListener('change', function () {
+          if (c.checked) selectedNone[c.getAttribute('data-pick')] = true;
+          else delete selectedNone[c.getAttribute('data-pick')];
+          var k = Object.keys(selectedNone).length;
+          var b = App.$('[data-save="none"]', R.none);
+          b.textContent = 'Affecter (' + k + ')';
+          b.disabled = !k || busy;
+          all.checked = k === list.length;
+        });
+      });
+      var inp = App.$('[data-r="noneProject"]', R.none);
+      function assign() {
+        var codes = Object.keys(selectedNone);
+        var errEl = App.$('[data-r="noneErr"]', R.none);
+        var p = normProjectName(inp.value);
+        if (!codes.length) return;
+        if (p.error || !p.name) {
+          errEl.textContent = p.error || 'Saisissez le projet.';
+          inp.focus();
+          return;
+        }
+        var name = canonical(p.name);
+        setBusy(true);
+        saveRefs(codes.map(function (c) { return { article: c, project: name }; })).then(function (res) {
+          setBusy(false);
+          selectedNone = {};
+          App.toast('Références affectées à ' + name + ' : ' + resultText(res), res.invalid.length ? 'warn' : 'ok');
+          afterWrite();
+        }, function (err) {
+          setBusy(false);
+          renderNone();
+          if (err && err.cancelled) return;
+          App.toast(err.message, 'error');
+        });
+      }
+      App.$('[data-save="none"]', R.none).addEventListener('click', assign);
+      inp.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          assign();
+        }
+      });
+    }
+
+    // ---- 5. every reference ------------------------------------------------------------------------------------------
+    var MAX_ALL = 300;
+
+    function renderAllFilters() {
+      var names = projectNames();
+      var cur = allFilter.project;
+      R.allProject.innerHTML = '<option value="">Tous les projets</option><option value="__none__">' + esc(App.NO_PROJECT) + '</option>' +
+        names.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('');
+      R.allProject.value = cur && (cur === '__none__' || names.indexOf(cur) >= 0) ? cur : '';
+      allFilter.project = R.allProject.value;
+    }
+
+    function updateDirty() {
+      var n = Object.keys(edits).length;
+      R.allDirty.textContent = n ? f.plural(n, 'modification non enregistrée', 'modifications non enregistrées') : '';
+      R.allSave.hidden = !n;
+      R.allCancel.hidden = !n;
+      R.allSave.textContent = 'Enregistrer (' + n + ')';
+      R.allSave.disabled = busy;
+    }
+
+    function renderAllRefs() {
+      var map = refs();
+      var q = App.fold(allFilter.q);
+      var tokens = q.split(/\s+/).filter(Boolean);
+      var names = projectNames();
+      var list = Object.keys(map).map(function (k) { return map[k]; }).filter(function (r) {
+        var proj = edits.hasOwnProperty(normArticle(r.article).code) ? edits[normArticle(r.article).code] : r.project;
+        if (allFilter.project === '__none__' && proj) return false;
+        if (allFilter.project && allFilter.project !== '__none__' && !sameName(proj, allFilter.project)) return false;
+        if (!tokens.length) return true;
+        var hay = App.fold(r.article + ' ' + (r.designation || ''));
+        return tokens.every(function (t) { return hay.indexOf(t) >= 0; });
+      }).sort(function (a, b) { return a.article < b.article ? -1 : a.article > b.article ? 1 : 0; });
+      R.allCount.textContent = f.plural(list.length, 'référence', 'références') + (list.length > MAX_ALL ? ' (' + MAX_ALL + ' premières affichées : affinez la recherche)' : '');
+      if (!list.length) {
+        R.all.innerHTML = '<div class="empty-note">Aucune référence ' + (tokens.length || allFilter.project ? 'pour ce filtre.' : ': importez des données SAP ou collez des références (section 1).') + '</div>';
+        return;
+      }
+      R.all.innerHTML = '<div class="tbl-wrap tall"><table class="tbl"><thead><tr><th>Référence</th><th>Désignation</th><th>Projet</th><th class="num">EXP2</th><th class="num">PRD2</th><th class="num">Qté / pal</th><th>Suivie</th></tr></thead><tbody>' +
+        list.slice(0, MAX_ALL).map(function (r) {
+          var code = normArticle(r.article).code;
+          var proj = edits.hasOwnProperty(code) ? edits[code] : r.project;
+          var opts = names.slice();
+          if (proj && !opts.some(function (n) { return sameName(n, proj); })) opts.push(proj);
+          return '<tr data-ref="' + esc(code) + '"' + (edits.hasOwnProperty(code) ? ' class="edited"' : '') + '><td class="mono">' + esc(r.article) + '</td><td>' + esc(r.designation || '') + '</td>' +
+            '<td><select data-ref-project="' + esc(code) + '" aria-label="Projet de ' + esc(r.article) + '"><option value="">— ' + esc(App.NO_PROJECT) + ' —</option>' +
+            opts.map(function (n) { return '<option value="' + esc(n) + '"' + (sameName(n, proj) ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') + '</select></td>' +
+            '<td class="num">' + (r.tracked ? pal(r.e) : '—') + '</td><td class="num">' + (r.tracked ? pal(r.w) : '—') + '</td>' +
+            '<td class="num">' + (isNum(r.q) ? num(r.q, undefined) + (r.qs ? '<span class="sub">' + esc(r.qs === 'ARTICLES' ? 'ARTICLES' : 'étiquettes') + '</span>' : '') : '<span class="muted">—</span>') + '</td>' +
+            '<td>' + (r.tracked ? 'oui' : '<span class="muted">non</span>') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+      App.$$('[data-ref-project]', R.all).forEach(function (sel) {
+        sel.addEventListener('change', function () {
+          var code = sel.getAttribute('data-ref-project');
+          var r = map[code];
+          if (r && sameName(r.project || '', sel.value)) delete edits[code];
+          else edits[code] = sel.value;
+          var tr = sel.closest('tr');
+          if (tr) tr.classList.toggle('edited', edits.hasOwnProperty(code));
+          updateDirty();
+        });
+      });
+      updateDirty();
+    }
+
+    R.allQ.addEventListener('input', App.debounce(function () {
+      allFilter.q = R.allQ.value;
+      renderAllRefs();
+    }, 150));
+    R.allProject.addEventListener('change', function () {
+      allFilter.project = R.allProject.value;
+      renderAllRefs();
+    });
+    R.allCancel.addEventListener('click', function () {
+      edits = {};
+      renderAllRefs();
+    });
+    R.allSave.addEventListener('click', function () {
+      var rows = Object.keys(edits).map(function (code) { return { article: code, project: edits[code] }; });
+      if (!rows.length || busy) return;
+      setBusy(true);
+      saveRefs(rows).then(function (res) {
+        setBusy(false);
+        edits = {};
+        App.toast('Références enregistrées : ' + resultText(res), res.invalid.length ? 'warn' : 'ok');
+        afterWrite();
+      }, function (err) {
+        setBusy(false);
+        updateDirty();
+        if (err && err.cancelled) return;
+        App.toast(err.message, 'error');
+      });
+    });
+
+    // ---- render -------------------------------------------------------------------------------------------------------
+    function renderAll() {
+      renderStatus();
+      renderStats();
+      renderPreview();
+      renderZones();
+      renderList();
+      renderNone();
+      renderAllFilters();
+      renderAllRefs();
+    }
+
+    function route(p) {
+      if (p.article) {
+        allFilter.q = String(p.article);
+        R.allQ.value = allFilter.q;
+        if (data) renderAllRefs();
+        setTimeout(function () {
+          var sec = document.getElementById('pj-all');
+          if (sec && sec.scrollIntoView) sec.scrollIntoView({ block: 'start' });
+        }, 0);
+      }
+    }
+
+    renderAll();
+    load();
+    route(params || {});
+
+    return {
+      route: route,
+      update: function (store) {
+        if (store.status !== 'ok' || !store.state) return;
+        if (store.state === shown) return;
+        shown = store.state;
+        if (data && data.fromState && dataError) data = dataFromState(shown);
+        if (!draftDirty()) resetDraft();
+        renderStats();
+        if (pasted) renderPreview();
+        renderZones();
+        renderList();
+        renderNone();
+        renderAllFilters();
+        renderAllRefs();
       }
     };
   };
@@ -863,7 +2121,9 @@
   // ---------------------------------------------------------------------------------------------------------------
   // Import SAP (MB51)
   // ---------------------------------------------------------------------------------------------------------------
-  var LINE_FIELDS = ['article', 'division', 'magasin', 'mvt', 'text', 's', 'doc', 'poste', 'date', 'qty', 'uqs', 'designation', 'user', 'row', 'rank'];
+  // Fields of a normalised line sent to api_importLines (v1 fields, then the v2 fields of docs/SPEC_V2.md 2.2).
+  var LINE_FIELDS = ['article', 'division', 'magasin', 'mvt', 'text', 's', 'doc', 'poste', 'date', 'qty', 'uqs', 'designation', 'user', 'row', 'rank',
+    'ts', 'label', 'headerText', 'itemText', 'reference', 'client', 'salesOrder'];
 
   function decodeText(buf) {
     var bytes = new Uint8Array(buf);
@@ -894,6 +2154,14 @@
     return /\.(txt|csv|tsv|prn|dat)$/i.test(name);
   }
 
+  // « Format MB51 reconnu : 22 colonnes · heure de saisie ✓ · étiquettes ✓ (3 543) » of one file (Norm summary.format).
+  function formatLine(fm) {
+    if (!fm) return '';
+    return 'Format MB51 reconnu : ' + f.plural(fm.columns, 'colonne', 'colonnes') +
+      ' · heure de saisie ' + (fm.hasTime ? '✓' : '✗') +
+      ' · étiquettes ' + (fm.hasLabels ? '✓ (' + num(fm.withLabel) + ')' : '✗');
+  }
+
   P['import'] = function (el) {
     var files = [];       // [{ name, size, status: reading|ok|error, rows, sheet, error }]
     var batch = null;     // Norm.normalizeBatch result
@@ -902,15 +2170,40 @@
     var libState = window.XLSX ? 'ready' : 'loading';
     var libError = '';
     var gone = false;
+    var allTouched = false;   // the user changed the « hors produits finis » box: keep the choice
 
     el.innerHTML = '<div class="page-head"><h1>Import des extractions SAP</h1><p>Déposez les fichiers MB51 exportés de SAP. Le type est reconnu par les colonnes ; rien n’est enregistré avant « Enregistrer dans la base ».</p></div>' +
       '<div class="small" data-r="lib"></div>' +
       '<div data-r="simwarn"></div>' +
       '<label class="drop" data-r="drop" tabindex="0"><input type="file" data-r="input" multiple accept=".xlsx,.xls,.xlsm,.txt,.csv,.tsv" class="sr-only">' +
-      '<b>Glissez les fichiers ici ou cliquez pour les choisir</b><span>MB51 : déclarations (101), transferts (311 / 312), sorties (601) · .xlsx, .xls, .txt (texte avec tabulations), .csv</span></label>' +
+      '<b>Glissez les fichiers ici ou cliquez pour les choisir</b><span>MB51 : déclarations (131 / 101), transferts (311 / 312), sorties (601) · .xlsx, .xls, .txt (texte avec tabulations), .csv</span></label>' +
+      '<div class="import-opts"><label class="check-opt"><input type="checkbox" data-r="all"> Importer aussi les articles hors produits finis</label>' +
+      '<span class="small">Sans cette case, seuls les articles qui passent par EXP2 (ou déjà suivis) sont gardés : les composants et matières premières de l’export sont ignorés.</span></div>' +
       '<div class="files" data-r="files"></div><div data-r="result"></div><div data-r="preview"></div>';
     var R = {};
     App.$$('[data-r]', el).forEach(function (e) { R[e.getAttribute('data-r')] = e; });
+
+    // Default of the box: PARAM_SEUILS › importTrackedOnly (1 = finished goods only, box unticked).
+    function syncAllBox(store) {
+      if (allTouched) return;
+      var thr = App.thresholds(store && store.state);
+      R.all.checked = !App.flag(thr.importTrackedOnly, true);
+    }
+    syncAllBox(App.store);
+    R.all.addEventListener('change', function () {
+      allTouched = true;
+      if (files.length) analyse();
+    });
+
+    function trackedOnly() {
+      return !R.all.checked;
+    }
+
+    // Articles already followed by the twin (last calculation): their lines are kept even without an EXP2 line.
+    function trackedCodes() {
+      var s = App.store.state;
+      return ((s && s.articles) || []).map(function (a) { return a.a; });
+    }
 
     function libLine() {
       if (libState === 'ready') R.lib.innerHTML = '<span class="ok-t">●</span> Lecture des fichiers Excel prête.';
@@ -965,8 +2258,10 @@
         else if (r) {
           var sm = r.summary || {};
           var per = sm.dateMin ? (sm.dateMin === sm.dateMax ? f.date(sm.dateMin) : f.date(sm.dateMin) + ' → ' + f.date(sm.dateMax)) : '';
-          info = '<span class="ok-t">✓ MB51 reconnu · en-tête ligne ' + (r.headerRow + 1) + (x.sheet ? ' · feuille « ' + esc(x.sheet) + ' »' : '') + '</span>' +
-            '<span>' + f.plural(sm.read || 0, 'ligne lue', 'lignes lues') + ' · ' + f.plural(r.fresh ? r.fresh.length : sm.valid, 'valide', 'valides') +
+          info = '<span class="ok-t">✓ ' + esc(formatLine(sm.format)) + '</span>' +
+            '<span>en-tête ligne ' + (r.headerRow + 1) + (x.sheet ? ' · feuille « ' + esc(x.sheet) + ' »' : '') + '</span>' +
+            '<span>' + f.plural(sm.read || 0, 'ligne lue', 'lignes lues') + ' · ' + f.plural(sm.valid, 'valide', 'valides') +
+            (sm.untracked ? ' · ' + num(sm.untracked) + ' hors produits finis' : '') +
             (sm.rejected ? ' · <b class="bad-t">' + f.plural(sm.rejected, 'rejetée', 'rejetées') + '</b>' : '') + '</span>' +
             (per ? '<span>' + esc(per) + '</span>' : '');
         } else info = '<span>' + f.plural(x.rows ? x.rows.length : 0, 'ligne', 'lignes') + '</span>';
@@ -1029,8 +2324,9 @@
       });
     }
 
-    // Normalises every readable file with the same Norm code as the server (header synonyms, numbers, dates,
-    // duplicates inside the batch, 311/312 legs that do not cancel out).
+    // Normalises every readable file with the same Norm code as the server (header synonyms, numbers, dates, entry
+    // times, labels, duplicates inside the batch, 311/312 legs that do not cancel out), then the finished-goods
+    // filter (docs/SPEC_V2.md 2.4): articles of state.articles or with a line in EXP2 in the files.
     function analyse() {
       var ready = files.filter(function (x) { return x.status === 'ok'; });
       var waiting = files.some(function (x) { return x.status === 'reading' || x.status === 'waitlib'; });
@@ -1038,7 +2334,9 @@
       if (ready.length && !waiting) {
         ready.forEach(function (x, i) { x.batchIndex = i; });
         try {
-          batch = Norm.normalizeBatch(ready.map(function (x) { return { name: x.name, rows: x.rows }; }), { plant: App.CFG.PLANT || 'TA11' });
+          batch = Norm.normalizeBatch(ready.map(function (x) { return { name: x.name, rows: x.rows }; }), {
+            plant: App.CFG.PLANT || 'TA11', trackedOnly: trackedOnly(), tracked: trackedCodes()
+          });
         } catch (e) {
           batch = null;
           R.preview.innerHTML = '<div class="alert-box">Analyse impossible : ' + esc(e.message) + '</div>';
@@ -1061,19 +2359,30 @@
       }
       var S = batch.summary;
       var lines = batch.lines || [];
-      var html = '<div class="row2"><div class="panel"><h2>Résultat de l’analyse<small>rien n’est encore enregistré</small></h2>' +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Fichier</th><th>Période</th><th class="num">Lues</th><th class="num">Valides</th><th class="num">Doublons</th><th class="num">Rejetées</th><th class="num">Ignorées</th><th class="num">Alertes</th></tr></thead><tbody>' +
+      var kept = lines.length + (batch.duplicates || []).length;
+      var formats = batch.files.filter(function (r) { return r.ok && r.summary && r.summary.format; }).map(function (r) {
+        return (batch.files.length > 1 ? r.file + ' : ' : '') + formatLine(r.summary.format);
+      });
+      var filterText = batch.trackedOnly ?
+        num(kept) + ' ' + (kept > 1 ? 'lignes gardées' : 'ligne gardée') + ' (produits finis) · ' + num(batch.untracked.lines) + ' ' + (batch.untracked.lines > 1 ? 'ignorées' : 'ignorée') +
+          ' (' + f.plural(batch.untracked.articles, 'article', 'articles') + ' hors produits finis)' :
+        'Filtre produits finis désactivé : ' + f.plural(kept, 'ligne valide importée', 'lignes valides importées') + ', tous articles confondus';
+      var html = '<div class="import-sum"><div data-r="format">' + formats.map(function (t) { return '<div>' + esc(t) + '</div>'; }).join('') + '</div>' +
+        '<div data-r="filter" class="' + (batch.trackedOnly ? '' : 'warn-t') + '">' + esc(filterText) + '</div></div>';
+      html += '<div class="row2"><div class="panel"><h2>Résultat de l’analyse<small>rien n’est encore enregistré</small></h2>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Fichier</th><th>Période</th><th class="num">Lues</th><th class="num">Valides</th><th class="num">Hors PF</th><th class="num">Doublons</th><th class="num">Rejetées</th><th class="num">Ignorées</th><th class="num">Alertes</th></tr></thead><tbody>' +
         batch.files.map(function (r) {
           var s = r.summary || {};
           var period = s.dateMin ? (s.dateMin === s.dateMax ? f.date(s.dateMin) : f.date(s.dateMin) + ' → ' + f.date(s.dateMax)) : '—';
           return '<tr><td>' + esc(r.file) + (r.ok ? '' : '<span class="sub bad-t">' + esc(r.error) + '</span>') + '</td><td>' + esc(period) + '</td><td class="num">' + num(s.read) +
-            '</td><td class="num">' + num(r.fresh ? r.fresh.length : s.valid) + '</td><td class="num">' + num(r.duplicates ? r.duplicates.length : 0) + '</td><td class="num">' + num(s.rejected) +
-            '</td><td class="num">' + num(s.skipped ? s.skipped.total : 0) + '</td><td class="num">' + num(s.flags) + '</td></tr>';
+            '</td><td class="num">' + num(s.valid) + '</td><td class="num">' + num(r.untracked ? r.untracked.length : 0) + '</td><td class="num">' + num(r.duplicates ? r.duplicates.length : 0) +
+            '</td><td class="num">' + num(s.rejected) + '</td><td class="num">' + num(s.skipped ? s.skipped.total : 0) + '</td><td class="num">' + num(s.flags) + '</td></tr>';
         }).join('') +
-        '<tr><td><b>Total</b></td><td>' + esc(S.dateMin ? f.date(S.dateMin) + ' → ' + f.date(S.dateMax) : '—') + '</td><td class="num"><b>' + num(S.read) + '</b></td><td class="num"><b>' + num(lines.length) +
-        '</b></td><td class="num">' + num((batch.duplicates || []).length) + '</td><td class="num">' + num(S.rejected) + '</td><td class="num">' + num(S.skipped.total) + '</td><td class="num">' + num(S.flags) + '</td></tr>' +
+        '<tr><td><b>Total</b></td><td>' + esc(S.dateMin ? f.date(S.dateMin) + ' → ' + f.date(S.dateMax) : '—') + '</td><td class="num"><b>' + num(S.read) + '</b></td><td class="num"><b>' + num(S.valid) +
+        '</b></td><td class="num">' + num(batch.untracked.lines) + '</td><td class="num">' + num((batch.duplicates || []).length) + '</td><td class="num">' + num(S.rejected) + '</td><td class="num">' + num(S.skipped.total) +
+        '</td><td class="num">' + num(S.flags) + '</td></tr>' +
         '</tbody></table></div>' +
-        '<div class="panel-note">Les lignes déjà présentes dans la base sont reconnues par le serveur et ignorées : réimporter un fichier est sans risque.</div>' +
+        '<div class="panel-note">Hors PF : lignes d’articles qui ne passent pas par EXP2 (composants, matières), ignorées. Les lignes déjà présentes dans la base sont reconnues par le serveur et ignorées : réimporter un fichier est sans risque.</div>' +
         '<div class="actions"><button type="button" class="btn p lg" data-save' + (lines.length && !sending ? '' : ' disabled') + '>Enregistrer dans la base (' + f.plural(lines.length, 'ligne', 'lignes') + ')</button>' +
         '<button type="button" class="btn" data-clear' + (sending ? ' disabled' : '') + '>Tout retirer</button></div>' +
         '<div data-r="progress"></div></div>';
@@ -1082,6 +2391,8 @@
       var bad = batch.files.filter(function (r) { return !r.ok; });
       checks.push(bad.length ? { l: 'c', t: f.plural(bad.length, 'fichier non reconnu', 'fichiers non reconnus') + ' : ' + bad.map(function (r) { return esc(r.error); }).join(' ') }
         : { l: '', t: 'Colonnes MB51 reconnues dans ' + f.plural(batch.files.length, 'fichier', 'fichiers') + ' (Article, Magasin, MvT, Doc.article, Date cpt., Qté).' });
+      var noTime = batch.files.filter(function (r) { return r.ok && r.summary && r.summary.format && !r.summary.format.hasTime; });
+      if (noTime.length) checks.push({ l: 'w', t: 'Sans « Heure de saisie » : les attentes en PRD2 seront comptées en jours, pas en heures. Ajoutez la colonne à la mise en forme de la liste MB51.' });
       checks.push(S.rejected ? { l: 'w', t: f.plural(S.rejected, 'ligne rejetée', 'lignes rejetées') + ' (autre division que ' + esc(App.CFG.PLANT || 'TA11') + ', valeur illisible) : détail ci-dessous.' }
         : { l: '', t: 'Aucune ligne rejetée (division ' + esc(App.CFG.PLANT || 'TA11') + ', dates et quantités lisibles).' });
       checks.push(S.skipped.total ? { l: '', t: f.plural(S.skipped.total, 'ligne ignorée', 'lignes ignorées') + ' : sous-totaux, en-têtes répétés, lignes vides.' } : null);
@@ -1109,11 +2420,13 @@
           }).join('') + '</tbody></table></div></div>';
       }
       if (lines.length) {
+        var anyTs = lines.some(function (l) { return l.ts; }), anyLabel = lines.some(function (l) { return l.label; });
         html += '<div class="panel"><h2>Aperçu des lignes<small>' + (lines.length > 20 ? '20 premières sur ' + num(lines.length) : f.plural(lines.length, 'ligne', 'lignes')) + '</small></h2>' +
-          '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date cpt.</th><th>Article</th><th>Désignation</th><th>Mag.</th><th>MvT</th><th>Doc.article</th><th class="num">Qté</th><th>UQS</th><th>Saisie</th></tr></thead><tbody>' +
+          '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>' + (anyTs ? 'Saisie le' : 'Date cpt.') + '</th><th>Article</th><th>Désignation</th><th>Mag.</th><th>MvT</th><th>Doc.article</th>' +
+          (anyLabel ? '<th>Étiquette</th>' : '') + '<th class="num">Qté</th><th>UQS</th><th>Saisie</th></tr></thead><tbody>' +
           lines.slice(0, 20).map(function (l) {
-            return '<tr><td>' + esc(f.date(l.date)) + '</td><td class="mono">' + esc(l.article) + '</td><td>' + esc(l.designation || '') + '</td><td>' + esc(l.magasin) + '</td><td class="mono">' + esc(l.mvt) +
-              '</td><td class="mono">' + esc(l.doc) + '</td><td class="num">' + num(l.qty, undefined) + '</td><td>' + esc(l.uqs || '') + '</td><td>' + esc(Norm.userKind ? Norm.userKind(l.user) : '') + '</td></tr>';
+            return '<tr><td>' + esc(l.ts ? f.stamp(l.ts) : f.date(l.date)) + '</td><td class="mono">' + esc(l.article) + '</td><td>' + esc(l.designation || '') + '</td><td>' + esc(l.magasin) + '</td><td class="mono">' + esc(l.mvt) +
+              '</td><td class="mono">' + esc(l.doc) + '</td>' + (anyLabel ? '<td class="mono">' + esc(l.label || '') + '</td>' : '') + '<td class="num">' + num(l.qty, undefined) + '</td><td>' + esc(l.uqs || '') + '</td><td>' + esc(Norm.userKind ? Norm.userKind(l.user) : '') + '</td></tr>';
           }).join('') + '</tbody></table></div></div>';
       }
       R.preview.innerHTML = html;
@@ -1147,7 +2460,9 @@
             period: s.dateMin ? (s.dateMin === s.dateMax ? f.date(s.dateMin) : 'du ' + f.date(s.dateMin) + ' au ' + f.date(s.dateMax)) : '',
             lines: fresh.slice(i, i + CHUNK).map(function (l) {
               var o = {};
-              LINE_FIELDS.forEach(function (k) { o[k] = l[k]; });
+              LINE_FIELDS.forEach(function (k) {
+                if (l[k] !== undefined) o[k] = l[k];
+              });
               return o;
             })
           });
@@ -1158,11 +2473,13 @@
       var importId = 'IMP-' + new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14) + '-' + Math.floor(Math.random() * 1e4);
       var S = batch.summary;
       var period = S.dateMin ? (S.dateMin === S.dateMax ? f.date(S.dateMin) : 'du ' + f.date(S.dateMin) + ' au ' + f.date(S.dateMax)) : '';
+      var untracked = batch.trackedOnly ? batch.untracked : null;
       sending = true;
       renderFiles();
       var save = App.$('[data-save]', R.preview), clear = App.$('[data-clear]', R.preview);
       if (save) save.disabled = true;
       if (clear) clear.disabled = true;
+      R.all.disabled = true;
       progress(0, total, 'Envoi en cours…');
       var started = Date.now();
       App.withKey('admin', function (key) {
@@ -1173,7 +2490,8 @@
             var final = i === chunks.length - 1;
             progress(sent, total, 'Lot ' + (i + 1) + ' / ' + chunks.length + ' · ' + num(sent) + ' / ' + num(total) + ' lignes envoyées' +
               (final ? ' · recalcul de l’entrepôt…' : '…'));
-            var meta = { importId: importId, fileName: c.file, kind: 'MB51', period: final ? period : c.period, final: final, alerts: (batch.flags || []).length };
+            var meta = { importId: importId, fileName: c.file, kind: 'MB51', period: final ? period : c.period, final: final, alerts: (batch.flags || []).length,
+              untracked: untracked ? untracked.lines : null };
             return App.call('api_importLines', key, meta, c.lines).then(function (res) {
               sent += c.lines.length;
               last = res;
@@ -1187,6 +2505,7 @@
         return p.then(function () { return last; });
       }).then(function (res) {
         sending = false;
+        R.all.disabled = false;
         result = res;
         var ms = Date.now() - started;
         var t = res && res.totals ? res.totals : { added: res ? res.added : 0, duplicates: res ? res.duplicates : 0, rejected: res ? res.rejected : 0 };
@@ -1198,6 +2517,7 @@
         R.result.innerHTML = '<div class="panel"><h2>Import enregistré<small>' + esc(names.join(', ')) + '</small></h2>' +
           '<p><b>Enregistré : ' + f.plural(t.added, 'nouvelle ligne', 'nouvelles lignes') + ', ' + f.plural(t.duplicates, 'déjà connue', 'déjà connues') +
           (t.rejected ? ', ' + f.plural(t.rejected, 'rejetée', 'rejetées') : '') + '.</b> ' +
+          (untracked && untracked.lines ? num(untracked.lines) + ' lignes hors produits finis non importées. ' : '') +
           (ms < 1000 ? 'Enregistré en moins d’une seconde.' : 'Enregistré en ' + esc(f.duration(ms)) + '.') + '</p>' +
           (res && res.warning ? '<div class="alert-box">' + esc(res.warning) + '</div>' : '') +
           '<div class="stats">' +
@@ -1206,7 +2526,8 @@
           stat('Rejetées par le serveur', num(t.rejected), 'contrôle serveur') +
           stat('État recalculé', res && res.summary ? num(res.summary.exp2Pallets) + ' <small>pal EXP2</small>' : '—', res && res.summary ? 'au ' + f.date(res.summary.asOf) : '') +
           '</div><p class="small">' + esc((res && res.message) || '') + '</p>' +
-          '<div class="actions"><button type="button" class="btn" data-go="lookup">Recherche article</button><button type="button" class="btn" data-go="plan">Plan 2D</button><button type="button" class="btn" data-new>Nouvel import</button></div></div>';
+          '<div class="actions"><button type="button" class="btn" data-go="pending">En attente</button><button type="button" class="btn" data-go="projects">Projets</button>' +
+          '<button type="button" class="btn" data-go="lookup">Recherche article</button><button type="button" class="btn" data-go="plan">Plan 2D</button><button type="button" class="btn" data-new>Nouvel import</button></div></div>';
         App.$$('[data-go]', R.result).forEach(function (b) {
           b.addEventListener('click', function () { App.go(b.getAttribute('data-go'), {}); });
         });
@@ -1226,6 +2547,7 @@
         App.refresh(true);
       }, function (err) {
         sending = false;
+        R.all.disabled = false;
         renderFiles();
         if (save) save.disabled = false;
         if (clear) clear.disabled = false;
@@ -1280,7 +2602,10 @@
     }
 
     return {
-      update: simWarn,
+      update: function (store) {
+        simWarn(store);
+        syncAllBox(store);
+      },
       destroy: function () {
         gone = true;
         window.removeEventListener('dragover', block);
@@ -1294,39 +2619,73 @@
   // ---------------------------------------------------------------------------------------------------------------
   P.simulation = function (el) {
     var busy = false, lastMsg = null, shown;
-    el.innerHTML = '<div class="page-head"><h1>Simulation</h1><p>Données fictives pour les démonstrations (phase 0a). Les actions demandent la clé administrateur.</p></div>' +
+    var SimMod = typeof Sim !== 'undefined' && Sim && Sim.generate ? Sim : null;
+    var D = (SimMod && SimMod.DEFAULTS) || { days: 7, palletsPerDay: 450, seed: 2026 };
+    var LIM = (SimMod && SimMod.LIMITS) || { days: [1, 60], palletsPerDay: [20, 1500] };
+    el.innerHTML = '<div class="page-head"><h1>Simulation</h1><p>Données fictives au format réel de l’export MB51, pour les démonstrations. Les actions demandent la clé administrateur.</p></div>' +
       '<div class="sim-actions">' +
-      '<div class="sim-card"><h3>Générer la simulation</h3><p>Remplace les données simulées (les lignes importées de SAP sont conservées) par des jours ouvrés réalistes se terminant hier.</p>' +
-      '<div class="inline"><label class="field"><span>Jours ouvrés</span><input type="number" data-r="days" min="1" max="60" value="14"></label></div>' +
+      '<div class="sim-card"><h3>Générer la simulation</h3><p>Remplace les données simulées (les lignes importées de SAP sont conservées) par des journées réalistes se terminant hier (l’usine tourne 7 jours sur 7).</p>' +
+      '<div class="inline"><label class="field"><span>Jours</span><input type="number" data-r="days" min="' + LIM.days[0] + '" max="' + LIM.days[1] + '" value="' + D.days + '"></label>' +
+      '<label class="field wide" title="Étiquettes déclarées par jour : 1 étiquette = 1 palette"><span>Étiquettes par jour</span><input type="number" data-r="ppd" min="' + LIM.palletsPerDay[0] +
+      '" max="' + LIM.palletsPerDay[1] + '" step="10" placeholder="auto (' + D.palletsPerDay + ')"></label></div>' +
       '<details class="adv"><summary>Options avancées</summary><div class="inline">' +
-      '<label class="field" title="Même numéro = mêmes données simulées"><span>Variante (n°)</span><input type="number" data-r="seed" min="0" value="2026"></label></div></details>' +
-      '<div><button type="button" class="btn p lg" data-act="simulate">Générer 14 jours</button></div></div>' +
-      '<div class="sim-card"><h3>+1 jour</h3><p>Ajoute la journée ouvrée suivante à la simulation en cours (déclarations, transferts, sorties, quais).</p>' +
+      '<label class="field" title="Même numéro = mêmes données simulées"><span>Variante (n°)</span><input type="number" data-r="seed" min="0" value="' + (D.seed || 2026) + '"></label></div></details>' +
+      '<div><button type="button" class="btn p lg" data-act="simulate">Générer ' + D.days + ' jours</button></div></div>' +
+      '<div class="sim-card"><h3>+1 jour</h3><p>Ajoute la journée suivante à la simulation en cours (déclarations, transferts, sorties, quais).</p>' +
       '<div><button type="button" class="btn lg" data-act="next">Simuler +1 jour</button></div></div>' +
-      '<div class="sim-card"><h3>Recalculer</h3><p>Relit les onglets du classeur (ARTICLES, LAYOUT, règles, seuils) et recalcule l’état de l’entrepôt.</p>' +
+      '<div class="sim-card"><h3>Recalculer</h3><p>Relit les onglets du classeur (ARTICLES, PROJETS, LAYOUT, règles, seuils) et recalcule l’état de l’entrepôt.</p>' +
       '<div><button type="button" class="btn lg" data-act="recompute">Recalculer</button></div></div>' +
+      '<div class="sim-card"><h3>MB51 simulé</h3><p>Fichier Excel au format réel de l’export MB51 (22 colonnes, heures de saisie, étiquettes), avec des lignes hors produits finis que l’import doit ignorer : ' +
+      'pour essayer la page Import. Mêmes réglages que la génération ; rien n’est enregistré.</p>' +
+      '<div><button type="button" class="btn lg" data-dl>Télécharger un MB51 simulé (.xlsx)</button></div><div class="small" data-r="dlMsg" aria-live="polite"></div></div>' +
       '</div><div data-r="msg" aria-live="polite"></div><div data-r="status"></div>';
     var R = {};
     App.$$('[data-r]', el).forEach(function (e) { R[e.getAttribute('data-r')] = e; });
     var simBtn = App.$('[data-act="simulate"]', el);
     R.days.addEventListener('input', function () {
       var d = Math.round(Number(R.days.value));
-      simBtn.textContent = 'Générer ' + (d > 0 ? d : 14) + ' jours';
+      simBtn.textContent = 'Générer ' + (d > 0 ? d : D.days) + (d === 1 ? ' jour' : ' jours');
     });
+
+    // Form values checked against Sim.LIMITS: { days, palletsPerDay (undefined = auto), seed } or { error }.
+    function params() {
+      var days = R.days.value === '' ? D.days : Number(R.days.value);
+      if (!isFinite(days) || Math.floor(days) !== days || days < LIM.days[0] || days > LIM.days[1]) return { error: 'Jours : nombre entier de ' + LIM.days[0] + ' à ' + LIM.days[1] + '.' };
+      var ppd;
+      if (R.ppd.value !== '') {
+        ppd = Number(R.ppd.value);
+        if (!isFinite(ppd) || Math.floor(ppd) !== ppd || ppd < LIM.palletsPerDay[0] || ppd > LIM.palletsPerDay[1]) {
+          return { error: 'Étiquettes par jour : nombre entier de ' + num(LIM.palletsPerDay[0]) + ' à ' + num(LIM.palletsPerDay[1]) + ' (vide = automatique).' };
+        }
+      }
+      var seed = R.seed.value === '' ? undefined : Number(R.seed.value);
+      if (seed !== undefined && (!isFinite(seed) || seed < 0)) return { error: 'Variante : nombre positif.' };
+      return { days: days, palletsPerDay: ppd, seed: seed };
+    }
 
     function setBusy(b, text) {
       busy = b;
-      App.$$('[data-act]', el).forEach(function (x) { x.disabled = b; });
+      App.$$('[data-act], [data-dl]', el).forEach(function (x) { x.disabled = b; });
       if (b) R.msg.innerHTML = '<div class="info-box"><span class="spinner"></span> ' + esc(text) + '</div>';
     }
 
     function run(kind) {
       if (busy) return;
       var labels = { simulate: 'Génération de la simulation en cours (jusqu’à une minute)…', next: 'Simulation de la journée suivante…', recompute: 'Recalcul en cours…' };
+      var p = kind === 'simulate' ? params() : {};
+      if (p.error) {
+        lastMsg = { ok: false, text: p.error };
+        renderMsg();
+        return;
+      }
       var go = function () {
         setBusy(true, labels[kind]);
         App.withKey('admin', function (key) {
-          if (kind === 'simulate') return App.call('api_simulate', key, { days: Number(R.days.value) || 14, seed: R.seed.value === '' ? undefined : Number(R.seed.value) });
+          if (kind === 'simulate') {
+            var q = { days: p.days, seed: p.seed };
+            if (p.palletsPerDay !== undefined) q.palletsPerDay = p.palletsPerDay;
+            return App.call('api_simulate', key, q);
+          }
           if (kind === 'next') return App.call('api_simulateNextDay', key);
           return App.call('api_recompute', key);
         }).then(function (res) {
@@ -1345,7 +2704,7 @@
       if (kind === 'simulate' && s && !App.isEmpty(s)) {
         var m = App.modal({
           title: 'Remplacer la simulation ?',
-          body: '<p>Les données simulées actuelles (mouvements, stock initial, articles et quais simulés) seront remplacées. Les lignes importées de SAP sont conservées.</p>',
+          body: '<p>Les données simulées actuelles (mouvements, stock initial, articles, projets et quais simulés) seront remplacées. Les lignes importées de SAP sont conservées.</p>',
           actions: [{ label: 'Annuler', kind: 'ghost', value: null }, { label: 'Générer', kind: 'primary', value: 'go' }]
         });
         m.done.then(function (v) { if (v === 'go') go(); });
@@ -1356,6 +2715,48 @@
     App.$$('[data-act]', el).forEach(function (b) {
       b.addEventListener('click', function () { run(b.getAttribute('data-act')); });
     });
+
+    // MB51 file generated in the browser (Sim.generate + Sim.mb51Rows with noise), written with SheetJS.
+    function download() {
+      if (busy) return;
+      var p = params();
+      if (p.error) {
+        R.dlMsg.innerHTML = '<span class="bad-t">' + esc(p.error) + '</span>';
+        return;
+      }
+      if (!SimMod || !SimMod.mb51Rows) {
+        R.dlMsg.innerHTML = '<span class="bad-t">Simulateur absent de la page : mettez à jour le script Apps Script (Index.html) et redéployez.</span>';
+        return;
+      }
+      R.dlMsg.innerHTML = '<span class="spinner"></span> Préparation du fichier…';
+      setBusy(true, 'Préparation du fichier MB51 simulé…');
+      loadSheetJs().then(function (XLSX) {
+        var end = new Date();
+        end.setDate(end.getDate() - 1);
+        var endIso = end.getFullYear() + '-' + ('0' + (end.getMonth() + 1)).slice(-2) + '-' + ('0' + end.getDate()).slice(-2);
+        var s = App.store.state;
+        var opts = { days: p.days, endDate: endIso, seed: p.seed === undefined ? D.seed : p.seed };
+        if (p.palletsPerDay !== undefined) opts.palletsPerDay = p.palletsPerDay;
+        var layoutBlocks = s && s.layout && s.layout.blocks;
+        if (layoutBlocks && layoutBlocks.length) opts.blocks = layoutBlocks;
+        var gen = SimMod.generate(opts);
+        var rows = SimMod.mb51Rows(gen.movements, { noise: true, seed: opts.seed });
+        var ws = XLSX.utils.aoa_to_sheet(rows);
+        var wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'MB51');
+        var name = 'MB51_simule_' + gen.params.startDate + '_' + gen.params.endDate + '.xlsx';
+        XLSX.writeFile(wb, name);
+        setBusy(false);
+        lastMsg = null;
+        renderMsg();
+        R.dlMsg.innerHTML = '<span class="ok-t">✓</span> ' + esc(name) + ' · ' + f.plural(rows.length - 1, 'ligne', 'lignes') + ' (dont des lignes hors produits finis). Déposez-le sur la page Import.';
+      }).catch(function (err) {
+        setBusy(false);
+        renderMsg();
+        R.dlMsg.innerHTML = '<span class="bad-t">Fichier non créé : ' + esc(err && err.message ? err.message : String(err)) + '</span>';
+      });
+    }
+    App.$('[data-dl]', el).addEventListener('click', download);
 
     function renderMsg() {
       R.msg.innerHTML = lastMsg ? '<div class="' + (lastMsg.ok ? 'info-box' : 'alert-box') + '">' + esc(lastMsg.text) + '</div>' : '';
@@ -1371,16 +2772,19 @@
       var k = s.kpi || {}, thr = App.thresholds(s), fr = App.freshness(s);
       var alerts = s.alerts || [];
       var debug = !!(App.location && App.location.parameter && App.location.parameter.debug === '1');   // ?debug=1: versions, timing
+      var waits = isNum(k.oldestPendingHours) ? 'plus ancienne ' + f.hm(k.oldestPendingHours) + (Number(k.pendingCrit) > 0 ? ' · ' + num(k.pendingCrit) + ' pal depuis plus de ' + App.hText(thr.pendingHoursCrit) + ' h' : '')
+        : 'plus ancienne ' + f.days(k.oldestPendingDays);
       R.status.innerHTML = '<div class="row2"><div class="panel"><h2>État actuel</h2><dl class="kv">' +
         '<dt>Source</dt><dd>' + (App.isEmpty(s) ? 'Aucune donnée' : s.source === 'SIMULATION' ? '<span class="tag sim">DONNÉES SIMULÉES</span>' : 'SAP (imports MB51)') + '</dd>' +
-        '<dt>Données au</dt><dd>' + esc(f.date(s.asOf)) + '</dd>' +
+        '<dt>Données jusqu’au</dt><dd>' + esc(fr.asOfLabel) + '</dd>' +
         '<dt>Dernier import / simulation</dt><dd>' + esc(s.importedAt ? f.dateTime(s.importedAt) + ' (' + fr.ago + ')' : '—') + '</dd>' +
         '<dt>Calculé le</dt><dd>' + esc(f.dateTime(s.computedAt)) + (debug && s.stats && s.stats.computeMs ? ' · ' + f.num(s.stats.computeMs / 1000, 1) + ' s' : '') + '</dd>' +
         (debug ? '<dt>Version</dt><dd>données ' + esc(s.version) + ' · quais ' + esc(s.docksVersion === undefined ? '—' : s.docksVersion) + '</dd>' : '') +
         '<dt>Lignes MB51</dt><dd>' + (s.stats ? num(s.stats.movements) : '—') + '</dd>' +
         '<dt>Palettes EXP2</dt><dd>' + num(k.exp2Pallets) + ' / ' + num(k.capacity) + ' · <span class="chipd ' + App.satLevel(k.saturation, thr) + '">' + f.pct(k.saturation) + '</span></dd>' +
-        '<dt>En attente PRD2</dt><dd>' + num(k.pendingPallets) + ' pal · plus ancienne ' + f.days(k.oldestPendingDays) + '</dd>' +
+        '<dt>En attente PRD2</dt><dd>' + num(k.pendingPallets) + ' pal · ' + esc(waits) + '</dd>' +
         '<dt>EMRT</dt><dd>' + num(k.emrtPallets) + ' pal</dd>' +
+        (isNum(k.projects) ? '<dt>Projets</dt><dd>' + num(k.projects) + (Number(k.noProjectArticles) ? ' · ' + f.plural(k.noProjectArticles, 'référence', 'références') + ' sans projet' : '') + '</dd>' : '') +
         '<dt>Quais occupés</dt><dd>' + num(k.docksOccupied) + ' / ' + num(k.docksTotal) + '</dd>' +
         '</dl></div><div class="panel"><h2>Alertes<small>' + f.plural(alerts.length, 'alerte', 'alertes') + '</small></h2>' +
         (alerts.length ? '<ul class="alerts-list">' + alerts.slice(0, 12).map(function (a) {
@@ -1398,6 +2802,6 @@
     };
   };
 
-  window.PagesPc = { mount: mount, has: has, PAGES: PAGES, pages: P };
+  window.PagesPc = { mount: mount, has: has, PAGES: PAGES, pages: P, parsePaste: parsePaste, normArticle: normArticle, normProjectName: normProjectName };
 })();
 </script>

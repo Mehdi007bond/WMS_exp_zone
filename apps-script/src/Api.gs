@@ -7,12 +7,13 @@
  * (private: Apps Script does not expose them to the client). Main.gs reuses the run*_ helpers for the menu,
  * the ACCUEIL buttons and the sidebar.
  *
- * Read (no key):  api_getVersion, api_getState, api_lookup, api_searchArticles
+ * Read (no key):  api_getVersion, api_getState, api_lookup, api_searchArticles, api_getProjects
  * Key check:      api_checkKey (before a form is filled in)
  * Write (key):    api_importLines, api_importOpening, api_saveDock (docks or admin key), api_simulate,
- *                 api_simulateNextDay, api_recompute
+ *                 api_simulateNextDay, api_recompute, api_saveReferences, api_saveProjects, api_renameProject
  *
  * Screens never receive user names: SAP users become 'Auto' (interface) or 'Manuel'.
+ * Projects (docs/SPEC_V2.md 5): Main.gs reuses getProjects_, saveReferences_ and saveProjects_ for the sheet panel.
  */
 
 var API_LIMITS_ = {
@@ -24,14 +25,26 @@ var API_LIMITS_ = {
   rejectedListed: 50,
   importFiles: 20,          // file names kept in the running totals of an import
   simDaysMax: 60,
+  references: 2000,         // rows of one api_saveReferences call
+  projects: 100,            // rows of PROJETS
+  projectName: 40,          // characters of a project name
+  lineText: 200,            // characters of the free texts of an import line
   cacheS: 21600
 };
 
 // Article number accepted by api_lookup and the import (SAP material numbers, letters for test articles).
 var ARTICLE_RE_ = /^[0-9A-Za-z._\/-]{1,40}$/;
 
-// Fields of a public SAP line in the stored article pages (arrays keep the hidden _LOOKUP tab small).
-var LOOKUP_MOVE_FIELDS_ = ['date', 'doc', 'poste', 'magasin', 'mvt', 'text', 's', 'qty', 'uqs', 'user', 'source'];
+// Entry time of an import line: SAP wall clock as text (docs/SPEC_V2.md 2.2).
+var TS_RE_ = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
+
+// Name the engine gives to the articles without a project: never a project name.
+var NO_PROJECT_NAME_ = 'Sans projet';
+
+// Fields of a public SAP line in the stored article pages (arrays keep the hidden _LOOKUP tab small; the v2 fields
+// are appended so a page written before v2 still reads).
+var LOOKUP_MOVE_FIELDS_ = ['date', 'doc', 'poste', 'magasin', 'mvt', 'text', 's', 'qty', 'uqs', 'user', 'source',
+  'ts', 'label', 'client', 'salesOrder'];
 
 // ---------------------------------------------------------------------------------------------------------------
 // Read
@@ -116,15 +129,27 @@ function api_checkKey(key, scope) {
   return true;
 }
 
+/**
+ * Projects and references (docs/SPEC_V2.md 5.1): { version, projects: [{ project, blocks, color, comment, listed }],
+ * references: [{ article, designation, project }], blocks: [{ id, label, capacity }], settings: { pendingHoursWarn,
+ * pendingHoursCrit } }, read from ARTICLES, PROJETS, LAYOUT and PARAM_SEUILS. Project names only typed in ARTICLES
+ * follow the PROJETS rows with listed: false. Article statistics come from state.articles on the client.
+ */
+function api_getProjects() {
+  requireInstalled_();
+  return getProjects_();
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Write
 // ---------------------------------------------------------------------------------------------------------------
 
 /**
- * Saves one batch of MB51 lines normalised in the browser (Norm.normalizeRows).
- * meta: { importId, fileName, kind, period, final, alerts }. The server re-validates every line (plant, required
- * fields, numbers, dates), rebuilds its key and skips the keys already in MOUVEMENTS. meta.final recalculates once
- * and writes one IMPORT_LOG row for the whole import.
+ * Saves one batch of MB51 lines normalised in the browser (Norm.normalizeBatch: lines already filtered to the
+ * finished goods). meta: { importId, fileName, kind, period, final, alerts, untracked }. The server re-validates
+ * every line (plant, required fields, numbers, dates, entry time, label, texts), rebuilds its key and label and skips
+ * the keys already in MOUVEMENTS. meta.untracked: lines the page dropped (not finished goods), for the log only.
+ * meta.final recalculates once and writes one IMPORT_LOG row for the whole import.
  */
 function api_importLines(key, meta, lines) {
   checkKey_(key, 'admin');
@@ -152,6 +177,9 @@ function api_importLines(key, meta, lines) {
     totals.fresh += d.fresh.length;
     totals.known += d.duplicates.length;
     totals.rejected += checked.rejected.length;
+    // The page may repeat the count on every batch: keep the largest.
+    var untracked = Number(meta.untracked);
+    if (isFinite(untracked) && untracked > 0) totals.untracked = Math.max(Number(totals.untracked) || 0, Math.floor(untracked));
     checked.lines.forEach(function (l) {
       if (!totals.dateMin || l.date < totals.dateMin) totals.dateMin = l.date;
       if (!totals.dateMax || l.date > totals.dateMax) totals.dateMax = l.date;
@@ -189,11 +217,13 @@ function api_importLines(key, meta, lines) {
       known: totals.known,
       rejected: totals.rejected,
       alerts: Number(meta.alerts) >= 0 ? Number(meta.alerts) : null,
-      result: 'OK',
+      result: totals.untracked ? 'OK (' + plural_(totals.untracked, 'ligne hors produits finis ignorée',
+        'lignes hors produits finis ignorées') + ')' : 'OK',
       seconds: Math.round((Date.now() - started) / 100) / 10
     });
     Repo.setProp(totalsKey, null);
-    out.totals = { read: totals.read, added: totals.fresh, duplicates: totals.known, rejected: totals.rejected };
+    out.totals = { read: totals.read, added: totals.fresh, duplicates: totals.known, rejected: totals.rejected,
+      untracked: Number(totals.untracked) || 0 };
     out.versions = Repo.getVersions();
     out.summary = summary_(calc.state);
     out.message = 'Import terminé : ' + plural_(totals.fresh, 'nouvelle ligne', 'nouvelles lignes') + ', ' +
@@ -260,16 +290,16 @@ function api_saveDock(key, dock) {
 }
 
 /**
- * New simulation (replaces the simulated data, keeps imported lines).
- * params: { days (working days, default 14), endDate ('yyyy-mm-dd', default last working day before today),
- *           startDate, palletsPerDay, seed (default 2026), articles (default 40), edgeCases (default true) }
+ * New simulation (replaces the simulated data, keeps imported lines and the user's articles and projects).
+ * params: { days (default 7: the plant runs every day), endDate ('yyyy-mm-dd', default yesterday), startDate,
+ *           palletsPerDay (labels a day, 20 to 1,500, default 450), seed (default 2026), edgeCases (default true) }
  */
 function api_simulate(key, params) {
   checkKey_(key, 'admin');
   return runSimulation_(params);
 }
 
-/** Appends one simulated working day after the last day of data. */
+/** Appends one simulated day after the last day of data. */
 function api_simulateNextDay(key) {
   checkKey_(key, 'admin');
   return runNextDay_();
@@ -279,6 +309,35 @@ function api_simulateNextDay(key) {
 function api_recompute(key) {
   checkKey_(key, 'admin');
   return runRecompute_();
+}
+
+/**
+ * References -> projects (docs/SPEC_V2.md 5.2): rows [{ article, project }] (at most 2,000; project '' removes it).
+ * Upsert into ARTICLES › Projet, project names spelled as in PROJETS, new names added to PROJETS (no blocks yet),
+ * then recalculation. -> { ok, created, updated, unchanged, invalid: [{ article, reason }], newProjects, versions,
+ * summary, message }
+ */
+function api_saveReferences(key, rows) {
+  checkKey_(key, 'admin');
+  return saveReferences_(rows);
+}
+
+/**
+ * Replaces PROJETS (at most 100 rows [{ project, blocks: ['B1'] | 'B1, B7', color: '#rrggbb' | '', comment }]):
+ * names unique (any case), blocks of LAYOUT, then recalculation. -> { ok, saved, versions, summary, message }
+ */
+function api_saveProjects(key, projects) {
+  checkKey_(key, 'admin');
+  return saveProjects_(projects);
+}
+
+/**
+ * Renames a project in PROJETS and ARTICLES › Projet (and its PROJET placement rules); renaming into an existing
+ * project merges them (blocks united). -> { ok, project, renamed: references moved, merged, versions, summary, message }
+ */
+function api_renameProject(key, from, to) {
+  checkKey_(key, 'admin');
+  return renameProject_(from, to);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -291,11 +350,12 @@ function runSimulation_(params) {
   var started = Date.now();
   return finishWrite_(Repo.withLock('data', function () {
     var gen = Sim.generate({ seed: p.seed, startDate: p.startDate, endDate: p.endDate, days: p.days,
-      palletsPerDay: p.palletsPerDay, articles: p.articles, edgeCases: p.edgeCases, blocks: Repo.readLayout().blocks }) || {};
+      palletsPerDay: p.palletsPerDay, edgeCases: p.edgeCases, blocks: Repo.readLayout().blocks }) || {};
     var movements = ensureLineKeys_(gen.movements || [], 'SIMULATION');
     var importId = 'SIM-' + compactStamp_(new Date());
+    // Projects written only when the simulator gives some (PROJETS then belongs to the simulation).
     Repo.replaceSimulation({ movements: movements, opening: gen.opening || [], articles: gen.articles || [],
-      docks: gen.docks || [], importId: importId });
+      projects: Array.isArray(gen.projects) ? gen.projects : null, docks: gen.docks || [], importId: importId });
     if (gen.docks && gen.docks.length) Repo.bumpVersion('docks');
     var dates = movements.map(function (m) { return m.date; }).filter(function (d) { return d; }).sort();
     p.firstDate = dates[0] || p.startDate;
@@ -315,7 +375,7 @@ function runSimulation_(params) {
       lines: movements.length,
       versions: Repo.getVersions(),
       summary: summary,
-      message: 'Simulation générée : ' + plural_(p.days, 'jour ouvré', 'jours ouvrés') + ' ' + period_(p.firstDate, p.lastDate) +
+      message: 'Simulation générée : ' + plural_(p.days, 'jour', 'jours') + ' ' + period_(p.firstDate, p.lastDate) +
         ', ' + plural_(movements.length, 'ligne MB51', 'lignes MB51') + '. ' + summary.text
     };
   }));
@@ -329,15 +389,17 @@ function runNextDay_() {
     var input = Repo.readInput();
     var simulated = input.movements.filter(function (m) { return String(m.source).toUpperCase() === 'SIMULATION'; });
     if (!simulated.length) {
-      throw new Error('Aucune simulation en cours : lancez d\'abord « Générer 14 jours ».');
+      throw new Error('Aucune simulation en cours : lancez d\'abord « Générer ' + plural_(simDefaultDays_(), 'jour', 'jours') + ' ».');
     }
     var p = Repo.getProp('SIM_PARAMS') || { seed: 2026 };
     var asOf = '';
     input.movements.forEach(function (m) {
       if (m.date && m.date > asOf) asOf = m.date;
     });
+    // The simulator continues labels, documents and transfers from the stored lines (ts, label, texts, references).
     var r = Sim.nextDay({ seed: p.seed, asOf: asOf, movements: input.movements, opening: input.opening,
-      articles: input.articles, palletsPerDay: p.palletsPerDay, blocks: input.blocks, mvtKinds: input.mvtKinds }) || {};
+      articles: input.articles, palletsPerDay: p.palletsPerDay, edgeCases: p.edgeCases, blocks: input.blocks,
+      mvtKinds: input.mvtKinds }) || {};
     var lines = ensureLineKeys_(r.movements || [], 'SIMULATION');
     var d = typeof Norm !== 'undefined' && Norm ? Norm.dedupe(lines, Repo.existingKeys()) : { fresh: lines, duplicates: [] };
     var importId = 'SIM-' + compactStamp_(new Date());
@@ -399,6 +461,321 @@ function runClearSimulation_() {
     return { ok: true, cleared: cleared, versions: Repo.getVersions(), summary: summary,
       message: 'Simulation effacée : ' + plural_(cleared.removed, 'ligne retirée', 'lignes retirées') + '. ' + summary.text };
   }));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Projects (docs/SPEC_V2.md 5): shared by the api_* functions (admin key) and the sheet panel (Main.gs, editors)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** api_getProjects: PROJETS rows (blocks of LAYOUT only), ARTICLES references, LAYOUT blocks, PRD2 thresholds. */
+function getProjects_() {
+  var layout = Repo.readLayout();
+  var thr = Repo.readSettings().thresholds || {};
+  var def = (typeof CFG !== 'undefined' && CFG.THRESHOLDS) || {};
+  var ids = {};
+  layout.blocks.forEach(function (b) { ids[String(b.id).toUpperCase()] = b.id; });
+  var listed = {};
+  var projects = Repo.readProjects().map(function (p) {
+    listed[p.project.toLowerCase()] = true;
+    var blocks = [];
+    p.blocks.forEach(function (b) {
+      var id = ids[String(b).toUpperCase()];
+      if (id && blocks.indexOf(id) < 0) blocks.push(id);
+    });
+    return { project: p.project, blocks: blocks, color: p.color, comment: p.comment, listed: true };
+  });
+  var references = [], seen = {}, extra = [];
+  Repo.readArticles().forEach(function (a) {
+    var k = a.article.toUpperCase();
+    if (seen[k]) return;
+    seen[k] = true;
+    references.push({ article: a.article, designation: a.designation, project: a.project });
+    if (a.project && !listed[a.project.toLowerCase()]) {
+      listed[a.project.toLowerCase()] = true;
+      extra.push(a.project);
+    }
+  });
+  references.sort(function (x, y) { return cmp_(x.article, y.article); });
+  extra.sort(function (x, y) { return cmp_(x.toLowerCase(), y.toLowerCase()); }).forEach(function (name) {
+    projects.push({ project: name, blocks: [], color: '', comment: '', listed: false });
+  });
+  function setting(k) {
+    var n = Number(thr[k]);
+    return isFinite(n) && n >= 0 && thr[k] !== '' && thr[k] !== null && thr[k] !== undefined ? n : def[k];
+  }
+  return {
+    version: Repo.getVersions().data,
+    projects: projects,
+    references: references,
+    blocks: layout.blocks.map(function (b) { return { id: b.id, label: b.label || '', capacity: Number(b.capacity) || 0 }; }),
+    settings: { pendingHoursWarn: setting('pendingHoursWarn'), pendingHoursCrit: setting('pendingHoursCrit') }
+  };
+}
+
+/** api_saveReferences / sidebar_saveReferences: validation, spelling, upsert, new projects, recalculation. */
+function saveReferences_(rows) {
+  requireInstalled_();
+  if (!Array.isArray(rows) || !rows.length) throw new Error('Aucune référence reçue.');
+  if (rows.length > API_LIMITS_.references) {
+    throw new Error('Trop de références dans un seul envoi (' + frNum_(rows.length, 0) + ', maximum ' +
+      frNum_(API_LIMITS_.references, 0) + ') : enregistrez-les en plusieurs fois.');
+  }
+  var checked = checkReferences_(rows);
+  if (!checked.rows.length) {
+    return { ok: false, created: 0, updated: 0, unchanged: 0, invalid: checked.invalid, newProjects: [],
+      versions: Repo.getVersions(), summary: null,
+      message: 'Aucune référence enregistrée : ' + plural_(checked.invalid.length, 'ligne invalide', 'lignes invalides') + '.' };
+  }
+  return finishWrite_(Repo.withLock('data', function () {
+    // Spelling of a project name: PROJETS first, then ARTICLES, then the first spelling of this request.
+    var spell = {}, listed = {}, newProjects = [];
+    Repo.readProjects().forEach(function (p) {
+      spell[p.project.toLowerCase()] = p.project;
+      listed[p.project.toLowerCase()] = true;
+    });
+    var existing = Repo.readArticles(), known = {};
+    existing.forEach(function (a) {
+      known[a.article.toUpperCase()] = true;
+      if (a.project && !spell[a.project.toLowerCase()]) spell[a.project.toLowerCase()] = a.project;
+    });
+    checked.rows.forEach(function (r) {
+      if (!r.project) return;
+      var k = r.project.toLowerCase();
+      if (!spell[k]) spell[k] = r.project;
+      r.project = spell[k];
+      if (!listed[k]) {
+        listed[k] = true;
+        newProjects.push(r.project);
+      }
+    });
+    var names = designations_(checked.rows.filter(function (r) { return !known[r.article.toUpperCase()]; })
+      .map(function (r) { return r.article; }));
+    checked.rows.forEach(function (r) { r.designation = names[r.article.toUpperCase()] || ''; });
+
+    var saved = Repo.saveArticleProjects(checked.rows);
+    var added = newProjects.length ? Repo.addProjects(newProjects) : [];
+    var changed = saved.created + saved.updated + added.length > 0;
+    var state = changed ? computeAndSave_('RECALCUL').state : Repo.loadState();
+    var summary = state ? summary_(state) : null;
+    var parts = [plural_(saved.created, 'nouvelle', 'nouvelles'), plural_(saved.updated, 'modifiée', 'modifiées'),
+      plural_(saved.unchanged, 'inchangée', 'inchangées')];
+    if (checked.invalid.length) parts.push(plural_(checked.invalid.length, 'invalide', 'invalides'));
+    var message = (changed ? 'Références enregistrées : ' : 'Aucun changement : ') + parts.join(', ') + '.';
+    if (added.length) message += ' ' + (added.length > 1 ? 'Nouveaux projets : ' : 'Nouveau projet : ') + added.join(', ') + '.';
+    if (summary && changed) message += ' ' + summary.text;
+    return {
+      ok: true,
+      created: saved.created,
+      updated: saved.updated,
+      unchanged: saved.unchanged,
+      invalid: checked.invalid,
+      newProjects: added,
+      versions: Repo.getVersions(),
+      summary: summary,
+      message: message
+    };
+  }));
+}
+
+/** api_saveProjects / sidebar_saveProjects: replaces PROJETS after the checks, then recalculates. */
+function saveProjects_(projects) {
+  requireInstalled_();
+  if (!Array.isArray(projects)) throw new Error('Liste de projets illisible.');
+  if (projects.length > API_LIMITS_.projects) {
+    throw new Error('Trop de projets (' + projects.length + ', maximum ' + API_LIMITS_.projects + ').');
+  }
+  return finishWrite_(Repo.withLock('data', function () {
+    var clean = checkProjects_(projects, Repo.readLayout().blocks);
+    Repo.saveProjects(clean);
+    var calc = computeAndSave_('RECALCUL');
+    var summary = summary_(calc.state);
+    return { ok: true, saved: clean.length, versions: Repo.getVersions(), summary: summary,
+      message: 'Projets enregistrés : ' + plural_(clean.length, 'projet', 'projets') + '. ' + summary.text };
+  }));
+}
+
+/** api_renameProject: rename (or merge into an existing project) in PROJETS, ARTICLES and the PROJET rules. */
+function renameProject_(from, to) {
+  requireInstalled_();
+  var f = projectName_(from), t = projectName_(to);
+  if (!f) throw new Error('Indiquez le projet à renommer.');
+  if (!t) throw new Error('Indiquez le nouveau nom du projet.');
+  var problem = projectProblem_(t);
+  if (problem) throw new Error(problem + '.');
+  return finishWrite_(Repo.withLock('data', function () {
+    var projects = Repo.readProjects(), refs = Repo.readArticles();
+    var fk = f.toLowerCase(), tk = t.toLowerCase();
+    var src = null, target = null;
+    projects.forEach(function (p) {
+      var k = p.project.toLowerCase();
+      if (k === fk) src = p;
+      else if (k === tk) target = p;
+    });
+    var used = refs.some(function (a) { return a.project.toLowerCase() === fk; });
+    if (!src && !used) throw new Error('Projet introuvable : « ' + f + ' ».');
+    var same = fk === tk && (!src || src.project === t) &&
+      refs.every(function (a) { return a.project.toLowerCase() !== fk || a.project === t; });
+    if (same) throw new Error('Le nouveau nom est identique à l\'ancien.');
+    // Target spelling: PROJETS, else the references already in the target project, else as typed.
+    var name = t, merged = !!target;
+    if (target) name = target.project;
+    else if (fk !== tk) {
+      refs.forEach(function (a) {
+        if (!merged && a.project.toLowerCase() === tk) {
+          merged = true;
+          name = a.project;
+        }
+      });
+    }
+    var rows = [];
+    projects.forEach(function (p) {
+      var k = p.project.toLowerCase();
+      if (k === fk) {
+        if (!target) rows.push({ project: name, blocks: p.blocks, color: p.color, comment: p.comment });
+      } else if (target && k === tk) {
+        var blocks = p.blocks.slice();
+        (src ? src.blocks : []).forEach(function (b) { if (blocks.indexOf(b) < 0) blocks.push(b); });
+        rows.push({ project: name, blocks: blocks, color: p.color || (src ? src.color : ''),
+          comment: p.comment || (src ? src.comment : '') });
+      } else {
+        rows.push(p);
+      }
+    });
+    if (!src && !target) rows.push({ project: name, blocks: [], color: '', comment: '' });
+    Repo.saveProjects(rows);
+    var moved = Repo.renameProjectRefs(f, name);
+    var calc = computeAndSave_('RECALCUL');
+    var summary = summary_(calc.state);
+    return {
+      ok: true,
+      project: name,
+      renamed: moved.articles,
+      rules: moved.rules,
+      merged: merged,
+      versions: Repo.getVersions(),
+      summary: summary,
+      message: 'Projet « ' + f + ' » ' + (merged ? 'fusionné dans' : 'renommé en') + ' « ' + name + ' » : ' +
+        plural_(moved.articles, 'référence', 'références') + '. ' + summary.text
+    };
+  }));
+}
+
+// Rows [{ article, project }] -> { rows (valid, one per article), invalid: [{ article, reason }] }.
+function checkReferences_(rows) {
+  var out = { rows: [], invalid: [] };
+  var byArticle = {}, conflicts = {};
+  rows.forEach(function (raw) {
+    raw = raw && typeof raw === 'object' ? raw : { article: raw };
+    var shown = text_(raw.article, 40);
+    var art = referenceCode_(raw.article);
+    var project = projectName_(raw.project);
+    var reason = '';
+    if (!art) reason = 'Référence manquante';
+    else if (!ARTICLE_RE_.test(art)) reason = 'Référence invalide (lettres, chiffres, . _ / - ; 40 caractères au plus)';
+    else reason = projectProblem_(project);
+    if (reason) {
+      out.invalid.push({ article: shown || art, reason: reason });
+      return;
+    }
+    var pk = project.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(byArticle, art)) {
+      if (byArticle[art] !== pk) conflicts[art] = true;
+      return;
+    }
+    byArticle[art] = pk;
+    out.rows.push({ article: art, project: project });
+  });
+  if (Object.keys(conflicts).length) {
+    out.rows = out.rows.filter(function (r) { return !conflicts[r.article]; });
+    Object.keys(conflicts).sort().forEach(function (a) {
+      out.invalid.push({ article: a, reason: 'Référence en double avec des projets différents' });
+    });
+  }
+  return out;
+}
+
+// PROJETS rows from the page -> clean rows; throws the first problems in French (nothing saved).
+function checkProjects_(rows, blocks) {
+  var ids = {}, problems = [], seen = {}, out = [];
+  blocks.forEach(function (b) { ids[String(b.id).toUpperCase()] = b.id; });
+  var known = blocks.map(function (b) { return b.id; }).join(', ');
+  rows.forEach(function (raw, i) {
+    raw = raw || {};
+    var name = projectName_(raw.project);
+    var list = Array.isArray(raw.blocks) ? raw.blocks : String(raw.blocks === null || raw.blocks === undefined ? '' : raw.blocks)
+      .split(/[,;\s]+/);
+    list = list.map(function (b) { return text_(b, 20); }).filter(function (b) { return b; });
+    var color = text_(raw.color, 20).toLowerCase();
+    var comment = text_(raw.comment, API_LIMITS_.lineText);
+    if (!name) {
+      if (list.length || color || comment) problems.push('ligne ' + (i + 1) + ' : nom de projet manquant');
+      return;
+    }
+    var problem = projectProblem_(name);
+    if (problem) {
+      problems.push('« ' + name + ' » : ' + problem);
+      return;
+    }
+    if (seen[name.toLowerCase()]) {
+      problems.push('projet en double : « ' + name + ' »');
+      return;
+    }
+    seen[name.toLowerCase()] = true;
+    var clean = [];
+    list.forEach(function (b) {
+      var id = ids[b.toUpperCase()];
+      if (!id) problems.push('bloc inconnu pour « ' + name + ' » : « ' + b + ' » (blocs : ' + known + ')');
+      else if (clean.indexOf(id) < 0) clean.push(id);
+    });
+    if (color && !/^#[0-9a-f]{6}$/.test(color)) problems.push('couleur invalide pour « ' + name + ' » : « ' + color + ' » (format #rrggbb)');
+    out.push({ project: name, blocks: clean, color: color, comment: comment });
+  });
+  if (problems.length) {
+    throw new Error('Projets non enregistrés : ' + problems.slice(0, 5).join(' ; ') + (problems.length > 5 ? ' ; …' : '') + '.');
+  }
+  return out;
+}
+
+// Designations of articles from the last state, else from the article pages: { ARTICLE: designation }.
+function designations_(articles) {
+  var out = {};
+  if (!articles.length) return out;
+  var want = {};
+  articles.forEach(function (a) { want[String(a).toUpperCase()] = true; });
+  var state = Repo.loadState();
+  ((state && state.articles) || []).forEach(function (s) {
+    var k = String(s.a).toUpperCase();
+    if (want[k] && s.d && !out[k]) out[k] = String(s.d);
+  });
+  if (articles.some(function (a) { return !out[String(a).toUpperCase()]; })) {
+    Repo.readLookupIndex().forEach(function (r) {
+      var k = String(r[0]).toUpperCase();
+      if (want[k] && r[1] && !out[k]) out[k] = String(r[1]);
+    });
+  }
+  return out;
+}
+
+// Project name as stored: control characters removed, spaces collapsed, trimmed.
+function projectName_(v) {
+  return String(v === null || v === undefined ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// '' when the name can be saved ('' itself = no project), else the French reason.
+function projectProblem_(name) {
+  if (name.length > API_LIMITS_.projectName) return 'Nom de projet trop long (' + API_LIMITS_.projectName + ' caractères au plus)';
+  if (/[,;|]/.test(name)) return 'Nom de projet invalide (sans virgule, point-virgule ni barre verticale)';
+  if (name.toLowerCase() === NO_PROJECT_NAME_.toLowerCase()) return 'Nom réservé : « ' + NO_PROJECT_NAME_ + ' »';
+  return '';
+}
+
+// Reference typed or pasted by the user: trimmed, upper case, leading zeros removed when all digits.
+function referenceCode_(v) {
+  var s;
+  if (typeof v === 'number') s = isFinite(v) && Math.floor(v) === v ? v.toFixed(0) : '';
+  else s = String(v === null || v === undefined ? '' : v).trim().toUpperCase();
+  if (/^\d+$/.test(s)) s = s.replace(/^0+(?=\d)/, '');
+  return s;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -472,9 +849,11 @@ function buildLookups_(input, result) {
   });
   Object.keys(all).forEach(function (a) { arts[a] = true; });
   return Object.keys(arts).sort(cmp_).map(function (art) {
-    var lk = all[art] || { article: art, stock: null, fifo: [], pending: [], exits: [], locations: [] };
+    var lk = all[art] || { article: art, project: '', stock: null, fifo: [], pending: [], exits: [], locations: [] };
+    // Newest first: posting date, entry time, document, item.
     var mv = (moves[art] || []).slice().sort(function (a, b) {
-      return cmp_(b.date, a.date) || cmp_(String(b.doc), String(a.doc)) || cmp_(String(a.poste || ''), String(b.poste || ''));
+      return cmp_(b.date, a.date) || cmp_(String(b.ts || ''), String(a.ts || '')) || cmp_(String(b.doc), String(a.doc)) ||
+        cmp_(String(a.poste || ''), String(b.poste || ''));
     });
     var designation = (lk.stock && lk.stock.designation) || names[art] || (mv[0] && mv[0].designation) || '';
     var weight = 0;
@@ -488,6 +867,8 @@ function buildLookups_(input, result) {
         found: !!lk.stock || mv.length > 0,
         designation: designation,
         asOf: result.asOf,
+        asOfTs: result.asOfTs || '',
+        project: lk.project || (lk.stock && lk.stock.project) || '',
         stock: lk.stock,
         fifo: lk.fifo,
         pending: lk.pending,
@@ -508,17 +889,18 @@ function expandLookup_(entry, version) {
   var out = {};
   for (var k in entry) if (Object.prototype.hasOwnProperty.call(entry, k) && k !== 'm') out[k] = entry[k];
   out.version = version;
+  if (out.project === undefined) out.project = '';
   out.movements = (entry.m || []).map(function (row) {
     var o = {};
-    LOOKUP_MOVE_FIELDS_.forEach(function (f, i) { o[f] = row[i]; });
+    LOOKUP_MOVE_FIELDS_.forEach(function (f, i) { o[f] = row[i] === undefined ? '' : row[i]; });
     return o;
   });
   return out;
 }
 
 function lookupNotFound_(art) {
-  return { article: art, found: false, designation: '', asOf: null, stock: null, fifo: [], pending: [], exits: [], locations: [],
-    m: [], movementsTotal: 0 };
+  return { article: art, found: false, designation: '', asOf: null, asOfTs: '', project: '', stock: null, fifo: [], pending: [],
+    exits: [], locations: [], m: [], movementsTotal: 0 };
 }
 
 // [[article, designation]] for the search: cache, else the first two columns of the hidden _LOOKUP tab.
@@ -571,24 +953,51 @@ function applyDocks_(state, docks) {
   return state;
 }
 
-// Short French summary of a state for the action messages and the sidebar.
+// Short French summary of a state for the action messages, the sidebar and ACCUEIL. pendingCrit: PRD2 pallets
+// waiting at least pendingHoursCrit hours (6 by default) at the time of the data (asOfTs).
 function summary_(state) {
   var k = state.kpi || {};
   var crit = (state.alerts || []).filter(function (a) { return a.level === 'crit'; }).length;
   var sat = k.saturation === null || k.saturation === undefined ? '' : ' (' + frPct_(k.saturation) + ')';
+  var hCrit = pendingHoursCrit_(state);
+  var over = Number(k.pendingCrit) || 0;
+  var asOfTs = state.asOfTs || k.asOfTs || '';
   return {
     version: state.version,
     asOf: state.asOf,
+    asOfTs: asOfTs,
     source: state.source,
     exp2Pallets: k.exp2Pallets,
     capacity: k.capacity,
     saturation: k.saturation,
     pendingPallets: k.pendingPallets,
+    pendingCrit: over,
+    pendingWarn: Number(k.pendingWarn) || 0,
+    pendingHoursCrit: hCrit,
+    oldestPendingHours: k.oldestPendingHours === undefined ? null : k.oldestPendingHours,
     alerts: (state.alerts || []).length,
     critical: crit,
-    text: 'Au ' + frDate_(state.asOf) + ' : ' + frNum_(k.exp2Pallets || 0, 0) + ' palettes en EXP2' + sat + ', ' +
-      frNum_(k.pendingPallets || 0, 0) + ' en attente PRD2, ' + plural_((state.alerts || []).length, 'alerte', 'alertes') + '.'
+    text: 'Au ' + frDate_(state.asOf) + (asOfTs ? ' ' + String(asOfTs).slice(11, 16) : '') + ' : ' +
+      frNum_(k.exp2Pallets || 0, 0) + ' palettes en EXP2' + sat + ', ' + frNum_(k.pendingPallets || 0, 0) + ' en attente PRD2' +
+      (over > 0 ? ' dont ' + frNum_(over, 0) + ' depuis plus de ' + frNum_(hCrit, 1).replace(/,0$/, '') + ' h' : '') + ', ' +
+      plural_((state.alerts || []).length, 'alerte', 'alertes') + '.'
   };
+}
+
+// PRD2 alert threshold in hours (state thresholds, else CFG, else 6).
+function pendingHoursCrit_(state) {
+  var thr = (state && state.thresholds) || {};
+  var cfg = (typeof CFG !== 'undefined' && CFG.THRESHOLDS) || {};
+  var n = Number(thr.pendingHoursCrit);
+  if (!(isFinite(n) && n >= 0) || thr.pendingHoursCrit === '' || thr.pendingHoursCrit === null) n = Number(cfg.pendingHoursCrit);
+  return isFinite(n) && n >= 0 ? n : 6;
+}
+
+// Hours as on the screens: 44.04 -> '44 h 02', 0.5 -> '0 h 30'.
+function frHours_(h) {
+  if (h === null || h === undefined || !isFinite(h)) return '';
+  var min = Math.round(Number(h) * 60);
+  return Math.floor(min / 60) + ' h ' + pad2_(min % 60);
 }
 
 // Runs after a successful write: refreshes the ACCUEIL status when Main.gs is loaded (sheet only, best effort).
@@ -648,9 +1057,10 @@ function requireSim_() {
   if (typeof Sim === 'undefined' || !Sim || !Sim.generate) throw new Error('Module de simulation absent (Simulation.gs).');
 }
 
-// Server-side check of the lines normalised in the browser: never trust the client (key rebuilt here).
+// Server-side check of the lines normalised in the browser: never trust the client (key and label rebuilt here).
 function validateLines_(lines) {
   var plant = currentPlant_();
+  var max = API_LIMITS_.lineText;
   var out = { lines: [], rejected: [] };
   var ranks = {};
   lines.forEach(function (raw, i) {
@@ -670,9 +1080,24 @@ function validateLines_(lines) {
       uqs: text_(raw.uqs, 10).toUpperCase(),
       designation: text_(raw.designation, 200),
       user: Norm.canonUser(text_(raw.user, 60)),
-      source: 'IMPORT'
+      source: 'IMPORT',
+      // v2 (docs/SPEC_V2.md 2.2): entry time as text, label, texts of the real export.
+      ts: text_(raw.ts, 40),
+      label: '',
+      headerText: text_(typeof raw.headerText === 'number' ? Norm.codeText(raw.headerText, false) : raw.headerText, max),
+      itemText: text_(typeof raw.itemText === 'number' ? Norm.codeText(raw.itemText, false) : raw.itemText, max),
+      reference: text_(Norm.codeText(raw.reference, false), max),
+      client: text_(Norm.codeText(raw.client, true), max),
+      salesOrder: text_(Norm.codeText(raw.salesOrder, true), max)
     };
+    // Label: rebuilt from the texts with the import rules; a label sent without any text is kept when it is digits.
+    var sentLabel = text_(Norm.codeText(raw.label, false), 40);
+    line.label = Norm.labelOf(line);
+    if (!line.label && !line.headerText && !line.itemText && /^\d{1,12}$/.test(sentLabel)) line.label = sentLabel;
     var reasons = [];
+    if (line.ts && !validTs_(line.ts)) reasons.push('Heure de saisie illisible : « ' + text_(line.ts, 30) + ' »');
+    if (sentLabel && !/^\d{1,12}$/.test(sentLabel)) reasons.push('Étiquette illisible : « ' + text_(sentLabel, 30) + ' »');
+    else if (line.label && !/^\d{1,12}$/.test(line.label)) reasons.push('Étiquette illisible : « ' + text_(line.label, 30) + ' »');
     if (plant && line.division && line.division !== plant) reasons.push('Division ' + line.division + ' hors périmètre (' + plant + ' uniquement)');
     if (!line.article) reasons.push('Article manquant');
     else if (!ARTICLE_RE_.test(line.article)) reasons.push('Article illisible : « ' + text_(line.article, 40) + ' »');
@@ -778,37 +1203,57 @@ function cleanDock_(dock, known) {
   };
 }
 
-// Simulation parameters with defaults: 14 working days (Monday to Saturday) ending on the last working day before today.
+// Simulator defaults and limits (Sim.DEFAULTS / Sim.LIMITS when the module gives them).
+function simDefaultDays_() {
+  return typeof Sim !== 'undefined' && Sim && Sim.DEFAULTS && Sim.DEFAULTS.days > 0 ? Sim.DEFAULTS.days : 7;
+}
+
+function simLimits_() {
+  var L = typeof Sim !== 'undefined' && Sim && Sim.LIMITS ? Sim.LIMITS : {};
+  return {
+    days: L.days && L.days.length === 2 ? L.days : [1, API_LIMITS_.simDaysMax],
+    palletsPerDay: L.palletsPerDay && L.palletsPerDay.length === 2 ? L.palletsPerDay : [20, 1500]
+  };
+}
+
+/**
+ * Simulation parameters with defaults: 7 days (the plant runs every day) ending yesterday. endDate and startDate
+ * together set the number of days; startDate alone starts the period. palletsPerDay: labels a day (empty: the
+ * simulator's default, 450).
+ */
 function simParams_(params) {
   function int(v, def, min, max, label) {
     if (v === null || v === undefined || v === '') return def;
     var n = Number(v);
-    if (!isFinite(n) || Math.floor(n) !== n || n < min || n > max) throw new Error(label + ' invalide (' + min + ' à ' + max + ') : « ' + v + ' ».');
+    if (!isFinite(n) || Math.floor(n) !== n || n < min || n > max) {
+      throw new Error(label + ' invalide (' + frNum_(min, 0) + ' à ' + frNum_(max, 0) + ') : « ' + v + ' ».');
+    }
     return n;
   }
+  var lim = simLimits_();
   var today = isoToday_();
-  var days = int(params.days, 14, 1, API_LIMITS_.simDaysMax, 'Nombre de jours');
-  var endDate = params.endDate ? isoDate_(params.endDate) : lastWorkingDayBefore_(today);
-  if (!endDate) throw new Error('Date de fin invalide : « ' + params.endDate + ' ».');
-  if (endDate > today) throw new Error('La date de fin ne peut pas être dans le futur.');
-  if (weekday_(endDate) === 0) endDate = addDays_(endDate, -1);
+  var days = int(params.days, simDefaultDays_(), lim.days[0], lim.days[1], 'Nombre de jours');
+  var endDate = params.endDate ? isoDate_(params.endDate) : '';
+  if (params.endDate && !endDate) throw new Error('Date de fin invalide : « ' + params.endDate + ' ».');
   var startDate = params.startDate ? isoDate_(params.startDate) : '';
   if (params.startDate && !startDate) throw new Error('Date de début invalide : « ' + params.startDate + ' ».');
-  if (!startDate) {
-    startDate = endDate;
-    for (var n = 1; n < days; n++) {
-      startDate = addDays_(startDate, -1);
-      if (weekday_(startDate) === 0) startDate = addDays_(startDate, -1);
-    }
+  if (startDate && endDate) {
+    if (startDate > endDate) throw new Error('La date de début doit précéder la date de fin.');
+    days = daysBetween_(startDate, endDate) + 1;
+    if (days > lim.days[1]) throw new Error('Période trop longue (' + days + ' jours, maximum ' + lim.days[1] + ').');
+  } else if (startDate) {
+    endDate = addDays_(startDate, days - 1);
+  } else {
+    endDate = endDate || simEndDefault_();
+    startDate = addDays_(endDate, 1 - days);
   }
-  if (startDate > endDate) throw new Error('La date de début doit précéder la date de fin.');
+  if (endDate > today) throw new Error('La date de fin ne peut pas être dans le futur.');
   return {
     seed: int(params.seed, 2026, 0, 2147483647, 'Graine'),
     days: days,
     startDate: startDate,
     endDate: endDate,
-    palletsPerDay: int(params.palletsPerDay, undefined, 5, 500, 'Palettes par jour'),
-    articles: int(params.articles, 40, 10, 40, 'Nombre d\'articles'),
+    palletsPerDay: int(params.palletsPerDay, undefined, lim.palletsPerDay[0], lim.palletsPerDay[1], 'Palettes par jour'),
     edgeCases: params.edgeCases !== false
   };
 }
@@ -834,15 +1279,28 @@ function currentPlant_() {
   return (typeof CFG !== 'undefined' && CFG.PLANT) || 'TA11';
 }
 
-// Generated line as Repo.readInput() returns it after the append (engine input of the same execution).
+// Generated line as Repo.readInput() returns it after the append (engine input of the same execution): the v2 fields
+// get the same text forms as the MOUVEMENTS columns, so '+1 jour' and a later 'Recalculer' give the same state.
 function engineLine_(l) {
   var q = typeof l.qty === 'number' ? l.qty : Number(l.qty);
   return {
     key: text_(l.key), article: articleCode_(l.article), division: text_(l.division).toUpperCase(), magasin: text_(l.magasin).toUpperCase(),
     mvt: text_(l.mvt), text: text_(l.text), s: text_(l.s).toUpperCase(), doc: articleCode_(l.doc), poste: articleCode_(l.poste),
     date: isoDate_(l.date), qty: isFinite(q) ? q : NaN, uqs: text_(l.uqs), designation: text_(l.designation), user: text_(l.user),
-    source: text_(l.source).toUpperCase() || 'SIMULATION'
+    source: text_(l.source).toUpperCase() || 'SIMULATION',
+    ts: validTs_(text_(l.ts)) ? text_(l.ts) : '', label: codeText_(l.label), headerText: codeText_(l.headerText),
+    itemText: codeText_(l.itemText), reference: codeText_(l.reference), client: articleCode_(l.client),
+    salesOrder: articleCode_(l.salesOrder)
   };
+}
+
+// 'yyyy-mm-dd hh:mm:ss' with a real date and time.
+function validTs_(s) {
+  var m = TS_RE_.exec(String(s === null || s === undefined ? '' : s));
+  if (!m) return false;
+  var mo = +m[2], d = +m[3];
+  if (mo < 1 || mo > 12 || d < 1 || +m[4] > 23 || +m[5] > 59 || +m[6] > 59) return false;
+  return new Date(Date.UTC(+m[1], mo - 1, d)).getUTCDate() === d;
 }
 
 // 'Q01' -> 'Q1', as on every screen.
@@ -850,11 +1308,13 @@ function quaiLabel_(q) {
   return String(q === null || q === undefined ? '' : q).replace(/^Q0(\d)$/, 'Q$1');
 }
 
-// Movement as shown on screens: no user name, only 'Auto' (interface) or 'Manuel'.
+// Movement as shown on screens: no user name, only 'Auto' (interface) or 'Manuel'; free header and item texts are
+// not shown (they may carry names), only the label, the entry time and the delivery fields.
 function publicMovement_(m) {
   return {
     date: m.date, doc: m.doc, poste: m.poste || '', magasin: m.magasin, mvt: m.mvt, text: m.text, s: m.s || '',
-    qty: m.qty, uqs: m.uqs, user: userKind_(m.user), source: m.source
+    qty: m.qty, uqs: m.uqs, user: userKind_(m.user), source: m.source, ts: m.ts || '', label: m.label || '',
+    client: m.client || '', salesOrder: m.salesOrder || ''
   };
 }
 
@@ -868,11 +1328,15 @@ function userKind_(u) {
 // Small helpers
 // ---------------------------------------------------------------------------------------------------------------
 function articleCode_(v) {
-  var s;
-  if (typeof v === 'number') s = isFinite(v) ? (Math.floor(v) === v ? v.toFixed(0) : String(v)) : '';
-  else s = String(v === null || v === undefined ? '' : v).trim();
+  var s = codeText_(v);
   if (/^\d+$/.test(s)) s = s.replace(/^0+(?=\d)/, '');
   return s;
+}
+
+// Code or text as stored in the sheet: numbers without exponent, leading zeros kept.
+function codeText_(v) {
+  if (typeof v === 'number') return isFinite(v) ? (Math.floor(v) === v ? v.toFixed(0) : String(v)) : '';
+  return String(v === null || v === undefined ? '' : v).trim();
 }
 
 function text_(v, max) {
@@ -919,15 +1383,14 @@ function addDays_(iso, n) {
   return d.getUTCFullYear() + '-' + pad2_(d.getUTCMonth() + 1) + '-' + pad2_(d.getUTCDate());
 }
 
-// 0 = Sunday ... 6 = Saturday.
-function weekday_(iso) {
-  return new Date(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10))).getUTCDay();
+function daysBetween_(from, to) {
+  function utc(iso) { return Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)); }
+  return Math.round((utc(to) - utc(from)) / 86400000);
 }
 
-function lastWorkingDayBefore_(iso) {
-  var d = addDays_(iso, -1);
-  while (weekday_(d) === 0) d = addDays_(d, -1);
-  return d;
+// Default last simulated day: yesterday (the plant runs every day).
+function simEndDefault_() {
+  return addDays_(isoToday_(), -1);
 }
 
 function frDate_(iso) {

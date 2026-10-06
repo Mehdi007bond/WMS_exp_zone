@@ -12,10 +12,18 @@
  *       select:       block id drawn with the accent outline
  *       onBlockClick: function (id) - blocks become buttons (click, Enter, Space)
  *       ghosts:       number of pending pallets drawn as dashed squares at the conveyor
+ *       ghostsCrit:   how many of them are red (waiting for more than pendingHoursCrit)
  *       trucks:       state.docks - trucks drawn at their dock (free docks skipped)
+ *       titles:       true (default unless compact): block tags show the block title (project names, layout block
+ *                     .title of the state) with the block id small; { B1: 'ATLAS' } gives the titles; false: id only
+ *       projects:     { B1: ['ATLAS'] } projects of each block (default: layout block .projects)
+ *       projectColors:{ ATLAS: '#7fb3e0' } - band of the project colors along the top of each block
+ *       fill:         'project' fills the blocks with their (first) project color instead of the saturation ramp
+ *       titleSize:    font size of the block titles in SVG units (8.5; larger for small previews)
  *     }
  *   Plan2D.normLayout(layout), Plan2D.ramp(v), Plan2D.RAMP, Plan2D.capacity(block)
  *   Plan2D.legendHtml(thresholds, opts) -> legend of a saturation plan: fill ramp, tag colors, pending pallets
+ *   Plan2D.projectLegendHtml([{ label, color }]) -> legend of the project colors
  */
 (function () {
   'use strict';
@@ -71,7 +79,8 @@
         return {
           id: String(b.id), label: b.label || '', x: n(b.x), y: n(b.y), w: n(b.w), h: n(b.h),
           cols: Math.max(1, n(b.cols, 1)), rows: Math.max(1, n(b.rows, 1)), levels: Math.max(1, n(b.levels, 1)),
-          color: b.color || '', capacity: b.capacity, families: b.families || ''
+          color: b.color || '', capacity: b.capacity, families: b.families || '', title: b.title ? String(b.title) : '',
+          projects: Array.isArray(b.projects) ? b.projects.map(String) : []
         };
       }),
       truckZone: rect(truckZone) ? truckZone : null,
@@ -91,6 +100,42 @@
   function ramp(v) {
     for (var i = 0; i < RAMP.length; i++) if (v < RAMP[i][0]) return RAMP[i][1];
     return RAMP[RAMP.length - 1][1];
+  }
+
+  // Width of an SVG text in user units: measured when the SVG is laid out, else estimated from the font size.
+  function textWidth(t, str, size, mono) {
+    var w = 0;
+    try {
+      w = t.getComputedTextLength();
+    } catch (e) {
+      w = 0;
+    }
+    return w > 0 ? w : String(str).length * size * (mono ? 0.6 : 0.64);
+  }
+
+  /**
+   * Fits one line of a tag in maxW user units: the font shrinks down to minSize, then the text is cut with an
+   * ellipsis (the full text stays in the block tooltip). -> width used
+   */
+  function fitLine(t, str, size, minSize, maxW, mono) {
+    t.textContent = str;
+    t.style.fontSize = size + 'px';
+    var w = textWidth(t, str, size, mono);
+    if (w <= maxW) return w;
+    // Shrink (rendered widths are not exactly proportional to the size: a few steps), then cut.
+    var s2 = size;
+    for (var k = 0; k < 4 && w > maxW && s2 > minSize; k++) {
+      s2 = Math.max(minSize, s2 * maxW / w * 0.97);
+      t.style.fontSize = s2.toFixed(2) + 'px';
+      w = textWidth(t, str, s2, mono);
+    }
+    var cut = str;
+    while (w > maxW && cut.length > 1) {
+      cut = cut.slice(0, -1);
+      t.textContent = cut.replace(/[\s·\/]+$/, '') + '…';
+      w = textWidth(t, t.textContent, s2, mono);
+    }
+    return Math.min(w, maxW);
   }
 
   function isFree(d) {
@@ -181,29 +226,118 @@
     });
 
     // Storage blocks.
-    // Tags and outlines are drawn above the blocks but must let clicks through to them.
-    var tagLayer = el('g', { 'pointer-events': 'none' });
-    var outline = el('g', { 'pointer-events': 'none' });
+    // Tags and outlines are drawn above the blocks but must let clicks through to them. The three layers are in
+    // the SVG from the start, so the tag texts can be measured while they are drawn.
+    var blockLayer = el('g', {}, g);
+    var outline = el('g', { 'pointer-events': 'none' }, g);
+    var tagLayer = el('g', { 'pointer-events': 'none' }, g);
+    var showTitles = opts.titles !== undefined ? !!opts.titles : !opts.compact;
+    var titleSize = Number(opts.titleSize) > 0 ? Number(opts.titleSize) : 8.5, subSize = Math.max(6, Math.round(titleSize * 0.82 * 10) / 10);
+    var colors = opts.projectColors || null;
+
+    function projectsOf(b) {
+      var p = opts.projects && opts.projects[b.id] ? opts.projects[b.id] : b.projects;
+      return (p || []).filter(function (x) { return x; });
+    }
+
+    function titleOf(b) {
+      if (!showTitles) return '';
+      if (opts.titles && typeof opts.titles === 'object') return String(opts.titles[b.id] || '');
+      return b.title || '';
+    }
+
+    function colorOf(name) {
+      if (!colors || !name) return null;
+      if (colors[name]) return colors[name];
+      var low = String(name).toLowerCase();
+      for (var k in colors) if (Object.prototype.hasOwnProperty.call(colors, k) && k.toLowerCase() === low) return colors[k];
+      return null;
+    }
+
+    // Tag of a titled block: the project names (one per line), then 'B1 · 63 %' small, inside the block.
+    // -> y of its bottom edge
+    function titleTag(b, titleText, pct, lvl, crit) {
+      var cx = (b.x + b.w / 2) * K, cy = (b.y + b.h / 2) * K;
+      var inner = b.w * K - 4, room = inner - 6;
+      var names = titleText.split(' / ');
+      if (names.length > 3) names = names.slice(0, 2).concat(['+ ' + (names.length - 2)]);
+      var rect = el('rect', { rx: 3, 'class': 'p-tag' + lvl }, tagLayer);
+      var texts = [], widest = 0;
+      names.forEach(function (name) {
+        var t = tx(tagLayer, cx, 0, '', 't-tag t-title' + (crit ? ' crit' : ''), 'middle');
+        t.setAttribute('data-title', b.id);
+        widest = Math.max(widest, fitLine(t, name, titleSize, 6, room, false));
+        texts.push({ el: t, h: parseFloat(t.style.fontSize) * 1.18 });
+      });
+      // 'B1 · 63 %' on one line when it fits, else 'B1' and '63 %' on two lines (narrow blocks).
+      var sub = b.id + (pct ? ' · ' + pct : '');
+      var probe = tx(tagLayer, cx, 0, sub, 't-sub', 'middle');
+      probe.style.fontSize = subSize + 'px';
+      var subs = !pct || textWidth(probe, sub, subSize, true) <= room ? [sub] : [b.id, pct];
+      tagLayer.removeChild(probe);
+      subs.forEach(function (s) {
+        var t = tx(tagLayer, cx, 0, '', 't-sub' + (crit ? ' crit' : ''), 'middle');
+        widest = Math.max(widest, fitLine(t, s, subSize, 5.5, room, true));
+        texts.push({ el: t, h: parseFloat(t.style.fontSize) * 1.25 });
+      });
+      var height = Math.min(texts.reduce(function (s, x) { return s + x.h; }, 0) + 6, b.h * K - 4);
+      var width = Math.min(inner, Math.max(30, widest + 10));
+      var top = cy - height / 2, y = top + 3;
+      texts.forEach(function (x) {
+        y += x.h;
+        x.el.setAttribute('y', (y - x.h * 0.24).toFixed(1));
+      });
+      rect.setAttribute('x', (cx - width / 2).toFixed(1));
+      rect.setAttribute('y', top.toFixed(1));
+      rect.setAttribute('width', width.toFixed(1));
+      rect.setAttribute('height', height.toFixed(1));
+      return top + height;
+    }
+
     L.blocks.forEach(function (b) {
       var dim = hl && hl.indexOf(b.id) < 0;
       var v = opts.sat && opts.sat[b.id] !== undefined && opts.sat[b.id] !== null ? Number(opts.sat[b.id]) : null;
       var cap = capacity(b);
-      var bg = el('g', { 'class': 'blk' + (dim ? ' p-dim' : '') + (opts.onBlockClick ? ' clickable' : ''), 'data-block': b.id }, g);
+      var projs = projectsOf(b);
+      var bg = el('g', { 'class': 'blk' + (dim ? ' p-dim' : '') + (opts.onBlockClick ? ' clickable' : ''), 'data-block': b.id }, blockLayer);
       var bf = R(b, 'b-' + (b.color || 'none'), bg);
-      if (v !== null) {
+      if (opts.fill === 'project') {
+        // Projects page preview: the block takes the color of its (first) project, white when it has none.
+        bf.setAttribute('class', 'b-none');
+        var pc = colorOf(projs[0]);
+        if (pc) {
+          bf.removeAttribute('class');
+          bf.setAttribute('fill', pc);
+          bf.setAttribute('fill-opacity', '0.6');
+        }
+      } else if (v !== null) {
         bf.removeAttribute('class');
         bf.setAttribute('fill', (opts.ramp || ramp)(v));
       }
       var cw = b.w / b.cols, ch = b.h / b.rows;
       for (var c = 1; c < b.cols; c++) el('line', { x1: (b.x + c * cw) * K, y1: b.y * K, x2: (b.x + c * cw) * K, y2: (b.y + b.h) * K, 'class': 'p-grid' }, bg);
       for (var r = 1; r < b.rows; r++) el('line', { x1: b.x * K, y1: (b.y + r * ch) * K, x2: (b.x + b.w) * K, y2: (b.y + r * ch) * K, 'class': 'p-grid' }, bg);
+      // Band of the project colors along the top of the block (the colors of the pallets in the 3D view).
+      if (colors && projs.length && opts.fill !== 'project') {
+        var bw = (b.w * K - 1.2) / projs.length;
+        projs.forEach(function (name, i) {
+          var col = colorOf(name);
+          if (!col) return;
+          var band = el('rect', { x: (b.x * K + 0.6 + i * bw).toFixed(2), y: (b.y * K + 0.6).toFixed(2), width: bw.toFixed(2), height: 4.5,
+            'class': 'p-band', fill: col }, bg);
+          el('title', {}, band).textContent = name;
+        });
+      }
       R(b, 'p-blockline', bg);
       var cx = (b.x + b.w / 2) * K, cy = (b.y + b.h / 2) * K;
       var capY = cy + 19;
-      if (v !== null) {
-        var tc = v >= thr.satCrit ? critC : v >= thr.satWarn ? warnC : null;
-        var lvl = tc === critC ? ' crit' : tc === warnC ? ' warn' : '';
-        var pct = Math.round(v * 100) + '\u00a0%';
+      var titleText = titleOf(b);
+      var tc = v !== null ? (v >= thr.satCrit ? critC : v >= thr.satWarn ? warnC : null) : null;
+      var lvl = tc === critC ? ' crit' : tc === warnC ? ' warn' : '';
+      var pct = v !== null ? Math.round(v * 100) + '\u00a0%' : '';
+      if (titleText) {
+        capY = titleTag(b, titleText, pct, lvl, tc === critC) + 8;
+      } else if (v !== null) {
         var label = b.id + ' ' + pct;
         var tw = Math.max(44, label.length * 5.4 + 8);
         var inner = b.w * K - 4;
@@ -221,11 +355,12 @@
         el('rect', { x: cx - 15, y: cy - 11, width: 30, height: 22, rx: 3, 'class': 'p-tag' }, bg);
         tx(bg, cx, cy + 4.2, b.id, 't-id', 'middle');
       }
-      if (!opts.compact) tx(bg, cx, capY, fmtInt(cap) + ' pal', 't-sm t-halo', 'middle');
+      if (!opts.compact && capY < (b.y + b.h) * K - 2) tx(bg, cx, capY, fmtInt(cap) + ' pal', 't-sm t-halo', 'middle');
       if (hl && !dim) R(b, 'p-hl', outline);
       if (opts.select === b.id) R(b, 'p-hl', outline);
       var title = el('title', {}, bg);
-      title.textContent = 'Bloc ' + b.id + (b.label ? ' · ' + b.label : '') + ' · ' + fmtInt(cap) + ' emplacements' +
+      title.textContent = 'Bloc ' + b.id + (projs.length ? ' · ' + projs.join(' / ') : (b.title ? ' · ' + b.title : '')) +
+        (b.label ? ' · ' + b.label : '') + ' · ' + fmtInt(cap) + ' emplacements' +
         (v !== null ? ' · saturation ' + Math.round(v * 100) + '\u00a0%' : '');
       if (opts.onBlockClick) {
         bg.setAttribute('tabindex', '0');
@@ -241,15 +376,15 @@
         });
       }
     });
-    g.appendChild(outline);
-    g.appendChild(tagLayer);
 
     // Pending pallets as ghosts at the conveyor.
     if (opts.ghosts > 0) {
       var gx = conv ? conv.x + 0.7 : B.x + 1, gy = conv ? conv.y - 1.4 : B.y + B.h - 2;
       var maxG = conv ? Math.max(1, Math.floor((conv.w - 0.7) / 1.05)) : 16;
       var ng = Math.min(opts.ghosts, maxG);
-      for (var i = 0; i < ng; i++) el('rect', { x: (gx + i * 1.05) * K, y: gy * K - 4, width: 8, height: 8, rx: 1, 'class': 'p-ghost' }, g);
+      var nc = Math.min(ng, Math.max(0, Math.round(Number(opts.ghostsCrit) || 0)));
+      // Oldest first along the conveyor: the labels waiting for more than pendingHoursCrit are red.
+      for (var i = 0; i < ng; i++) el('rect', { x: (gx + i * 1.05) * K, y: gy * K - 4, width: 8, height: 8, rx: 1, 'class': 'p-ghost' + (i < nc ? ' crit' : '') }, g);
     }
     el('rect', { x: B.x * K, y: B.y * K, width: W, height: H, 'class': 'p-wall' }, g);
     if (opts.compact) return svg;
@@ -293,6 +428,11 @@
    * Legend of a saturation plan (TV and PC): what the fill means, what the tag color means, the pending ghosts.
    * opts.ghosts: false to leave out the pending pallets entry.
    */
+  function fmtH(v) {
+    var x = Number(v);
+    return isFinite(x) && v !== null && v !== '' ? String(x).replace('.', ',') : '6';
+  }
+
   function legendHtml(thr, opts) {
     thr = thr || conf().THRESHOLDS || { satWarn: 0.85, satCrit: 0.95 };
     opts = opts || {};
@@ -304,9 +444,22 @@
     }).join('') + '</span>' +
       '<span class="ramp">Étiquette&nbsp;: <i style="background:#fab219"></i>orange ≥ ' + Math.round(thr.satWarn * 100) + '&nbsp;%, ' +
       '<i style="background:#d03b3b"></i>rouge ≥ ' + Math.round(thr.satCrit * 100) + '&nbsp;%' +
-      (opts.ghosts === false ? '' : '&nbsp;&nbsp;<i class="ghost"></i>palettes en attente PRD2 (convoyeur)') + '</span>';
+      (opts.ghosts === false ? '' : '&nbsp;&nbsp;<i class="ghost"></i>palettes en attente PRD2 (convoyeur)' +
+        '&nbsp;<i class="ghost crit"></i>depuis plus de ' + fmtH(thr.pendingHoursCrit) + '&nbsp;h') + '</span>';
   }
 
-  window.Plan2D = { build: build, normLayout: normLayout, ramp: ramp, RAMP: RAMP, capacity: capacity, legendHtml: legendHtml };
+  /** Legend of the project colors (band at the top of the blocks, pallets of the 3D view): [{ label, color }]. */
+  function projectLegendHtml(items) {
+    function esc(x) {
+      return String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    if (!items || !items.length) return '';
+    return '<span class="ramp proj">Projets&nbsp;: ' + items.map(function (x) {
+      return '<span class="nowrap"><i style="background:' + esc(x.color) + '"></i>' + esc(x.label) + '</span>';
+    }).join(' ') + '</span>';
+  }
+
+  window.Plan2D = { build: build, normLayout: normLayout, ramp: ramp, RAMP: RAMP, capacity: capacity, legendHtml: legendHtml,
+    projectLegendHtml: projectLegendHtml };
 })();
 </script>

@@ -12,7 +12,10 @@
  *
  * Query flags (read by the harness only):
  *   empty=1          installed base without data (own store)         none=1   base not installed (nothing saved)
- *   reset=1          forget the saved store and seed again             seed=N, days=N   first simulation (2026, 14)
+ *   reset=1          forget the saved store and seed again             seed=N, days=N, ppd=N   first simulation
+ *                                                                      (2026, 5 days, 200 labels a day: ~2.6 MB of
+ *                                                                      localStorage; the v2 default of 450 a day
+ *                                                                      for 7 days would be ~8 MB, over the quota)
  *   poll=S           version polling period in seconds (window.EXP2_HARNESS.pollMs, read by App.pollPeriodMs)
  *   lat=MS           server latency (default 40)                       fresh=warn|crit  import 6 h / 30 h ago
  *   no3d=1           Twin3D.supported() is false (isometric fallback)  offline=1  every server call fails
@@ -23,8 +26,9 @@
 (function () {
   'use strict';
 
-  var FLAG_NAMES = ['empty', 'none', 'poll', 'lat', 'fresh', 'no3d', 'offline', 'seed', 'days'];
-  var READ_ONLY = { api_getVersion: true, api_getState: true, api_lookup: true, api_searchArticles: true, api_checkKey: true };
+  var FLAG_NAMES = ['empty', 'none', 'poll', 'lat', 'fresh', 'no3d', 'offline', 'seed', 'days', 'ppd'];
+  var READ_ONLY = { api_getVersion: true, api_getState: true, api_lookup: true, api_searchArticles: true, api_checkKey: true,
+    api_getProjects: true };
 
   function parseQuery(search) {
     var out = {};
@@ -72,7 +76,8 @@
     no3d: on(params.no3d),
     offline: on(params.offline),
     seed: params.seed !== undefined && params.seed !== '' ? Number(params.seed) : 2026,
-    days: Number(params.days) > 0 ? Number(params.days) : 14
+    days: Number(params.days) > 0 ? Number(params.days) : 5,
+    ppd: Number(params.ppd) > 0 ? Number(params.ppd) : 200
   };
   var ns = flags.none ? 'none' : flags.empty ? 'empty' : 'sim';
   var DB_KEY = 'exp2.harness.' + ns + '.db';
@@ -111,7 +116,7 @@
     if (ns !== 'none') {
       Repo.setup({});
       var keys = Repo.ensureKeys();
-      if (ns === 'sim') api_simulate(keys.admin, { days: flags.days, seed: flags.seed });
+      if (ns === 'sim') api_simulate(keys.admin, { days: flags.days, seed: flags.seed, palletsPerDay: flags.ppd });
     }
     window.__keys = Repo.getKeys();
     persist();

@@ -5,6 +5,9 @@
  * (plain <script>, backs the google.script.run shim). No Google service, no require: the only global it reads is
  * CFG (Config.gs), lazily, at call time. Seeded empty; setup() creates the default layout, rules, settings and
  * docks, like the sheet version. Values cross the interface as JSON copies, the way the sheet would serialise them.
+ * v2 (docs/SPEC_V2.md 3): movements keep ts / label / texts as the MOUVEMENTS text columns would, ARTICLES rows carry
+ * a project, PROJETS rows live in db.projects with the same simulation ownership rules; migrate() only adds the
+ * missing PARAM_SEUILS rows (an in-memory store has no columns to append).
  *
  * Extra helpers for tests and the harness: reset(), dump(), snapshot(), restore(). The harness pages share one store
  * through localStorage with snapshot() / restore(), like several screens share the one Google Sheet.
@@ -70,6 +73,44 @@ var Repo = (function RepoMemoryModule_() {
     return new Date().toISOString();
   }
 
+  // Entry time as the 'Saisie le' text column keeps it: 'yyyy-mm-dd hh:mm:ss' or '' (Repo.gs tsOf_ for text cells).
+  function ts_(v) {
+    var m = /^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(str_(v));
+    if (!m) {
+      m = /^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(str_(v));
+      if (!m) return '';
+      m = [m[0], m[3], m[2], m[1], m[4], m[5], m[6]];
+    }
+    var y = +m[1], mo = +m[2], d = +m[3], h = +m[4], mi = +m[5], s = m[6] ? +m[6] : 0;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59) return '';
+    if (new Date(Date.UTC(y, mo - 1, d)).getUTCDate() !== d) return '';
+    return y + '-' + pad2_(mo) + '-' + pad2_(d) + ' ' + pad2_(h) + ':' + pad2_(mi) + ':' + pad2_(s);
+  }
+
+  function projectName_(v) {
+    return str_(v).replace(/\s+/g, ' ');
+  }
+
+  function blockIds_(v) {
+    var list = Array.isArray(v) ? v : str_(v).split(/[,;\s]+/);
+    var out = [];
+    list.forEach(function (b) {
+      var id = code_(b, false);
+      if (id && out.indexOf(id) < 0) out.push(id);
+    });
+    return out;
+  }
+
+  function color_(v) {
+    var s = str_(v).toLowerCase();
+    if (/^[0-9a-f]{6}$/.test(s)) s = '#' + s;
+    return /^#[0-9a-f]{6}$/.test(s) ? s : '';
+  }
+
+  function has_(o, k) {
+    return Object.prototype.hasOwnProperty.call(o, k);
+  }
+
   function reset() {
     db = {
       installed: false,
@@ -77,6 +118,7 @@ var Repo = (function RepoMemoryModule_() {
       movements: [],         // MOUVEMENTS rows as objects (+ importId, addedAt)
       opening: [],
       articles: [],
+      projects: [],          // PROJETS rows { project, blocks: 'B1, B7', color, comment }
       layout: null,          // layout object (CFG.DEFAULT_LAYOUT shape)
       rules: [],
       mvt: [],               // { mvt, kind, text, meaning, used }
@@ -141,6 +183,29 @@ var Repo = (function RepoMemoryModule_() {
     return rows;
   }
 
+  // Missing PARAM_SEUILS rows (keys added since the store was written). -> keys added.
+  function addMissingSettings_() {
+    var have = {};
+    db.settings.forEach(function (s) { if (s.key) have[s.key] = true; });
+    var added = defaultSettings_().filter(function (s) { return !have[s.key]; });
+    db.settings = db.settings.concat(added);
+    return added.map(function (s) { return s.key; });
+  }
+
+  // Same result shape as Repo.gs migrate(): the store has no header rows, only settings rows can be missing. Like
+  // Repo.gs, nothing is checked again once the schema version is recorded, unless forced (setup).
+  function migrate(force) {
+    if (!db.installed) return null;
+    if (!force && db.props.SCHEMA_VERSION === '2' && Array.isArray(db.projects)) {
+      return { version: 2, changed: [], settings: [] };
+    }
+    if (!Array.isArray(db.projects)) db.projects = [];
+    var settings = addMissingSettings_();
+    if (!db.tabs[cfg_().TABS.PROJECTS]) db.tabs[cfg_().TABS.PROJECTS] = true;
+    db.props.SCHEMA_VERSION = JSON.stringify(2);
+    return { version: 2, changed: settings.length ? [cfg_().TABS.SETTINGS] : [], settings: settings };
+  }
+
   function defaultDocks_() {
     return (cfg_().DEFAULT_LAYOUT.quais || []).map(function (q) {
       return { quai: q.id, status: 'Libre', truck: '', carrier: '', color: '', arrival: '', departure: '',
@@ -186,6 +251,7 @@ var Repo = (function RepoMemoryModule_() {
     if (reset || !db.docks.length) db.docks = defaultDocks_();
     if (reset) delete db.props.DOCKS_SOURCE;
     db.installed = true;
+    migrate(true);
     ensureKeys();
     return { created: created, reset: reset };
   }
@@ -225,20 +291,61 @@ var Repo = (function RepoMemoryModule_() {
     return clone_(db.docks.length ? db.docks : defaultDocks_());
   }
 
+  function readArticles() {
+    return clone_(db.articles.map(function (a) {
+      var out = {};
+      for (var k in a) if (has_(a, k)) out[k] = a[k];
+      out.project = projectName_(a.project);
+      return out;
+    }).filter(function (a) { return a.article; }));
+  }
+
+  // PROJETS rows, names merged case-insensitively (blocks united, first color and comment), like Repo.gs.
+  function readProjects() {
+    var out = [], byKey = {};
+    (db.projects || []).forEach(function (r) {
+      var name = projectName_(r.project);
+      if (!name) return;
+      var p = byKey[name.toLowerCase()];
+      if (!p) {
+        p = byKey[name.toLowerCase()] = { project: name, blocks: [], color: color_(r.color), comment: str_(r.comment) };
+        out.push(p);
+      }
+      blockIds_(r.blocks).forEach(function (b) {
+        if (p.blocks.indexOf(b) < 0) p.blocks.push(b);
+      });
+      if (!p.color) p.color = color_(r.color);
+      if (!p.comment) p.comment = str_(r.comment);
+    });
+    return clone_(out);
+  }
+
+  function readSettings() {
+    return clone_(readSettings_());
+  }
+
   function readInput() {
+    migrate();
     var settings = readSettings_();
     var plant = settings.plant || cfg_().PLANT;
     var layout = readLayout();
+    var ids = {};
+    layout.blocks.forEach(function (b) { ids[String(b.id).toUpperCase()] = b.id; });
     return clone_({
       asOf: settings.asOf || null,
       plant: plant,
       movements: db.movements.map(function (m) {
         return { key: m.key, article: m.article, division: m.division, magasin: m.magasin, mvt: m.mvt, text: m.text, s: m.s,
           doc: m.doc, poste: m.poste, date: m.date, qty: m.qty, uqs: m.uqs, designation: m.designation, user: m.user,
-          source: m.source };
+          source: m.source, ts: m.ts || '', label: m.label || '', headerText: m.headerText || '', itemText: m.itemText || '',
+          reference: m.reference || '', client: m.client || '', salesOrder: m.salesOrder || '' };
       }),
       opening: db.opening.filter(function (o) { return !o.division || !plant || o.division === plant; }),
-      articles: db.articles,
+      articles: readArticles(),
+      projects: readProjects().map(function (p) {
+        p.blocks = p.blocks.map(function (b) { return ids[String(b).toUpperCase()] || b; });
+        return p;
+      }),
       blocks: layout.blocks.map(function (b) {
         return { id: b.id, label: b.label, x: b.x, y: b.y, w: b.w, h: b.h, cols: b.cols, rows: b.rows, levels: b.levels,
           color: b.color, capacity: b.capacity };
@@ -309,7 +416,9 @@ var Repo = (function RepoMemoryModule_() {
       key: str_(l.key), article: code_(l.article, true), division: str_(l.division), magasin: str_(l.magasin),
       mvt: code_(l.mvt, false), text: str_(l.text), s: str_(l.s), doc: code_(l.doc, true), poste: code_(l.poste, true),
       date: iso_(l.date), qty: isFinite(q) ? q : null, uqs: str_(l.uqs), designation: str_(l.designation),
-      user: str_(l.user), source: source, importId: str_(importId), addedAt: now
+      user: str_(l.user), source: source, importId: str_(importId), addedAt: now,
+      ts: ts_(l.ts), label: code_(l.label, false), headerText: code_(l.headerText, false), itemText: code_(l.itemText, false),
+      reference: code_(l.reference, false), client: code_(l.client, true), salesOrder: code_(l.salesOrder, true)
     };
   }
 
@@ -331,12 +440,112 @@ var Repo = (function RepoMemoryModule_() {
 
   function article_(a) {
     return { article: code_(a.article, true), designation: str_(a.designation), uqs: str_(a.uqs), qpp: numOrNull_(a.qpp),
-      palletType: str_(a.palletType), heightCm: numOrNull_(a.heightCm), levels: numOrNull_(a.levels), family: str_(a.family) };
+      palletType: str_(a.palletType), heightCm: numOrNull_(a.heightCm), levels: numOrNull_(a.levels), family: str_(a.family),
+      project: projectName_(a.project) };
+  }
+
+  function project_(p) {
+    return { project: projectName_(p.project), blocks: blockIds_(p.blocks).join(', '), color: color_(p.color), comment: str_(p.comment) };
+  }
+
+  function releaseSimArticles_(codes) {
+    var sim = getProp('SIM_ARTICLES');
+    if (!sim || !sim.length) return;
+    var mine = {};
+    codes.forEach(function (a) { mine[String(a).toUpperCase()] = true; });
+    var left = sim.filter(function (a) { return !mine[String(a).toUpperCase()]; });
+    if (left.length !== sim.length) setProp('SIM_ARTICLES', left.length ? left : null);
+  }
+
+  function saveArticleProjects(rows) {
+    migrate();
+    var at = {};
+    db.articles.forEach(function (a, i) {
+      var k = code_(a.article, true).toUpperCase();
+      if (k) (at[k] = at[k] || []).push(i);
+    });
+    var out = { created: 0, updated: 0, unchanged: 0, articles: [] };
+    var seen = {};
+    (rows || []).forEach(function (row) {
+      var art = code_(row.article, true);
+      var k = art.toUpperCase();
+      if (!art || seen[k]) return;
+      seen[k] = true;
+      out.articles.push(art);
+      var project = projectName_(row.project);
+      if (!has_(at, k)) {
+        if (!project) {
+          out.unchanged++;
+          return;
+        }
+        db.articles.push(article_({ article: art, designation: row.designation, project: project }));
+        out.created++;
+        return;
+      }
+      var changed = false;
+      at[k].forEach(function (i) {
+        if (projectName_(db.articles[i].project) !== project) {
+          db.articles[i].project = project;
+          changed = true;
+        }
+      });
+      if (changed) out.updated++;
+      else out.unchanged++;
+    });
+    releaseSimArticles_(out.articles);
+    setProp('PROJECTS_SOURCE', null);
+    return clone_(out);
+  }
+
+  function addProjects(names) {
+    migrate();
+    var have = {};
+    readProjects().forEach(function (p) { have[p.project.toLowerCase()] = true; });
+    var added = [];
+    (names || []).forEach(function (n) {
+      var name = projectName_(n);
+      if (!name || have[name.toLowerCase()]) return;
+      have[name.toLowerCase()] = true;
+      added.push(name);
+      db.projects.push(project_({ project: name }));
+    });
+    setProp('PROJECTS_SOURCE', null);
+    return added;
+  }
+
+  function saveProjects(rows) {
+    migrate();
+    db.projects = (rows || []).filter(function (p) { return projectName_(p && p.project); }).map(project_);
+    setProp('PROJECTS_SOURCE', null);
+    setProp('SIM_PROJECTS', null);
+    return (rows || []).length;
+  }
+
+  function renameProjectRefs(from, to) {
+    migrate();
+    var key = projectName_(from).toLowerCase(), target = projectName_(to);
+    var out = { articles: 0, rules: 0 };
+    if (!key || !target) return out;
+    db.articles.forEach(function (a) {
+      if (projectName_(a.project).toLowerCase() === key && projectName_(a.project) !== target) {
+        a.project = target;
+        out.articles++;
+      }
+    });
+    db.rules.forEach(function (r) {
+      if (str_(r.criterion).toUpperCase() === 'PROJET' && projectName_(r.value).toLowerCase() === key &&
+        projectName_(r.value) !== target) {
+        r.value = target;
+        out.rules++;
+      }
+    });
+    return out;
   }
 
   function replaceSimulation(data) {
     data = data || {};
-    var out = { removed: 0, added: 0, opening: 0, articles: 0, docks: 0 };
+    migrate();
+    var out = { removed: 0, added: 0, opening: 0, articles: 0, projects: 0, docks: 0 };
     if (data.movements) {
       var before = db.movements.length;
       db.movements = db.movements.filter(function (m) { return m.source !== SIM; });
@@ -358,6 +567,28 @@ var Repo = (function RepoMemoryModule_() {
       setProp('SIM_ARTICLES', ids);
       out.articles = ids.length;
     }
+    if (Array.isArray(data.projects)) {
+      var names = [], dropP = {}, seenP = {};
+      data.projects.forEach(function (p) {
+        var n = projectName_(p && p.project);
+        if (n && !has_(dropP, n.toLowerCase())) names.push(n);
+        if (n) dropP[n.toLowerCase()] = true;
+      });
+      (getProp('SIM_PROJECTS') || []).forEach(function (n) { dropP[String(n).toLowerCase()] = true; });
+      var simRows = data.projects.filter(function (p) {
+        var k = projectName_(p && p.project).toLowerCase();
+        if (!k || seenP[k]) return false;
+        seenP[k] = true;
+        return true;
+      }).map(project_);
+      db.projects = db.projects.filter(function (r) {
+        var k = projectName_(r.project).toLowerCase();
+        return k && !has_(dropP, k);
+      }).concat(simRows);
+      setProp('SIM_PROJECTS', names);
+      setProp('PROJECTS_SOURCE', SIM);
+      out.projects = simRows.length;
+    }
     if (Array.isArray(data.docks) && data.docks.length) {
       replaceDocks(data.docks, SIM);
       out.docks = data.docks.length;
@@ -366,7 +597,8 @@ var Repo = (function RepoMemoryModule_() {
   }
 
   function clearSimulation() {
-    var out = { removed: 0, opening: false, articles: 0, docks: false };
+    migrate();
+    var out = { removed: 0, opening: false, articles: 0, projects: 0, docks: false };
     var before = db.movements.length;
     db.movements = db.movements.filter(function (m) { return m.source !== SIM; });
     out.removed = before - db.movements.length;
@@ -383,6 +615,19 @@ var Repo = (function RepoMemoryModule_() {
       db.articles = db.articles.filter(function (a) { return !drop[a.article]; });
       out.articles = n - db.articles.length;
       setProp('SIM_ARTICLES', null);
+    }
+    if (getProp('PROJECTS_SOURCE') === SIM) {
+      var simNames = getProp('SIM_PROJECTS');
+      var dropP = {};
+      (simNames || []).forEach(function (x) { dropP[String(x).toLowerCase()] = true; });
+      var before = db.projects.filter(function (r) { return projectName_(r.project); }).length;
+      db.projects = simNames ? db.projects.filter(function (r) {
+        var k = projectName_(r.project).toLowerCase();
+        return k && !has_(dropP, k);
+      }) : [];
+      out.projects = before - db.projects.length;
+      setProp('PROJECTS_SOURCE', null);
+      setProp('SIM_PROJECTS', null);
     }
     if (getProp('DOCKS_SOURCE') === SIM) {
       replaceDocks(defaultDocks_(), null);
@@ -503,9 +748,9 @@ var Repo = (function RepoMemoryModule_() {
   // Test / harness helper: a JSON copy of the whole store.
   function dump() {
     return clone_({
-      movements: db.movements, opening: db.opening, articles: db.articles, layout: db.layout, rules: db.rules, mvt: db.mvt,
-      settings: db.settings, docks: db.docks, visits: db.visits, calc: db.calc, importLog: db.importLog,
-      versions: db.versions, props: db.props, tabs: Object.keys(db.tabs)
+      movements: db.movements, opening: db.opening, articles: db.articles, projects: db.projects, layout: db.layout,
+      rules: db.rules, mvt: db.mvt, settings: db.settings, docks: db.docks, visits: db.visits, calc: db.calc,
+      importLog: db.importLog, versions: db.versions, props: db.props, tabs: Object.keys(db.tabs)
     });
   }
 
@@ -532,9 +777,17 @@ var Repo = (function RepoMemoryModule_() {
   return {
     setup: setup,
     isInstalled: isInstalled,
+    migrate: migrate,
     readInput: readInput,
     readLayout: readLayout,
     readDocks: readDocks,
+    readSettings: readSettings,
+    readArticles: readArticles,
+    readProjects: readProjects,
+    saveArticleProjects: saveArticleProjects,
+    addProjects: addProjects,
+    saveProjects: saveProjects,
+    renameProjectRefs: renameProjectRefs,
     writeCalcTables: writeCalcTables,
     saveState: saveState,
     loadState: loadState,

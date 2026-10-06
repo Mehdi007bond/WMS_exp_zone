@@ -201,8 +201,14 @@ test('API flow on the in-memory repo (fixture simulation = sample database)', { 
     assert.equal(db.layout.blocks.length, 8);
     assert.equal(db.layout.roads.length, 5);
     assert.equal(db.layout.quais.length, 8);
-    assert.equal(db.rules.length, 5);
-    assert.ok(db.rules.every((r) => r.comment === 'provisoire'));
+    // SPEC_V2 3: no placeholder placement rules any more (projects place the articles), PROJETS starts empty,
+    // PARAM_SEUILS carries the v2 keys.
+    assert.equal(db.rules.length, 0);
+    assert.deepEqual(db.projects, []);
+    assert.ok(res.created.includes('PROJETS'));
+    for (const k of ['pendingHoursWarn', 'pendingHoursCrit', 'labelIsPallet', 'importTrackedOnly']) {
+      assert.ok(db.settings.some((s) => s.key === k), 'setting ' + k);
+    }
     assert.equal(db.docks.length, 8);
     assert.ok(db.docks.every((d) => d.status === 'Libre'));
     assert.deepEqual(plain(ctx.api_getVersion()), { data: 0, docks: 0 });
@@ -423,7 +429,7 @@ test('API flow on the in-memory repo (fixture simulation = sample database)', { 
     const fin = plain(ctx.api_importLines(keys.admin, Object.assign({}, meta, { final: true }), []));
     assert.equal(fin.final, true);
     assert.equal(fin.versions.data, v0 + 1);
-    assert.deepEqual(fin.totals, { read: 10, added: 3, duplicates: 3, rejected: 4 });
+    assert.deepEqual(fin.totals, { read: 10, added: 3, duplicates: 3, rejected: 4, untracked: 0 });
     assert.equal(Repo.getProp('IMPORT_IMP-TEST-1'), null, 'totals dropped after the final batch');
     assert.match(fin.warning, /simulées/);
     assertNoUserNames(fin, 'import response');
@@ -489,13 +495,28 @@ test('API flow on the in-memory repo (fixture simulation = sample database)', { 
   await t.test('simulation parameters are validated in French', () => {
     assert.throws(() => ctx.simParams_({ days: 0 }), /Nombre de jours invalide/);
     assert.throws(() => ctx.simParams_({ days: 'abc' }), /Nombre de jours invalide/);
+    assert.throws(() => ctx.simParams_({ days: 61 }), /Nombre de jours invalide \(1 à 60\)/);
     assert.throws(() => ctx.simParams_({ endDate: '2999-01-01' }), /futur/);
+    assert.throws(() => ctx.simParams_({ endDate: '31/02/2026x' }), /Date de fin invalide/);
+    // SPEC_V2 6: every day is a working day (v1: Monday to Saturday), labels a day 20-1,500.
     const p = plain(ctx.simParams_({ days: 14, endDate: '2026-10-03' }));
-    assert.equal(p.startDate, '2026-09-18', '14 working days Monday-Saturday ending on Saturday 03.10');
+    assert.equal(p.startDate, '2026-09-20', '14 calendar days ending on 03.10');
     assert.equal(p.seed, 2026);
+    assert.equal(p.palletsPerDay, undefined, 'empty: the simulator default');
+    assert.ok(!('articles' in p), 'no v1 articles parameter');
     const sunday = plain(ctx.simParams_({ days: 1, endDate: '2026-09-27' }));
-    assert.equal(sunday.endDate, '2026-09-26');
-    assert.equal(ctx.lastWorkingDayBefore_('2026-09-28'), '2026-09-26', 'Monday -> Saturday');
+    assert.equal(sunday.endDate, '2026-09-27', 'a Sunday is a working day');
+    const def = plain(ctx.simParams_({}));
+    assert.equal(def.days, 7, 'default 7 days');
+    assert.equal(def.endDate, ctx.simEndDefault_(), 'ending yesterday');
+    assert.equal(ctx.addDays_(def.endDate, 1), ctx.isoToday_());
+    const both = plain(ctx.simParams_({ startDate: '2026-09-01', endDate: '2026-09-10', days: 3 }));
+    assert.deepEqual([both.startDate, both.endDate, both.days], ['2026-09-01', '2026-09-10', 10], 'start and end set the days');
+    const start = plain(ctx.simParams_({ startDate: '2026-09-01', days: 5 }));
+    assert.deepEqual([start.startDate, start.endDate], ['2026-09-01', '2026-09-05']);
+    assert.throws(() => ctx.simParams_({ startDate: '2026-09-10', endDate: '2026-09-01' }), /précéder/);
+    assert.throws(() => ctx.simParams_({ palletsPerDay: 10 }), /Palettes par jour invalide \(20 à 1\u00a0500\)/);
+    assert.equal(plain(ctx.simParams_({ palletsPerDay: '1500' })).palletsPerDay, 1500);
   });
 });
 
@@ -516,33 +537,59 @@ test('API flow with the real Simulation.gs', { skip: CORE_READY && has('Simulati
   const ctx = makeContext({ sim: 'real', repo: 'memory' });
   ctx.Repo.setup();
   const keys = plain(ctx.Repo.getKeys());
-  const r = plain(ctx.api_simulate(keys.admin, { days: 14, endDate: '2026-10-03', seed: 2026 }));
+  // Small volume keeps the test fast (SPEC_V2 6: 450 labels a day by default).
+  const params = { days: 4, endDate: '2026-10-03', seed: 2026, palletsPerDay: 200 };
+  const r = plain(ctx.api_simulate(keys.admin, params));
   assert.equal(r.ok, true);
   assert.ok(r.lines > 500, 'realistic number of lines');
+  assert.match(r.message, /Simulation générée : 4 jours du 30\.09\.2026 au 03\.10\.2026/);
   const state = plain(ctx.api_getState());
   assertStateShape(state);
   assert.equal(state.source, 'SIMULATION');
   assert.equal(state.asOf, '2026-10-03');
+  assert.match(state.asOfTs, /^2026-10-0[34] \d{2}:\d{2}:\d{2}$/, 'time of the data');
   assert.ok(state.kpi.exp2Pallets > 0 && state.kpi.saturation > 0.3 && state.kpi.saturation < 1.2);
   assertNoUserNames(state, 'state');
   const db = ctx.Repo.dump();
   assert.equal(new Set(db.movements.map((m) => m.key)).size, db.movements.length, 'unique keys');
   assert.ok(db.articles.length >= 10);
+  assert.ok(db.movements.some((m) => m.label && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(m.ts)), 'labels and entry times stored');
+  // Projects written by the simulation (PROJECTS_SOURCE = SIMULATION) and shown as block titles.
+  assert.deepEqual(db.projects.map((p) => p.project), ['ATLAS', 'BOREAL', 'CORSO', 'DELTA', 'ETNA', 'FJORD']);
+  assert.equal(db.projects[0].blocks, 'B1, B7');
+  assert.equal(ctx.Repo.getProp('PROJECTS_SOURCE'), 'SIMULATION');
+  assert.equal(state.blocks.find((b) => b.id === 'B1').title, 'ATLAS');
+  assert.ok(state.pending.some((x) => x.label && x.hours !== null), 'pending labels with hours');
+  assert.ok(state.alerts.some((a) => a.code === 'PRD2_CRIT'), 'labels waiting over 6 h at the end of the period');
+  assert.match(r.summary.text, /dont \d+ depuis plus de 6 h/);
 
   const v0 = ctx.api_getVersion().data;
   const next = plain(ctx.api_simulateNextDay(keys.admin));
   assert.ok(next.lines > 0);
-  assert.equal(next.day, '2026-10-05');
+  assert.equal(next.day, '2026-10-04', 'SPEC_V2 6: every day is a working day (v1 skipped Sunday)');
   assert.ok(ctx.api_getVersion().data > v0, 'data version changed');
-  assert.equal(plain(ctx.api_getState()).asOf, '2026-10-05');
+  const after = plain(ctx.api_getState());
+  assert.equal(after.asOf, '2026-10-04');
+  // The lines of +1 jour continue the labels of the data (no label reused).
+  const labels = ctx.Repo.dump().movements.filter((m) => m.mvt === '131').map((m) => m.label);
+  assert.equal(new Set(labels).size, labels.length, 'one declaration per label');
+  // The input reused for the calculation of +1 jour gives what a fresh read gives (v2 fields kept by engineLine_).
+  ctx.api_recompute(keys.admin);
+  const fresh = plain(ctx.api_getState());
+  for (const k of ['kpi', 'blocks', 'blockContents', 'daily', 'pending', 'alerts', 'projectsList', 'articles']) {
+    assert.deepEqual(after[k], fresh[k], 'same ' + k + ' after +1 jour and after Recalculer');
+  }
   const lk = plain(ctx.api_lookup(state.pending.length ? state.pending[0].article : db.articles[0].article));
   assert.ok(lk.found);
+  assert.ok(lk.project, 'article page carries the project');
+  assert.ok(lk.movements.some((m) => m.label && m.ts), 'SAP lines with label and entry time');
   assertNoUserNames(lk, 'lookup');
 
   // Same parameters, same data: a second simulation replaces the first one.
-  const again = plain(ctx.api_simulate(keys.admin, { days: 14, endDate: '2026-10-03', seed: 2026 }));
+  const again = plain(ctx.api_simulate(keys.admin, params));
   assert.equal(again.lines, r.lines);
   assert.equal(ctx.Repo.dump().movements.length, r.lines);
+  assert.equal(ctx.Repo.dump().projects.length, 6, 'simulated projects replaced, not duplicated');
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -601,9 +648,12 @@ test('sheet-only entry points refuse to run from the web app', { skip: CORE_READ
   const ctx = makeContext({ sim: 'fixture', repo: 'memory', main: true, globals: { SpreadsheetApp } });
   ctx.Repo.setup();
   for (const fn of ['sidebar_links', 'sidebar_status', 'sidebar_recompute', 'sidebar_nextDay', 'sidebar_setWebAppUrl', 'installerLaBase',
-    'simulerDonnees', 'simulerJourSuivant', 'effacerSimulation', 'recalculer', 'ouvrirPanneau', 'ouvrirJumeau', 'regenererLesCles']) {
+    'simulerDonnees', 'simulerJourSuivant', 'effacerSimulation', 'recalculer', 'ouvrirPanneau', 'ouvrirJumeau', 'regenererLesCles',
+    'ouvrirProjets', 'sidebar_getProjects', 'sidebar_saveReferences', 'sidebar_saveProjects']) {
     assert.throws(() => ctx[fn](), /Action réservée au classeur/, fn);
   }
+  assert.throws(() => ctx.sidebar_saveReferences([{ article: 'A1', project: 'X' }]), /Action réservée au classeur/);
+  assert.deepEqual(ctx.Repo.dump().articles, [], 'no key-less write from the web app');
   assert.throws(() => ctx.sidebar_simulate({}), /Action réservée au classeur/);
   assert.equal(ctx.api_getVersion().data, 0, 'nothing ran');
 });
@@ -791,10 +841,12 @@ function makeGoogle() {
       if (this.getSheetByName(name)) throw new Error('Sheet exists: ' + name);
       const sh = new Sheet(this, name);
       if (index === undefined) this.sheets.push(sh); else this.sheets.splice(index, 0, sh);
+      this.active = sh;
       return sh;
     }
     deleteSheet(sh) { this.sheets.splice(this.sheets.indexOf(sh), 1); }
     setActiveSheet(sh) { this.active = sh; sh.hidden = false; return sh; }
+    getActiveSheet() { return this.active; }
     moveActiveSheet(pos) {
       this.sheets.splice(this.sheets.indexOf(this.active), 1);
       this.sheets.splice(pos - 1, 0, this.active);
@@ -907,11 +959,12 @@ test('Repo.gs and Main.gs on fake Google services', { skip: SHEETS_READY ? false
 
   await t.test('setup builds every tab with headers, formats, defaults and protections', () => {
     const res = plain(Repo.setup());
-    assert.equal(res.created.length, 20);
+    assert.equal(res.created.length, 21);
     const names = g.ss.getSheets().map((s) => s.name);
-    assert.deepEqual(names, [T.HOME, T.MOVEMENTS, T.OPENING, T.ARTICLES, T.LAYOUT, T.RULES, T.MVT, T.SETTINGS, T.DOCKS,
-      T.VISITS, T.CALC_STOCK, T.CALC_PENDING, T.CALC_FIFO, T.CALC_EXITS, T.CALC_DAILY, T.CALC_BLOCKS, T.CALC_KPI,
-      T.IMPORT_LOG, T.STATE, T.LOOKUP], 'tab order, default sheet removed');
+    assert.deepEqual(names, [T.HOME, T.MOVEMENTS, T.OPENING, T.ARTICLES, T.PROJECTS, T.LAYOUT, T.RULES, T.MVT, T.SETTINGS,
+      T.DOCKS, T.VISITS, T.CALC_STOCK, T.CALC_PENDING, T.CALC_FIFO, T.CALC_EXITS, T.CALC_DAILY, T.CALC_BLOCKS, T.CALC_KPI,
+      T.IMPORT_LOG, T.STATE, T.LOOKUP], 'tab order (PROJETS after ARTICLES), default sheet removed');
+    assert.equal(g.propsStore.get('SCHEMA_VERSION'), '2', 'schema version stored');
     assert.ok(!g.propsStore.has('SPREADSHEET_ID'), 'bound script: no spreadsheet id property');
     assert.equal(g.ss.getSpreadsheetTimeZone(), g.globals.Session.getScriptTimeZone());
     for (const name of Object.keys(CFG.HEADERS)) {
@@ -923,23 +976,36 @@ test('Repo.gs and Main.gs on fake Google services', { skip: SHEETS_READY ? false
     }
     const mv = g.ss.getSheetByName(T.MOVEMENTS);
     const col = (label) => CFG.HEADERS.MOUVEMENTS.indexOf(label);
-    for (const label of ['Clé', 'Article', 'MvT', 'Doc.article', 'Poste']) assert.equal(mv.fmt(1, col(label)), '@', label + ' as text');
+    for (const label of ['Clé', 'Article', 'MvT', 'Doc.article', 'Poste', 'Saisie le', 'Étiquette', 'Texte en-tête', 'Texte',
+      'Référence', 'Client', 'Commande client']) {
+      assert.equal(mv.fmt(1, col(label)), '@', label + ' as text');
+    }
     assert.equal(mv.fmt(1, col('Date cpt.')), 'dd.mm.yyyy');
+    const pj = g.ss.getSheetByName(T.PROJECTS);
+    assert.deepEqual(sheetTable(pj).header, ['Projet', 'Blocs', 'Couleur', 'Commentaire']);
+    assert.equal(sheetTable(pj).rows.length, 0, 'no project at setup');
+    assert.ok(pj.getMaxRows() >= 21 && pj.fmt(5, 2) === '@', 'spare formatted rows (Couleur as text)');
+    assert.equal(pj.tabColor, '#5b8def');
     const layout = sheetTable(g.ss.getSheetByName(T.LAYOUT)).rows;
     const D = CFG.DEFAULT_LAYOUT;
     assert.equal(layout.length, 1 + D.blocks.length + 1 + D.quais.length + D.roads.length + D.zones.length);
     assert.equal(layout.length, readCsv(path.join(CSV_DIR, 'LAYOUT.csv')).length, 'same rows as the sample LAYOUT');
     assert.deepEqual(layout.find((r) => r[0] === 'B1').slice(0, 2), ['B1', 'BLOC_STOCKAGE']);
     assert.equal(layout.filter((r) => r[1] === 'BLOC_STOCKAGE').reduce((s, r) => s + r[10], 0), 1464);
-    const rules = sheetTable(g.ss.getSheetByName(T.RULES)).rows;
-    assert.equal(rules.length, 5);
-    assert.ok(rules.every((r) => r[4] === 'provisoire'));
-    assert.deepEqual(rules[0].slice(0, 4), [10, 'FAMILLE', 'F1', 'B1, B7']);
+    // SPEC_V2 3: no placeholder rules (the F1-F5 families were placeholders).
+    assert.equal(sheetTable(g.ss.getSheetByName(T.RULES)).rows.length, 0);
     const mvt = sheetTable(g.ss.getSheetByName(T.MVT)).rows;
     assert.equal(mvt.length, Object.keys(CFG.MVT_KINDS).length);
     assert.ok(mvt.every((r) => typeof r[0] === 'string'), 'MvT stays text');
     const settings = sheetTable(g.ss.getSheetByName(T.SETTINGS)).rows;
     assert.equal(settings.find((r) => r[1] === 'satWarn')[2], 0.85);
+    const setting = (k) => settings.find((r) => r[1] === k);
+    assert.deepEqual(setting('pendingHoursWarn').slice(0, 4), ['Seuil attente PRD2 - pré-alerte', 'pendingHoursWarn', 4, 'heures']);
+    assert.deepEqual(setting('pendingHoursCrit').slice(0, 4), ['Seuil attente PRD2 - alerte', 'pendingHoursCrit', 6, 'heures']);
+    assert.match(setting('pendingHoursCrit')[4], /plus de 6 h est un vrai problème/);
+    assert.deepEqual(setting('labelIsPallet').slice(0, 4), ['1 étiquette = 1 palette', 'labelIsPallet', 1, '1/0']);
+    assert.deepEqual(setting('importTrackedOnly').slice(0, 4), ['Import : produits finis seulement', 'importTrackedOnly', 1, '1/0']);
+    assert.equal(new Set(settings.map((r) => r[0])).size, settings.length, 'French labels unique');
     const docks = sheetTable(g.ss.getSheetByName(T.DOCKS)).rows;
     assert.equal(docks.length, 8);
     assert.ok(docks.every((r) => r[1] === 'Libre' && r[10] === 12));
@@ -1271,9 +1337,736 @@ test('Repo.gs and Main.gs on fake Google services', { skip: SHEETS_READY ? false
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// 6. v2 (docs/SPEC_V2.md): real MB51 fixture through the import API, projects APIs, simulation ownership
+// ---------------------------------------------------------------------------------------------------------------
+const FIXTURE = path.join(ROOT, 'sample-data', 'mb51-reel', 'MB51_reel_anonymise.xlsx');
+const EXPECTED_FILE = path.join(ROOT, 'sample-data', 'mb51-reel', 'expected.json');
+let XLSX = null;
+try {
+  XLSX = require('xlsx');
+} catch (e) {
+  XLSX = null;
+}
+const FIXTURE_READY = CORE_READY && !!XLSX && fs.existsSync(FIXTURE) && fs.existsSync(EXPECTED_FILE);
+let fixtureRows = null;
+
+// The import page: SheetJS rows -> Norm.normalizeBatch with the finished-goods filter (no tracked article known yet).
+function fixtureBatch(ctx) {
+  if (!fixtureRows) {
+    const wb = XLSX.readFile(FIXTURE);
+    fixtureRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], ctx.Norm.SHEETJS_OPTIONS);
+  }
+  return plain(ctx.Norm.normalizeBatch([{ name: 'MB51_reel_anonymise.xlsx', rows: fixtureRows }], { trackedOnly: true, tracked: [] }));
+}
+
+// Batches of 500 lines like the import page; meta.final on the last one.
+function importBatches(ctx, key, lines, meta) {
+  let res = null;
+  for (let i = 0; i === 0 || i < lines.length; i += 500) {
+    const final = i + 500 >= lines.length;
+    res = plain(ctx.api_importLines(key, Object.assign({}, meta, { final }), lines.slice(i, i + 500)));
+  }
+  return res;
+}
+
+test('v2 import of the real MB51 fixture through api_importLines', { skip: FIXTURE_READY ? false : 'fixture or xlsx absent' }, async (t) => {
+  const expected = JSON.parse(fs.readFileSync(EXPECTED_FILE, 'utf8'));
+  const ctx = makeContext({ sim: 'none', repo: 'memory' });
+  ctx.Repo.setup();
+  const keys = plain(ctx.Repo.getKeys());
+  const batch = fixtureBatch(ctx);
+  assert.equal(batch.lines.length, expected.normalize.kept);
+  assert.equal(batch.untracked.lines, expected.normalize.dropped);
+
+  await t.test('batches stored with the v2 fields, then one calculation', () => {
+    const meta = { importId: 'IMP-REEL', fileName: 'MB51_reel_anonymise.xlsx', kind: 'MB51', untracked: batch.untracked.lines };
+    const res = importBatches(ctx, keys.admin, batch.lines, meta);
+    assert.deepEqual(res.totals, { read: 2800, added: 2800, duplicates: 0, rejected: 0, untracked: 1357 });
+    const db = ctx.Repo.dump();
+    assert.equal(db.movements.length, 2800);
+    assert.ok(db.movements.every((m) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(m.ts)), 'every line has its entry time');
+    assert.equal(db.movements.filter((m) => m.label).length, batch.lines.filter((l) => l.label).length, 'labels kept');
+    const first = db.movements.find((m) => m.key === batch.lines[0].key);
+    for (const k of ['ts', 'label', 'headerText', 'itemText', 'reference', 'client', 'salesOrder']) {
+      assert.equal(first[k], batch.lines[0][k], 'stored ' + k);
+    }
+    assert.equal(db.importLog[db.importLog.length - 1].result, 'OK (1 357 lignes hors produits finis ignorées)');
+  });
+
+  await t.test('state: time of the data and the 6-hour alert match expected.json', () => {
+    const state = plain(ctx.api_getState());
+    const e = expected.engine;
+    assert.equal(state.source, 'SAP');
+    assert.equal(state.asOf, e.asOf);
+    assert.equal(state.asOfTs, e.asOfTs);
+    const k = state.kpi;
+    assert.equal(k.pendingLabels, e.pending.labeled);
+    assert.equal(k.exp2Pallets, e.exp2.pallets);
+    assert.ok(state.pending.length === state.pendingTotal && state.pendingTotal < 500, 'every pending row in the state');
+    // expected.json counts labels (crit 86, warn 11); the KPI counts the pallets of every pending row by level.
+    assert.equal(state.pending.filter((x) => x.label && x.level === 'crit').length, e.pending.crit);
+    assert.equal(state.pending.filter((x) => x.label && x.level === 'warn').length, e.pending.warn);
+    const pallets = (level) => state.pending.filter((x) => x.level === level).reduce((s, x) => s + (Number(x.pallets) || 0), 0);
+    assert.equal(k.pendingCrit, pallets('crit'));
+    assert.equal(k.pendingWarn, pallets('warn'));
+    assert.ok(k.pendingCrit >= e.pending.crit);
+    assert.equal(k.oldestPendingHours, e.pending.oldestHours);
+    assert.equal(state.alerts[0].code, 'PRD2_CRIT', 'critical PRD2 alert first');
+    assert.match(state.alerts[0].text, new RegExp(e.pending.oldest.article + ' .*\\(étiquette ' + e.pending.oldest.label + '\\)'));
+    assert.equal(state.thresholds.importTrackedOnly, 1, 'import filter setting for the import page');
+    assert.ok(state.articles.length >= expected.normalize.trackedArticles, 'tracked articles for the projects page');
+    assertNoUserNames(state, 'state');
+    const sum = plain(ctx.summary_(state));
+    assert.equal(sum.pendingCrit, k.pendingCrit);
+    assert.match(sum.text, /^Au 05\.10\.2026 22:09 : 1 023 palettes en EXP2 .* dont \d+ depuis plus de 6 h, \d+ alertes\.$/);
+  });
+
+  await t.test('article page: project, labels and times', () => {
+    const lk = plain(ctx.api_lookup(expected.engine.pending.oldest.article));
+    assert.equal(lk.found, true);
+    assert.equal(lk.project, '');
+    assert.equal(lk.asOfTs, expected.engine.asOfTs);
+    const oldest = lk.pending.find((x) => x.label === expected.engine.pending.oldest.label);
+    assert.ok(oldest, 'pending label on the article page');
+    assert.equal(oldest.hours, expected.engine.pending.oldestHours);
+    assert.equal(oldest.level, 'crit');
+    assert.ok(lk.movements.every((m) => m.ts && 'label' in m && 'client' in m && 'salesOrder' in m));
+    for (let i = 1; i < lk.movements.length; i++) {
+      const a = lk.movements[i - 1], b = lk.movements[i];
+      assert.ok(a.date > b.date || (a.date === b.date && a.ts >= b.ts), 'newest first by date and entry time');
+    }
+    assert.ok(!lk.movements.some((m) => 'headerText' in m || 'itemText' in m), 'free texts never sent to the screens');
+    assertNoUserNames(lk, 'lookup');
+  });
+
+  await t.test('a second import of the same lines adds nothing', () => {
+    const v = ctx.api_getVersion().data;
+    const res = importBatches(ctx, keys.admin, batch.lines.slice(0, 700), { importId: 'IMP-REEL-2', fileName: 'x.xlsx' });
+    assert.deepEqual(res.totals, { read: 700, added: 0, duplicates: 700, rejected: 0, untracked: 0 });
+    assert.equal(ctx.api_getVersion().data, v + 1);
+  });
+
+  await t.test('the server re-validates the v2 fields', () => {
+    const base = batch.lines.find((l) => l.mvt === '311' && l.label);
+    const mk = (o, i) => Object.assign({}, base, { doc: '7000000' + i, row: 9000 + i, key: 'x' }, o);
+    const sent = [
+      mk({ ts: '2026-13-05 10:00:00' }, 1),
+      mk({ ts: '05/10/2026 10:00' }, 2),
+      mk({ label: 'ABC' }, 3),
+      mk({ label: '999', itemText: '434999001' }, 4),
+      mk({ label: '434999002', itemText: '', headerText: '' }, 5),
+      mk({ itemText: 'x'.repeat(300), headerText: 'TA11P1' + '9'.repeat(300), client: '0001234', salesOrder: '00045', reference: '0700011312' }, 6),
+      mk({ ts: '' }, 7)
+    ];
+    const res = plain(ctx.api_importLines(keys.admin, { importId: 'IMP-V2', fileName: 'v2.xlsx', final: true }, sent));
+    assert.equal(res.rejected, 3);
+    assert.match(res.rejectedLines[0].reason, /Heure de saisie illisible/);
+    assert.match(res.rejectedLines[1].reason, /Heure de saisie illisible/);
+    assert.match(res.rejectedLines[2].reason, /Étiquette illisible/);
+    assert.equal(res.added, 4);
+    const db = ctx.Repo.dump();
+    const by = (doc) => db.movements.find((m) => m.doc === doc);
+    assert.equal(by('70000004').label, '434999001', 'label rebuilt from the item text');
+    assert.equal(by('70000005').label, '434999002', 'digit label sent without texts kept');
+    const long = by('70000006');
+    assert.equal(long.itemText.length, 200);
+    assert.equal(long.headerText.length, 200);
+    assert.equal(long.label, '', 'a 300-character text is no label');
+    assert.equal(long.client, '1234');
+    assert.equal(long.salesOrder, '45');
+    assert.equal(long.reference, '0700011312', 'reference keeps its zeros');
+    assert.equal(by('70000007').ts, '', 'no entry time: accepted without one');
+  });
+});
+
+test('v2 projects APIs: references, projects, rename, ownership, keys', { skip: FIXTURE_READY ? false : 'fixture or xlsx absent' }, async (t) => {
+  const ctx = makeContext({ sim: 'real', repo: 'memory' });
+  ctx.Repo.setup();
+  const keys = plain(ctx.Repo.getKeys());
+  const batch = fixtureBatch(ctx);
+  importBatches(ctx, keys.admin, batch.lines, { importId: 'IMP-P', fileName: 'MB51.xlsx' });
+  const state0 = plain(ctx.api_getState());
+  const designation = (a) => state0.articles.find((x) => x.a === a).d;
+
+  await t.test('api_getProjects reads PROJETS, ARTICLES, LAYOUT and the thresholds without a key', () => {
+    const p = plain(ctx.api_getProjects());
+    assert.deepEqual(Object.keys(p).sort(), ['blocks', 'projects', 'references', 'settings', 'version']);
+    assert.deepEqual(p.projects, []);
+    assert.deepEqual(p.references, []);
+    assert.equal(p.blocks.length, 8);
+    assert.deepEqual(p.blocks[0], { id: 'B1', label: 'Allée 26', capacity: 260 });
+    assert.deepEqual(p.settings, { pendingHoursWarn: 4, pendingHoursCrit: 6 });
+    assert.equal(p.version, ctx.api_getVersion().data);
+    assert.ok(state0.blocks.every((b) => b.title === 'Libre' && b.projects.length === 0), 'no project yet');
+  });
+
+  await t.test('write APIs need the admin key', () => {
+    const v = ctx.api_getVersion().data;
+    assert.throws(() => ctx.api_saveReferences('BAD', [{ article: 'LB73297', project: 'X' }]), /^Error: Clé incorrecte$/);
+    assert.throws(() => ctx.api_saveReferences(keys.docks, [{ article: 'LB73297', project: 'X' }]), /Clé incorrecte/);
+    assert.throws(() => ctx.api_saveProjects('', []), /Clé incorrecte/);
+    assert.throws(() => ctx.api_renameProject(keys.docks, 'A', 'B'), /Clé incorrecte/);
+    assert.equal(ctx.api_getVersion().data, v);
+    assert.deepEqual(ctx.Repo.dump().articles, []);
+  });
+
+  await t.test('api_saveReferences validates, upserts, spells and creates projects', () => {
+    const v = ctx.api_getVersion().data;
+    const r = plain(ctx.api_saveReferences(keys.admin, [
+      { article: ' lb73297 ', project: '  Atlas   Nord ' },
+      { article: '0073871645', project: 'ATLAS NORD' },
+      { article: 'bad code!', project: 'X' },
+      { article: 'LF23855', project: 'A;B' },
+      { article: 'LF23857', project: 'x'.repeat(41) },
+      { article: 'LF23862', project: 'sans PROJET' },
+      { article: '', project: 'X' },
+      { article: 'LD31553', project: 'P1' },
+      { article: 'ld31553', project: 'P2' },
+      { article: 'LD38035', project: 'Delta' },
+      { article: 'LD38035', project: 'delta' }
+    ]));
+    assert.equal(r.ok, true);
+    assert.deepEqual([r.created, r.updated, r.unchanged], [3, 0, 0]);
+    assert.deepEqual(r.newProjects, ['Atlas Nord', 'Delta']);
+    const reasons = Object.fromEntries(r.invalid.map((x) => [x.article, x.reason]));
+    assert.deepEqual(Object.keys(reasons).sort(), ['', 'LD31553', 'LF23855', 'LF23857', 'LF23862', 'bad code!'].sort());
+    assert.match(reasons['bad code!'], /Référence invalide/);
+    assert.match(reasons.LF23855, /sans virgule, point-virgule ni barre verticale/);
+    assert.match(reasons.LF23857, /trop long \(40 caractères au plus\)/);
+    assert.match(reasons.LF23862, /Nom réservé : « Sans projet »/);
+    assert.match(reasons[''], /Référence manquante/);
+    assert.match(reasons.LD31553, /en double avec des projets différents/);
+    assert.equal(r.versions.data, v + 1, 'recalculated');
+    assert.match(r.message, /^Références enregistrées : 3 nouvelles, 0 modifiée, 0 inchangée, 6 invalides\. Nouveaux projets : Atlas Nord, Delta\. Au /);
+    const db = ctx.Repo.dump();
+    const art = (a) => db.articles.find((x) => x.article === a);
+    assert.equal(art('LB73297').project, 'Atlas Nord');
+    assert.equal(art('73871645').project, 'Atlas Nord', 'first spelling of the request for a new project');
+    assert.equal(art('LB73297').designation, designation('LB73297'), 'designation from the last state');
+    assert.equal(art('LD38035').project, 'Delta', 'the same project twice in any case is no conflict');
+    assert.equal(art('LB73297').qpp, null, 'quantity per pallet left empty (learned from the labels)');
+    assert.deepEqual(db.projects, [{ project: 'Atlas Nord', blocks: '', color: '', comment: '' },
+      { project: 'Delta', blocks: '', color: '', comment: '' }]);
+    const st = plain(ctx.api_getState());
+    assert.equal(st.articles.find((x) => x.a === 'LB73297').p, 'Atlas Nord');
+    assert.equal(st.kpi.projects, 2);
+    assert.equal(st.pending.find((x) => x.article === 'LB73297').project, 'Atlas Nord');
+  });
+
+  await t.test('spelling of PROJETS wins; update, unchanged, removal; never-seen article', () => {
+    const r = plain(ctx.api_saveReferences(keys.admin, [
+      { article: 'LF23855', project: 'ATLAS NORD' },
+      { article: 'LB73297', project: 'Boreal' },
+      { article: '73871645', project: 'atlas nord' },
+      { article: 'LD38035', project: '' },
+      { article: 'ZZ99999', project: 'delta' },
+      { article: 'NEVER01', project: '' }
+    ]));
+    assert.deepEqual([r.created, r.updated, r.unchanged], [2, 2, 2]);
+    assert.ok(!ctx.Repo.dump().articles.some((x) => x.article === 'NEVER01'), 'no empty row for an article without a project');
+    assert.deepEqual(r.newProjects, ['Boreal']);
+    const db = ctx.Repo.dump();
+    const art = (a) => db.articles.find((x) => x.article === a);
+    assert.equal(art('LF23855').project, 'Atlas Nord');
+    assert.equal(art('73871645').project, 'Atlas Nord', 'same name in another case: unchanged');
+    assert.equal(art('LB73297').project, 'Boreal');
+    assert.equal(art('LD38035').project, '', "'' removes the project");
+    assert.equal(art('ZZ99999').project, 'Delta');
+    assert.equal(art('ZZ99999').designation, '', 'never seen in the data');
+    assert.deepEqual(db.projects.map((p) => p.project), ['Atlas Nord', 'Delta', 'Boreal']);
+    // Nothing to change: no recalculation, no new version.
+    const v = ctx.api_getVersion().data;
+    const same = plain(ctx.api_saveReferences(keys.admin, [{ article: 'lf23855', project: 'Atlas Nord' }]));
+    assert.match(same.message, /^Aucun changement : 0 nouvelle, 0 modifiée, 1 inchangée\.$/);
+    assert.equal(ctx.api_getVersion().data, v);
+    const bad = plain(ctx.api_saveReferences(keys.admin, [{ article: '???', project: 'X' }]));
+    assert.equal(bad.ok, false);
+    assert.match(bad.message, /Aucune référence enregistrée : 1 ligne invalide/);
+    assert.equal(ctx.api_getVersion().data, v);
+    assert.throws(() => ctx.api_saveReferences(keys.admin, []), /Aucune référence reçue/);
+    assert.throws(() => ctx.api_saveReferences(keys.admin, 'LB73297'), /Aucune référence reçue/);
+    const many = Array.from({ length: 2001 }, (x, i) => ({ article: 'A' + i, project: 'P' }));
+    assert.throws(() => ctx.api_saveReferences(keys.admin, many), /maximum 2 000/);
+    // Project names typed only in ARTICLES are listed after the PROJETS rows.
+    const p = plain(ctx.api_getProjects());
+    assert.deepEqual(p.projects.map((x) => [x.project, x.listed]), [['Atlas Nord', true], ['Delta', true], ['Boreal', true]]);
+    assert.deepEqual(p.references.find((x) => x.article === 'LB73297'), { article: 'LB73297', designation: designation('LB73297'), project: 'Boreal' });
+  });
+
+  await t.test('api_saveProjects: blocks and colors become block titles; bad input refused, nothing written', () => {
+    const before = ctx.Repo.dump().projects;
+    const v = ctx.api_getVersion().data;
+    const bad = [
+      [[{ project: 'Atlas Nord', blocks: ['B9'] }], /bloc inconnu pour « Atlas Nord » : « B9 » \(blocs : B1, B2, B3, B4, B5, B6, B7, B8\)/],
+      [[{ project: 'Atlas Nord', blocks: ['B1'] }, { project: 'atlas nord', blocks: ['B2'] }], /projet en double : « atlas nord »/],
+      [[{ project: 'Atlas Nord', blocks: [], color: 'red' }], /couleur invalide pour « Atlas Nord » : « red » \(format #rrggbb\)/],
+      [[{ project: '', blocks: ['B1'] }], /ligne 1 : nom de projet manquant/],
+      [[{ project: 'A|B', blocks: [] }], /barre verticale/],
+      [Array.from({ length: 101 }, (x, i) => ({ project: 'P' + i })), /Trop de projets \(101, maximum 100\)/]
+    ];
+    for (const [rows, re] of bad) assert.throws(() => ctx.api_saveProjects(keys.admin, rows), re);
+    assert.throws(() => ctx.api_saveProjects(keys.admin, 'x'), /illisible/);
+    assert.deepEqual(ctx.Repo.dump().projects, before, 'PROJETS unchanged after a refusal');
+    assert.equal(ctx.api_getVersion().data, v);
+
+    const r = plain(ctx.api_saveProjects(keys.admin, [
+      { project: 'Atlas Nord', blocks: ['b1', 'B7', 'B1'], color: '#ABCDEF', comment: 'Ligne 1' },
+      { project: 'Boreal', blocks: 'B2, B8' },
+      { project: 'Delta', blocks: [] },
+      { project: '', blocks: [], color: '' }
+    ]));
+    assert.equal(r.saved, 3);
+    assert.equal(r.versions.data, v + 1);
+    assert.match(r.message, /^Projets enregistrés : 3 projets\. Au /);
+    assert.deepEqual(ctx.Repo.dump().projects, [
+      { project: 'Atlas Nord', blocks: 'B1, B7', color: '#abcdef', comment: 'Ligne 1' },
+      { project: 'Boreal', blocks: 'B2, B8', color: '', comment: '' },
+      { project: 'Delta', blocks: '', color: '', comment: '' }
+    ]);
+    const st = plain(ctx.api_getState());
+    const title = (id) => st.blocks.find((b) => b.id === id).title;
+    assert.equal(title('B1'), 'Atlas Nord');
+    assert.equal(title('B7'), 'Atlas Nord');
+    assert.equal(title('B2'), 'Boreal');
+    assert.equal(title('B3'), 'Libre');
+    assert.equal(st.layout.blocks.find((b) => b.id === 'B8').title, 'Boreal');
+    assert.equal(st.projects['Atlas Nord'], '#abcdef');
+    assert.ok(/^#[0-9a-f]{6}$/.test(st.projects.Boreal), 'automatic color');
+    assert.ok(st.projectsList.some((p) => p.project === 'Atlas Nord' && p.blocks.join() === 'B1,B7'));
+    // CALC_BLOCS carries the projects of each block.
+    const blocs = ctx.Repo.dump().calc.CALC_BLOCS;
+    assert.equal(blocs.find((row) => row[0] === 'B1')[6], 'Atlas Nord');
+  });
+
+  await t.test('api_renameProject renames, merges (blocks united) and follows the PROJET rules', () => {
+    assert.throws(() => ctx.api_renameProject(keys.admin, 'Inconnu', 'X'), /Projet introuvable : « Inconnu »/);
+    assert.throws(() => ctx.api_renameProject(keys.admin, 'Boreal', 'Boreal'), /identique/);
+    assert.throws(() => ctx.api_renameProject(keys.admin, 'Boreal', 'A,B'), /virgule/);
+    assert.throws(() => ctx.api_renameProject(keys.admin, '', 'X'), /projet à renommer/);
+    assert.throws(() => ctx.api_renameProject(keys.admin, 'Boreal', '  '), /nouveau nom/);
+    // A hand-written PROJET rule follows the project.
+    const snap = JSON.parse(ctx.Repo.snapshot());
+    snap.rules.push({ priority: 1, criterion: 'PROJET', value: 'boreal', blocks: 'B3', comment: '' });
+    ctx.Repo.restore(snap);
+    const r = plain(ctx.api_renameProject(keys.admin, 'BOREAL', 'atlas NORD'));
+    assert.equal(r.merged, true);
+    assert.equal(r.project, 'Atlas Nord', 'spelling of the existing project');
+    assert.equal(r.renamed, 1);
+    assert.equal(r.rules, 1);
+    assert.match(r.message, /^Projet « BOREAL » fusionné dans « Atlas Nord » : 1 référence\. Au /);
+    const db = ctx.Repo.dump();
+    assert.deepEqual(db.projects, [
+      { project: 'Atlas Nord', blocks: 'B1, B7, B2, B8', color: '#abcdef', comment: 'Ligne 1' },
+      { project: 'Delta', blocks: '', color: '', comment: '' }
+    ]);
+    assert.equal(db.articles.find((x) => x.article === 'LB73297').project, 'Atlas Nord');
+    assert.equal(db.rules.find((x) => x.criterion === 'PROJET').value, 'Atlas Nord');
+    const st = plain(ctx.api_getState());
+    assert.equal(st.blocks.find((b) => b.id === 'B8').title, 'Atlas Nord');
+    // Plain rename, then a new spelling of the same name.
+    const r2 = plain(ctx.api_renameProject(keys.admin, 'delta', 'Delta Sud'));
+    assert.deepEqual([r2.merged, r2.project, r2.renamed], [false, 'Delta Sud', 1]);
+    const r3 = plain(ctx.api_renameProject(keys.admin, 'delta sud', 'DELTA SUD'));
+    assert.deepEqual([r3.project, r3.renamed], ['DELTA SUD', 1]);
+    assert.deepEqual(ctx.Repo.dump().projects.map((p) => p.project), ['Atlas Nord', 'DELTA SUD']);
+    assert.equal(ctx.Repo.dump().articles.find((x) => x.article === 'ZZ99999').project, 'DELTA SUD');
+  });
+});
+
+test('v2 in-memory repo: a v1 store (old harness snapshot) is migrated like the sheet', { skip: CORE_READY ? false : 'core modules absent' }, () => {
+  const ctx = makeContext({ sim: 'fixture', repo: 'memory' });
+  ctx.Repo.setup();
+  const keys = plain(ctx.Repo.getKeys());
+  ctx.api_simulate(keys.admin, { days: 14, seed: 2026 });
+  // v1 shape: no projects, no v2 settings, no schema version, movements and articles without the v2 fields.
+  const v1 = JSON.parse(ctx.Repo.snapshot());
+  delete v1.projects;
+  v1.settings = v1.settings.filter((x) => !['pendingHoursWarn', 'pendingHoursCrit', 'labelIsPallet', 'importTrackedOnly', 'trackAll'].includes(x.key));
+  delete v1.props.SCHEMA_VERSION;
+  v1.movements.forEach((m) => { ['ts', 'label', 'headerText', 'itemText', 'reference', 'client', 'salesOrder'].forEach((k) => delete m[k]); });
+  v1.articles.forEach((a) => delete a.project);
+  ctx.Repo.restore(v1);
+  const before = plain(ctx.api_getState());
+  const m = plain(ctx.Repo.migrate());
+  assert.deepEqual(m.settings, ['pendingHoursWarn', 'pendingHoursCrit', 'labelIsPallet', 'importTrackedOnly', 'trackAll']);
+  assert.deepEqual(plain(ctx.Repo.migrate()), { version: 2, changed: [], settings: [] }, 'idempotent');
+  const input = plain(ctx.Repo.readInput());
+  assert.deepEqual(input.projects, []);
+  assert.ok(input.movements.every((x) => x.ts === '' && x.label === ''));
+  assert.ok(input.articles.every((x) => x.project === ''));
+  ctx.api_recompute(keys.admin);
+  const after = plain(ctx.api_getState());
+  for (const k of ['kpi', 'blocks', 'pending', 'daily']) assert.deepEqual(after[k], before[k], 'same ' + k + ' after the migration');
+  assert.ok(plain(ctx.api_saveReferences(keys.admin, [{ article: '1000914295', project: 'Atlas' }])).ok);
+});
+
+test('v2 simulation ownership of ARTICLES and PROJETS', { skip: CORE_READY && has('Simulation') ? false : 'Simulation.gs absent' }, async (t) => {
+  const ctx = makeContext({ sim: 'real', repo: 'memory' });
+  ctx.Repo.setup();
+  const keys = plain(ctx.Repo.getKeys());
+  const params = { days: 2, endDate: '2026-10-03', seed: 7, palletsPerDay: 60 };
+
+  await t.test('the user rows written before a simulation survive it and its clearing', () => {
+    ctx.api_saveProjects(keys.admin, [{ project: 'REEL A', blocks: ['B3'] }]);
+    ctx.api_saveReferences(keys.admin, [{ article: 'USER001', project: 'REEL A' }]);
+    ctx.api_simulate(keys.admin, params);
+    let db = ctx.Repo.dump();
+    assert.deepEqual(db.projects.map((p) => p.project), ['REEL A', 'ATLAS', 'BOREAL', 'CORSO', 'DELTA', 'ETNA', 'FJORD']);
+    assert.ok(db.articles.some((a) => a.article === 'USER001'));
+    const cleared = plain(ctx.runClearSimulation_());
+    assert.equal(cleared.cleared.projects, 6);
+    db = ctx.Repo.dump();
+    assert.deepEqual(db.projects, [{ project: 'REEL A', blocks: 'B3', color: '', comment: '' }]);
+    assert.deepEqual(db.articles.map((a) => a.article), ['USER001']);
+    assert.equal(ctx.Repo.getProp('PROJECTS_SOURCE'), null);
+  });
+
+  await t.test('simulation, then a save from the projects panel, then clearing keeps the user-owned rows and PROJETS', () => {
+    ctx.api_simulate(keys.admin, params);
+    let db = ctx.Repo.dump();
+    const simArticle = db.articles.find((a) => a.project === 'ATLAS').article;
+    const other = db.articles.find((a) => a.project === 'BOREAL').article;
+    assert.equal(ctx.Repo.getProp('PROJECTS_SOURCE'), 'SIMULATION');
+    const r = plain(ctx.api_saveReferences(keys.admin, [{ article: simArticle.toLowerCase(), project: 'Mon projet' }]));
+    assert.deepEqual([r.updated, r.created], [1, 0]);
+    assert.equal(ctx.Repo.getProp('PROJECTS_SOURCE'), null, 'the user owns PROJETS now');
+    assert.ok(!ctx.Repo.getProp('SIM_ARTICLES').includes(simArticle), 'the user owns this ARTICLES row now');
+    ctx.runClearSimulation_();
+    db = ctx.Repo.dump();
+    assert.deepEqual(db.articles.map((a) => a.article).sort(), ['USER001', simArticle].sort());
+    assert.ok(!db.articles.some((a) => a.article === other), 'other simulated articles removed');
+    assert.deepEqual(db.projects.map((p) => p.project), ['REEL A', 'ATLAS', 'BOREAL', 'CORSO', 'DELTA', 'ETNA', 'FJORD', 'Mon projet']);
+    assert.equal(db.movements.length, 0);
+  });
+
+  await t.test('a new simulation replaces its own projects, not the user ones', () => {
+    ctx.api_simulate(keys.admin, params);
+    const names = ctx.Repo.dump().projects.map((p) => p.project);
+    assert.equal(names.length, 8, 'same names replaced in place, no duplicate');
+    assert.equal(new Set(names.map((n) => n.toLowerCase())).size, names.length);
+    ctx.runClearSimulation_();
+    assert.deepEqual(ctx.Repo.dump().projects.map((p) => p.project), ['REEL A', 'Mon projet']);
+  });
+});
+
+test('v2 on fake Google services: migration of a v1 sheet, label-aware writes, real lines, projects panel', { skip: SHEETS_READY && FIXTURE_READY ? false : 'Repo.gs / Main.gs / fixture absent' }, async (t) => {
+  const g = makeGoogle();
+  const ctxA = makeContext({ sim: 'fixture', repo: 'sheets', main: true, globals: g.globals });
+  const { CFG } = ctxA;
+  const T = plain(CFG.TABS), H = plain(CFG.HEADERS);
+  const sh = (name) => g.ss.getSheetByName(name);
+  const table = (name) => plain(sheetTable(sh(name)));
+  ctxA.Repo.setup();
+  const keys = plain(ctxA.Repo.getKeys());
+  ctxA.api_simulate(keys.admin, { days: 14, seed: 2026 });
+  const batch = fixtureBatch(ctxA);
+  const V2_SETTINGS = ['pendingHoursWarn', 'pendingHoursCrit', 'labelIsPallet', 'importTrackedOnly', 'trackAll'];
+
+  // Back to the shape of a sheet installed with v1: no v2 column, a column added by hand after the v1 ones,
+  // no PROJETS tab, no v2 PARAM_SEUILS row, no SCHEMA_VERSION.
+  function downgrade() {
+    const handColumn = (name, at, label) => {
+      const s0 = sh(name);
+      s0.insertColumnsAfter(at - 1, 1);
+      const n = Math.max(s0.getLastRow(), 1);
+      s0.getRange(1, at, n, 1).setValues(Array.from({ length: n }, (x, i) => [i === 0 ? label : 'n' + i]));
+    };
+    sh(T.MOVEMENTS).deleteColumns(18, H.MOUVEMENTS.length - 17);
+    handColumn(T.MOVEMENTS, 18, 'Note');
+    sh(T.ARTICLES).deleteColumns(9, 1);
+    handColumn(T.ARTICLES, 9, 'Note atelier');
+    sh(T.CALC_STOCK).deleteColumns(11, 2);
+    g.ss.deleteSheet(sh(T.PROJECTS));
+    const st = sh(T.SETTINGS);
+    const keysCol = st.getRange(1, 2, st.getLastRow(), 1).getValues().map((r) => r[0]);
+    for (let i = keysCol.length - 1; i >= 1; i--) if (V2_SETTINGS.includes(keysCol[i])) st.deleteRows(i + 1, 1);
+    g.propsStore.delete('SCHEMA_VERSION');
+  }
+
+  await t.test('the first write after the upgrade migrates the v1 sheet without moving data', () => {
+    downgrade();
+    const v1 = { mv: table(T.MOVEMENTS), art: table(T.ARTICLES), set: table(T.SETTINGS), stock: table(T.CALC_STOCK) };
+    assert.equal(v1.mv.header.length, 18);
+    assert.ok(!v1.set.rows.some((r) => V2_SETTINGS.includes(r[1])));
+    g.ss.setActiveSheet(sh(T.LAYOUT));
+    // New execution with the v2 code: an import batch (not final) is the first write.
+    const ctxB = makeContext({ sim: 'fixture', repo: 'sheets', main: true, globals: g.globals });
+    const lines = batch.lines.slice(0, 50);
+    const res = plain(ctxB.api_importLines(keys.admin, { importId: 'IMP-MIG', fileName: 'MB51.xlsx', final: false }, lines));
+    assert.equal(res.added, 50);
+    assert.equal(g.propsStore.get('SCHEMA_VERSION'), '2');
+    // MOUVEMENTS: v2 headers after the hand column, old cells untouched, new columns as text.
+    const mv = table(T.MOVEMENTS);
+    assert.deepEqual(mv.header, H.MOUVEMENTS.slice(0, 17).concat(['Note'], H.MOUVEMENTS.slice(17)));
+    v1.mv.rows.forEach((r, i) => assert.deepEqual(mv.rows[i].slice(0, 18), r, 'row ' + (i + 2) + ' untouched'));
+    assert.ok(mv.rows.slice(0, v1.mv.rows.length).every((r) => r.slice(18).every((c) => c === '')), 'old rows: v2 cells empty');
+    for (let c = 18; c < 25; c++) assert.equal(sh(T.MOVEMENTS).fmt(1, c), '@', mv.header[c] + ' as text');
+    // The appended lines: each value under its own header (the hand column stays empty).
+    const col = (label) => mv.header.indexOf(label);
+    const added = mv.rows.slice(v1.mv.rows.length);
+    assert.equal(added.length, 50);
+    added.forEach((r, i) => {
+      assert.equal(r[col('Clé')], lines[i].key);
+      assert.equal(r[col('Note')], '');
+      assert.equal(r[col('Saisie le')], lines[i].ts, 'entry time stored as text');
+      assert.equal(r[col('Étiquette')], lines[i].label, 'label stored as text');
+      assert.equal(r[col('Source')], 'IMPORT');
+    });
+    assert.ok(added.some((r) => r[col('Étiquette')] !== ''), 'some labels');
+    // ARTICLES: Projet appended after the hand column; CALC_STOCK: v2 headers appended.
+    assert.deepEqual(table(T.ARTICLES).header, H.ARTICLES.slice(0, 8).concat(['Note atelier', 'Projet']));
+    assert.deepEqual(table(T.ARTICLES).rows.map((r) => r.slice(0, 9)), v1.art.rows);
+    assert.deepEqual(table(T.CALC_STOCK).header, H.CALC_STOCK);
+    assert.deepEqual(table(T.CALC_STOCK).rows.map((r) => r.slice(0, 10)), v1.stock.rows);
+    // PROJETS created after ARTICLES, empty and formatted; the person keeps the tab they were on.
+    const names = g.ss.getSheets().map((x) => x.name);
+    assert.equal(names.indexOf(T.PROJECTS), names.indexOf(T.ARTICLES) + 1);
+    assert.deepEqual(table(T.PROJECTS), { header: H.PROJETS, rows: [] });
+    assert.equal(sh(T.PROJECTS).fmt(3, 1), '@');
+    assert.equal(g.ss.getActiveSheet().name, T.LAYOUT, 'active tab restored');
+    // PARAM_SEUILS: the v1 rows as they were, the v2 keys added after them.
+    const set = table(T.SETTINGS);
+    assert.deepEqual(set.rows.slice(0, v1.set.rows.length), v1.set.rows);
+    assert.deepEqual(set.rows.slice(v1.set.rows.length).map((r) => r[1]), V2_SETTINGS);
+    assert.equal(set.rows.find((r) => r[1] === 'pendingHoursCrit')[2], 6);
+  });
+
+  await t.test('migration is idempotent and cheap once done', () => {
+    const all = () => Object.fromEntries(g.ss.getSheets().filter((x) => !['_STATE', '_LOOKUP', T.HOME].includes(x.name))
+      .map((x) => [x.name, table(x.name)]));
+    const before = all();
+    const ctxC = makeContext({ sim: 'fixture', repo: 'sheets', globals: g.globals });
+    assert.deepEqual(plain(ctxC.Repo.migrate(true)), { version: 2, changed: [], settings: [] });
+    const reads = Object.assign({}, g.calls.getValues);
+    const ctxD = makeContext({ sim: 'fixture', repo: 'sheets', globals: g.globals });
+    assert.deepEqual(plain(ctxD.Repo.migrate()), { version: 2, changed: [], settings: [] });
+    assert.deepEqual(g.calls.getValues, reads, 'no cell read once SCHEMA_VERSION is 2');
+    assert.deepEqual(all(), before, 'nothing changed');
+  });
+
+  await t.test('references and projects on the migrated sheet: values under their headers', () => {
+    const ctx = makeContext({ sim: 'fixture', repo: 'sheets', main: true, globals: g.globals });
+    ctx.api_importLines(keys.admin, { importId: 'IMP-MIG', fileName: 'MB51.xlsx', final: true }, []);
+    const art0 = table(T.ARTICLES);
+    const target = art0.rows[3][0];
+    const r = plain(ctx.api_saveReferences(keys.admin, [{ article: target, project: 'Atlas' }, { article: 'NEW001', project: 'atlas' }]));
+    assert.deepEqual([r.created, r.updated], [1, 1]);
+    const art = table(T.ARTICLES);
+    const pc = art.header.indexOf('Projet');
+    assert.equal(pc, 9);
+    assert.equal(art.rows[3][pc], 'Atlas');
+    assert.deepEqual(art.rows.slice(0, art0.rows.length).map((row) => row[8]), art0.rows.map((row) => row[8]), 'hand column untouched');
+    const fresh = art.rows[art.rows.length - 1];
+    assert.deepEqual([fresh[0], fresh[8], fresh[pc]], ['NEW001', '', 'Atlas']);
+    assert.deepEqual(table(T.PROJECTS).rows, [['Atlas', '', '', '']]);
+    const p = plain(ctx.api_saveProjects(keys.admin, [{ project: 'Atlas', blocks: ['B1', 'B7'], color: '#112233' }]));
+    assert.equal(p.saved, 1);
+    assert.deepEqual(table(T.PROJECTS).rows, [['Atlas', 'B1, B7', '#112233', '']]);
+    const st = plain(ctx.api_getState());
+    assert.equal(st.blocks.find((b) => b.id === 'B7').title, 'Atlas');
+    const gp = plain(ctx.api_getProjects());
+    assert.deepEqual(gp.projects, [{ project: 'Atlas', blocks: ['B1', 'B7'], color: '#112233', comment: '', listed: true }]);
+    assert.ok(gp.references.some((x) => x.article === 'NEW001' && x.project === 'Atlas'));
+    // A rename writes the Projet column only.
+    const rn = plain(ctx.api_renameProject(keys.admin, 'atlas', 'Atlas Nord'));
+    assert.equal(rn.renamed, 2);
+    assert.equal(table(T.ARTICLES).rows[3][pc], 'Atlas Nord');
+    assert.deepEqual(table(T.PROJECTS).rows, [['Atlas Nord', 'B1, B7', '#112233', '']]);
+  });
+
+  await t.test('the real lines on the sheet give the same state as the in-memory repo', () => {
+    const g2 = makeGoogle();
+    const sheet = makeContext({ sim: 'none', repo: 'sheets', main: true, globals: g2.globals });
+    sheet.Repo.setup();
+    const k2 = plain(sheet.Repo.getKeys());
+    importBatches(sheet, k2.admin, batch.lines, { importId: 'IMP-S', fileName: 'MB51.xlsx' });
+    const mem = makeContext({ sim: 'none', repo: 'memory' });
+    mem.Repo.setup();
+    importBatches(mem, plain(mem.Repo.getKeys()).admin, batch.lines, { importId: 'IMP-S', fileName: 'MB51.xlsx' });
+    const a = plain(sheet.api_getState()), b = plain(mem.api_getState());
+    for (const k of ['asOf', 'asOfTs', 'kpi', 'blocks', 'pending', 'pendingTotal', 'daily', 'alerts', 'articles', 'projectsList']) {
+      assert.deepEqual(a[k], b[k], 'same ' + k + ' with both repos');
+    }
+    // The MOUVEMENTS text columns read back exactly (no time-zone shift, no number conversion).
+    const input = plain(sheet.Repo.readInput());
+    const byKey = new Map(input.movements.map((m) => [m.key, m]));
+    for (const l of batch.lines) {
+      const m = byKey.get(l.key);
+      assert.equal(m.ts, l.ts);
+      assert.equal(m.label, l.label);
+      assert.equal(m.headerText, l.headerText);
+    }
+    const mv = g2.ss.getSheetByName(T.MOVEMENTS);
+    const header = sheetTable(mv).header;
+    assert.equal(typeof mv.get(1, header.indexOf('Saisie le')), 'string');
+    assert.equal(typeof mv.get(1, header.indexOf('Étiquette')), 'string');
+    // CALC_EN_ATTENTE: the level in French.
+    const pending = sheetTable(g2.ss.getSheetByName(T.CALC_PENDING));
+    const lv = pending.header.indexOf('Niveau');
+    assert.ok(pending.rows.some((r) => r[lv] === 'alerte'));
+
+    // ACCUEIL and the control panel show « PRD2 > 6 h : n » and the time of the data.
+    const home = sheet.homeStatus_().map((v) => v.text);
+    const crit = a.kpi.pendingCrit;
+    assert.equal(home[1], '05.10.2026 22:09');
+    assert.match(home[7], new RegExp('^145 palettes · PRD2 > 6 h : ' + crit + ' \\(plus ancienne : 44 h 02\\)$'));
+    const status = plain(sheet.sidebar_status());
+    assert.equal(status.state.pendingCrit, crit);
+    assert.equal(status.state.pendingHoursCrit, 6);
+    assert.equal(status.state.asOfTs, '2026-10-05 22:09:10');
+    assert.equal(status.defaults.days, 7);
+    assert.deepEqual(status.limits, { days: [1, 60], palletsPerDay: [20, 1500] });
+
+    // Projects panel (editors, no key).
+    sheet.ouvrirProjets();
+    assert.equal(g2.ui.sidebar.name, 'SidebarProjets');
+    const d0 = plain(sheet.sidebar_getProjects());
+    assert.equal(d0.installed, true);
+    assert.ok(d0.articles.length >= 93 && d0.articles.every((x) => 'designation' in x && 'exp2' in x));
+    assert.match(d0.link, /\?page=projects$/);
+    const s1 = plain(sheet.sidebar_saveReferences([{ article: 'LB73297', project: 'Panneau' }]));
+    assert.match(s1.message, /^Références enregistrées : 1 nouvelle/);
+    assert.ok(s1.data.references.some((x) => x.article === 'LB73297' && x.project === 'Panneau'));
+    assert.match(g2.ss.toasts[g2.ss.toasts.length - 1], /Références enregistrées/);
+    const s2 = plain(sheet.sidebar_saveProjects([{ project: 'Panneau', blocks: ['B4'] }]));
+    assert.deepEqual(s2.data.projects, [{ project: 'Panneau', blocks: ['B4'], color: '', comment: '', listed: true }]);
+    assert.ok(s2.data.colors.Panneau, 'automatic color from the state');
+    assert.throws(() => sheet.sidebar_saveProjects([{ project: 'Panneau', blocks: ['B42'] }]), /bloc inconnu/);
+  });
+});
+
+// The sheet panel SidebarProjets.html run against the in-memory server: a tiny DOM (ids, values, innerHTML text,
+// listeners) and a synchronous google.script.run that calls the Main.gs functions.
+function panelPage(ctx) {
+  const html = fs.readFileSync(path.join(SRC, 'SidebarProjets.html'), 'utf8');
+  const script = /<script>([\s\S]*)<\/script>/.exec(html)[1];
+  const els = {};
+  const el = (id) => {
+    if (!els[id]) {
+      const listeners = {};
+      const attrs = {};
+      els[id] = {
+        id, value: '', textContent: '', innerHTML: '', className: '', disabled: false, listeners,
+        addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+        setAttribute(k, v) { attrs[k] = String(v); },
+        getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+        fire(type, target) { (listeners[type] || []).forEach((fn) => fn({ target: target || els[id], preventDefault() {} })); }
+      };
+    }
+    return els[id];
+  };
+  for (const m of html.matchAll(/id="([A-Za-z]+)"/g)) el(m[1]);
+  const calls = [];
+  function Runner(ok, ko) { this.ok = ok; this.ko = ko; }
+  Runner.prototype.withSuccessHandler = function (fn) { return new Runner(fn, this.ko); };
+  Runner.prototype.withFailureHandler = function (fn) { return new Runner(this.ok, fn); };
+  for (const name of ['sidebar_getProjects', 'sidebar_saveReferences', 'sidebar_saveProjects', 'ouvrirPanneau']) {
+    Runner.prototype[name] = function (...args) {
+      calls.push(name);
+      let out;
+      try {
+        out = plain(ctx[name](...plain(args)));
+      } catch (e) {
+        this.ko(new Error(e.message));
+        return;
+      }
+      this.ok(out);
+    };
+  }
+  const page = vm.createContext({ console, document: { getElementById: el }, google: { script: { run: new Runner() } } });
+  vm.runInContext(script, page);
+  return { el, calls, click: (id) => el(id).fire('click') };
+}
+
+test('projects panel (SidebarProjets.html) on the in-memory server: paste, preview, save, blocks', { skip: CORE_READY && has('Main') && FIXTURE_READY ? false : 'Main.gs / fixture absent' }, () => {
+  const SpreadsheetApp = { getUi: () => ({ showSidebar() {} }), getActiveSpreadsheet: () => ({ toast() {} }) };
+  const HtmlService = { createHtmlOutputFromFile: () => ({ setTitle() { return this; } }) };
+  const ctx = makeContext({ sim: 'none', repo: 'memory', main: true, globals: { SpreadsheetApp, HtmlService } });
+  ctx.Repo.setup();
+  const keys = plain(ctx.Repo.getKeys());
+  importBatches(ctx, keys.admin, fixtureBatch(ctx).lines, { importId: 'IMP-PANEL', fileName: 'MB51.xlsx' });
+  ctx.api_saveReferences(keys.admin, [{ article: 'LF23857', project: 'ATLAS' }]);
+
+  const page = panelPage(ctx);
+  const { el } = page;
+  assert.equal(page.calls[0], 'sidebar_getProjects');
+  assert.equal(el('projCount').textContent, '1');
+  assert.match(el('projectList').innerHTML, /<option value="ATLAS">/);
+  assert.match(el('projects').innerHTML, /data-b="B1" aria-pressed="false"/);
+  assert.match(el('link').textContent, /Application Web non déployée|Déployer/);
+
+  // Two columns from Excel (header line skipped), then one reference per line with the project field.
+  el('paste').value = 'Référence\tProjet\nlf23855\tatlas\n0073871645\tBOREAL\nLF23857\tATLAS\nbad code!\tX\nLD31553\t';
+  el('project').value = 'Delta';
+  page.click('btnPreview');
+  let pv = el('preview').innerHTML;
+  const des = (a) => plain(ctx.api_getState()).articles.find((x) => x.a === a).d;
+  assert.match(pv, /3 nouvelles<\/b> · 0 changement · 1 inchangée · .*1 invalide/);
+  assert.ok(pv.includes('LF23855</span><span class="st st-new">Nouvelle</span></div><span class="des">' + des('LF23855') + '</span><div><b>ATLAS</b>'),
+    'designation from the state, spelling of the existing project');
+  assert.match(pv, /73871645<\/span><span class="st st-new">Nouvelle/);
+  assert.match(pv, /LF23857<\/span><span class="st st-same">Inchangée/);
+  assert.match(pv, /LD31553<\/span><span class="st st-new">Nouvelle.*<b>Delta<\/b>/);
+  assert.match(pv, /bad code!<\/span><span class="st st-bad">Invalide<\/span><\/div><span class="des">Référence invalide/);
+  // One reference per line (or separated by spaces): the project field; never-seen references flagged.
+  el('paste').value = 'ZZ00001 ZZ00002\nLB73297';
+  el('project').value = 'Delta';
+  page.click('btnPreview');
+  pv = el('preview').innerHTML;
+  assert.match(pv, /3 nouvelles/);
+  assert.match(pv, /ZZ00001<\/span><span class="st st-new">Nouvelle<\/span><\/div><span class="des">jamais vue dans les données/);
+  el('paste').value = 'Référence\tProjet\nlf23855\tatlas\n0073871645\tBOREAL\nLF23857\tATLAS\nbad code!\tX\nLD31553\t';
+  page.click('btnPreview');
+  assert.equal(el('btnSave').disabled, false);
+  assert.match(el('btnSave').textContent, /^Enregistrer \(\d\)$/);
+  page.click('btnSave');
+  assert.ok(page.calls.includes('sidebar_saveReferences'));
+  assert.match(el('msg').textContent, /^Références enregistrées : /);
+  assert.equal(el('msg').className, 'msg ok');
+  assert.equal(el('paste').value, '');
+  const db = ctx.Repo.dump();
+  const art = (a) => db.articles.find((x) => x.article === a);
+  assert.equal(art('LF23855').project, 'ATLAS');
+  assert.equal(art('73871645').project, 'BOREAL');
+  assert.equal(art('LD31553').project, 'Delta', 'empty second column: the project field');
+  assert.deepEqual(db.projects.map((x) => x.project), ['ATLAS', 'BOREAL', 'Delta']);
+  assert.equal(el('projCount').textContent, '3', 'panel refreshed from the answer');
+
+  // Blocks: toggle B1 and B7 for ATLAS, add a project, save the zones.
+  const chip = (p, b) => ({ attrs: { 'data-p': String(p), 'data-b': b }, getAttribute(k) { return this.attrs[k] === undefined ? null : this.attrs[k]; }, setAttribute(k, v) { this.attrs[k] = v; } });
+  assert.equal(el('btnZones').disabled, true);
+  el('projects').fire('click', chip(0, 'B1'));
+  el('projects').fire('click', chip(0, 'B7'));
+  el('newProject').value = 'Etna';
+  page.click('btnAdd');
+  assert.equal(el('projCount').textContent, '4');
+  el('newProject').value = 'sans projet';
+  page.click('btnAdd');
+  assert.match(el('msgZones').textContent, /Nom réservé/);
+  assert.equal(el('btnZones').disabled, false);
+  page.click('btnZones');
+  assert.match(el('msgZones').textContent, /^Projets enregistrés : 4 projets\./);
+  assert.deepEqual(ctx.Repo.dump().projects.map((x) => [x.project, x.blocks]), [['ATLAS', 'B1, B7'], ['BOREAL', ''], ['Delta', ''], ['Etna', '']]);
+  assert.equal(plain(ctx.api_getState()).blocks.find((b) => b.id === 'B7').title, 'ATLAS');
+  assert.match(el('projects').innerHTML, /data-p="0" data-b="B7" aria-pressed="true"/);
+
+  // A server refusal (B7 removed from LAYOUT since the panel loaded) shows the French message; nothing written.
+  el('projects').fire('click', chip(1, 'B2'));
+  const snap = JSON.parse(ctx.Repo.snapshot());
+  snap.layout.blocks = snap.layout.blocks.filter((b) => b.id !== 'B7');
+  ctx.Repo.restore(snap);
+  const before = ctx.Repo.dump().projects;
+  page.click('btnZones');
+  assert.equal(el('msgZones').className, 'msg err');
+  assert.match(el('msgZones').textContent, /bloc inconnu pour « ATLAS » : « B7 »/);
+  assert.deepEqual(ctx.Repo.dump().projects, before);
+  assert.equal(el('btnZones').disabled, false, 'the changes can be fixed and saved again');
+});
+
+// ---------------------------------------------------------------------------------------------------------------
 // 5. Apps Script safe syntax and file contracts
 // ---------------------------------------------------------------------------------------------------------------
-test('Repo.gs, Api.gs, Main.gs, Sidebar.html and the memory repo follow the Apps Script rules', () => {
+test('Repo.gs, Api.gs, Main.gs, Sidebar.html, SidebarProjets.html and the memory repo follow the Apps Script rules', () => {
   const files = ['Repo.gs', 'Api.gs', 'Main.gs'].filter((f) => fs.existsSync(path.join(SRC, f)));
   for (const f of files) {
     const src = fs.readFileSync(path.join(SRC, f), 'utf8');
@@ -1285,6 +2078,15 @@ test('Repo.gs, Api.gs, Main.gs, Sidebar.html and the memory repo follow the Apps
     new vm.Script(src, { filename: f });
   }
   if (files.includes('Main.gs')) assert.match(fs.readFileSync(path.join(SRC, 'Main.gs'), 'utf8'), /^\/\*\* @OnlyCurrentDoc \*\//);
+  // Apps Script runs every .gs file in one global scope: a top-level name defined twice silently wins by file order.
+  const seen = new Map();
+  for (const f of fs.readdirSync(SRC).filter((x) => x.endsWith('.gs'))) {
+    const src = fs.readFileSync(path.join(SRC, f), 'utf8');
+    for (const m of src.matchAll(/^(?:function|var)\s+([A-Za-z0-9_$]+)/gm)) {
+      assert.ok(!seen.has(m[1]), m[1] + ' defined in ' + f + ' and ' + seen.get(m[1]));
+      seen.set(m[1], f);
+    }
+  }
   if (files.includes('Api.gs')) {
     // Api.gs never calls a Google service directly.
     const api = fs.readFileSync(path.join(SRC, 'Api.gs'), 'utf8');
@@ -1306,10 +2108,30 @@ test('Repo.gs, Api.gs, Main.gs, Sidebar.html and the memory repo follow the Apps
     assert.doesNotMatch(html, /\b(alert|confirm|prompt)\s*\(/, 'no alert/confirm/prompt');
     assert.match(html, /withSuccessHandler/);
     assert.match(html, /withFailureHandler/);
-    for (const fn of ['sidebar_status', 'sidebar_simulate', 'sidebar_nextDay', 'sidebar_recompute', 'sidebar_links', 'sidebar_setWebAppUrl']) {
+    for (const fn of ['sidebar_status', 'sidebar_simulate', 'sidebar_nextDay', 'sidebar_recompute', 'sidebar_links', 'sidebar_setWebAppUrl',
+      'ouvrirProjets']) {
       assert.ok(html.includes("'" + fn + "'"), 'sidebar calls ' + fn);
     }
     assert.match(html, /lang="fr"/);
+    assert.doesNotMatch(html, /14 jours|Jours ouvrés|max="500"/, 'v2 simulation defaults (7 days, 20-1,500 labels a day)');
+  }
+  // Projects panel (docs/SPEC_V2.md 5.3): same rules, its three server functions, no key, ES5 only.
+  const projects = path.join(SRC, 'SidebarProjets.html');
+  if (fs.existsSync(projects)) {
+    const html = fs.readFileSync(projects, 'utf8');
+    assert.doesNotMatch(html, /\b(alert|confirm|prompt)\s*\(/, 'no alert/confirm/prompt');
+    assert.match(html, /withSuccessHandler/);
+    assert.match(html, /withFailureHandler/);
+    for (const fn of ['sidebar_getProjects', 'sidebar_saveReferences', 'sidebar_saveProjects']) {
+      assert.ok(html.includes("'" + fn + "'"), 'panel calls ' + fn);
+    }
+    assert.match(html, /lang="fr"/);
+    assert.match(html, /<datalist id="projectList">/);
+    assert.match(html, /Aperçu/);
+    assert.doesNotMatch(html, /api_|sessionStorage|localStorage/, 'no key and no web app API from the sheet panel');
+    const script = /<script>([\s\S]*)<\/script>/.exec(html)[1];
+    assert.doesNotMatch(script, /=>|\blet\b|\bconst\b|`|\?\.|\?\?/, 'ES5 like the rest of the app');
+    new vm.Script(script, { filename: 'SidebarProjets.html' });
   }
   // clasp pushes rootDir: the manifest and every .gs / .html file sit at its top level, so the Apps Script file names
   // are 'Index', 'Styles', ... exactly as createTemplateFromFile / createHtmlOutputFromFile / include_ ask for them.

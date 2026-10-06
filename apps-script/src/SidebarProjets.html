@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --ink: #1f2a37;
+      --muted: #5b6773;
+      --line: #dde3ea;
+      --soft: #f4f6f8;
+      --accent: #1a5fb4;
+      --accent-ink: #ffffff;
+      --good: #0c7a0c;
+      --warn: #b26a00;
+      --crit: #c62828;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 12px 12px 24px;
+      font: 13px/1.45 "Google Sans", Roboto, Arial, sans-serif;
+      color: var(--ink);
+      background: #ffffff;
+    }
+    h1 { font-size: 16px; margin: 0; }
+    .sub { color: var(--muted); margin: 2px 0 12px; font-size: 12px; }
+    h2 {
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 8px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 8px;
+      border-radius: 10px;
+      background: var(--soft);
+      color: var(--muted);
+      margin-left: 6px;
+      vertical-align: 1px;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; margin-top: 8px; }
+    input, textarea {
+      font: inherit;
+      color: var(--ink);
+      padding: 5px 7px;
+      border: 1px solid #c9d2dc;
+      border-radius: 6px;
+      width: 100%;
+      min-width: 0;
+    }
+    textarea { resize: vertical; font: 12px/1.4 "Roboto Mono", Consolas, monospace; min-height: 96px; }
+    input:focus, textarea:focus { outline: 2px solid #9cc0ec; border-color: var(--accent); }
+    .actions { display: flex; gap: 8px; margin-top: 10px; }
+    button {
+      flex: 1;
+      font: 600 13px/1 "Google Sans", Roboto, Arial, sans-serif;
+      padding: 9px 8px;
+      border-radius: 6px;
+      border: 1px solid #c9d2dc;
+      background: #ffffff;
+      color: var(--ink);
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    button:disabled { opacity: .55; cursor: default; }
+    .msg { margin-top: 10px; font-size: 12px; min-height: 18px; }
+    .msg.ok { color: var(--good); }
+    .msg.err { color: var(--crit); }
+    .msg.busy { color: var(--muted); }
+    .hint { font-size: 12px; color: var(--muted); }
+    .muted { color: var(--muted); font-weight: 400; }
+    .counts { font-size: 12px; margin: 10px 0 6px; }
+    .counts b { font-weight: 600; }
+    .list { max-height: 260px; overflow-y: auto; border-top: 1px solid var(--line); }
+    .ref { padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .ref .code { font: 600 12px/1.3 "Roboto Mono", Consolas, monospace; }
+    .ref .des { color: var(--muted); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ref .move { display: flex; justify-content: space-between; gap: 6px; align-items: baseline; }
+    .st { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 8px; white-space: nowrap; }
+    .st-new { background: #e3f4e3; color: var(--good); }
+    .st-change { background: #e6effa; color: var(--accent); }
+    .st-same { background: var(--soft); color: var(--muted); }
+    .st-bad { background: #fde8e8; color: var(--crit); }
+    .proj { padding: 8px 0; border-bottom: 1px solid var(--line); }
+    .proj:last-child { border-bottom: 0; }
+    .ph { display: flex; align-items: center; gap: 6px; }
+    .ph b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sw { width: 22px; height: 22px; padding: 0; border: 1px solid #c9d2dc; border-radius: 4px; background: none; flex: 0 0 auto; cursor: pointer; }
+    .auto { font-size: 11px; color: var(--muted); }
+    .reset { flex: 0 0 auto; padding: 2px 6px; font-size: 11px; font-weight: 400; }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .chip {
+      flex: 0 0 auto;
+      font: 600 11px/1 "Google Sans", Roboto, Arial, sans-serif;
+      padding: 5px 7px;
+      border-radius: 12px;
+      border: 1px solid #c9d2dc;
+      background: #ffffff;
+      color: var(--muted);
+    }
+    .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .newp { display: flex; gap: 6px; margin-top: 10px; }
+    .newp button { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
+    .links a { display: block; color: var(--accent); margin: 3px 0; word-break: break-all; }
+    .invalid { margin: 6px 0 0; padding: 0 0 0 16px; font-size: 12px; color: var(--crit); }
+  </style>
+</head>
+<body>
+  <h1>Projets &amp; références</h1>
+  <p class="sub">Chaque référence appartient à un projet ; les noms de projet remplacent B1…B8 sur tous les écrans.</p>
+
+  <section class="card">
+    <h2>Coller des références</h2>
+    <textarea id="paste" rows="6" spellcheck="false" placeholder="Une référence par ligne&#10;ou deux colonnes copiées d’Excel :&#10;référence ⇥ projet"></textarea>
+    <label>Projet (lignes sans 2<sup>e</sup> colonne)
+      <input id="project" list="projectList" maxlength="40" autocomplete="off" placeholder="Choisir ou saisir un nouveau nom">
+    </label>
+    <datalist id="projectList"></datalist>
+    <div class="actions">
+      <button type="button" id="btnPreview">Aperçu</button>
+      <button type="button" id="btnSave" class="primary" disabled>Enregistrer</button>
+    </div>
+    <div id="preview"></div>
+    <div id="msg" class="msg" role="status"></div>
+  </section>
+
+  <section class="card">
+    <h2>Projets et blocs <span id="projCount" class="badge">…</span></h2>
+    <p class="hint" style="margin:0 0 4px">Cliquez sur les blocs de chaque projet (un bloc peut servir à plusieurs projets).</p>
+    <div id="projects" class="hint">Chargement…</div>
+    <div class="newp">
+      <input id="newProject" maxlength="40" autocomplete="off" placeholder="Nouveau projet">
+      <button type="button" id="btnAdd">Ajouter</button>
+    </div>
+    <div class="actions">
+      <button type="button" id="btnZones" class="primary" disabled>Enregistrer les zones</button>
+    </div>
+    <div id="msgZones" class="msg" role="status"></div>
+  </section>
+
+  <section class="card">
+    <h2>Page complète</h2>
+    <div id="link" class="links hint">Chargement…</div>
+    <div class="actions">
+      <button type="button" id="btnPanel">Panneau de contrôle</button>
+    </div>
+  </section>
+
+  <script>
+    (function () {
+      var ARTICLE_RE = /^[0-9A-Za-z._\/-]{1,40}$/;
+      var MAX_ROWS = 2000;
+      var NO_PROJECT = 'Sans projet';
+      var data = null;          // sidebar_getProjects()
+      var projects = [];        // editable copy: { project, blocks, color, comment }
+      var pending = [];         // valid rows of the last preview: { article, project }
+      var dirty = false;
+      var busy = false;
+
+      function $(id) { return document.getElementById(id); }
+
+      function esc(s) {
+        return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+      }
+
+      function call(name, args, onOk, onErr) {
+        var runner = google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr);
+        runner[name].apply(runner, args || []);
+      }
+
+      function frNum(n) {
+        return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
+      }
+
+      function plural(n, one, many) {
+        return frNum(n) + ' ' + (n > 1 ? many : one);
+      }
+
+      function setMessage(id, text, kind) {
+        var m = $(id);
+        m.textContent = text || '';
+        m.className = 'msg' + (kind ? ' ' + kind : '');
+      }
+
+      function setBusy(on) {
+        busy = on;
+        ['btnPreview', 'btnAdd'].forEach(function (id) { $(id).disabled = on; });
+        $('btnSave').disabled = on || !pending.length;
+        $('btnZones').disabled = on || !dirty;
+      }
+
+      function errorText(err) {
+        return err && err.message ? err.message : String(err);
+      }
+
+      // Same rules as the server (Api.gs): the server checks again before writing.
+      function refCode(v) {
+        var s = String(v === null || v === undefined ? '' : v).trim().toUpperCase();
+        if (/^\d+$/.test(s)) s = s.replace(/^0+(?=\d)/, '');
+        return s;
+      }
+
+      function projName(v) {
+        return String(v === null || v === undefined ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+      }
+
+      function projProblem(n) {
+        if (n.length > 40) return 'Nom de projet trop long (40 caractères au plus)';
+        if (/[,;|]/.test(n)) return 'Nom de projet invalide (sans virgule, point-virgule ni barre verticale)';
+        if (n.toLowerCase() === NO_PROJECT.toLowerCase()) return 'Nom réservé : « ' + NO_PROJECT + ' »';
+        return '';
+      }
+
+      // ---------------------------------------------------------------------------------------------------------
+      // Data
+      // ---------------------------------------------------------------------------------------------------------
+      function load() {
+        call('sidebar_getProjects', [], render, function (err) {
+          $('projects').textContent = errorText(err);
+          $('link').textContent = '';
+        });
+      }
+
+      function render(d) {
+        data = d || {};
+        if (!data.installed) {
+          $('projects').innerHTML = 'Base non installée : menu <b>EXP2 Jumeau › Installer / réinitialiser la base</b>.';
+          $('projCount').textContent = '0';
+          $('link').textContent = '';
+          ['btnPreview', 'btnAdd', 'btnSave', 'btnZones'].forEach(function (id) { $(id).disabled = true; });
+          return;
+        }
+        projects = (data.projects || []).map(function (p) {
+          return { project: p.project, blocks: (p.blocks || []).slice(), color: p.color || '', comment: p.comment || '' };
+        });
+        dirty = false;
+        fillDatalist();
+        renderProjects();
+        renderLink();
+        setBusy(false);
+      }
+
+      function fillDatalist() {
+        $('projectList').innerHTML = projects.map(function (p) {
+          return '<option value="' + esc(p.project) + '"></option>';
+        }).join('');
+      }
+
+      function referencesByArticle() {
+        var out = {};
+        (data.references || []).forEach(function (r) { out[String(r.article).toUpperCase()] = r; });
+        return out;
+      }
+
+      function designationOf(article, refs) {
+        var k = article.toUpperCase();
+        var found = '';
+        (data.articles || []).forEach(function (a) {
+          if (!found && String(a.article).toUpperCase() === k && a.designation) found = a.designation;
+        });
+        if (!found && refs[k] && refs[k].designation) found = refs[k].designation;
+        return found;
+      }
+
+      // ---------------------------------------------------------------------------------------------------------
+      // Paste -> preview
+      // ---------------------------------------------------------------------------------------------------------
+      // One reference per line (or several separated by spaces, commas, semicolons), or two columns from Excel
+      // (reference TAB project). A first line of headers (Référence / Article) is skipped.
+      function parse(text, fieldProject) {
+        var rows = [];
+        var header = /^(r[ée]f[ée]rences?|articles?|codes?)$/i;
+        String(text || '').replace(/\r\n?/g, '\n').split('\n').forEach(function (line, i) {
+          if (!line.trim()) return;
+          var cells = line.split('\t');
+          if (cells.length >= 2 && cells[0].trim()) {
+            if (i === 0 && header.test(cells[0].trim())) return;
+            var p = cells[1].trim();
+            rows.push({ raw: cells[0].trim(), project: p !== '' ? p : fieldProject });
+            return;
+          }
+          line.split(/[\s,;]+/).forEach(function (ref) {
+            if (!ref || (i === 0 && header.test(ref))) return;
+            rows.push({ raw: ref, project: fieldProject });
+          });
+        });
+        return rows;
+      }
+
+      function preview() {
+        if (!data || !data.installed) return;
+        var refs = referencesByArticle();
+        var spell = {};
+        projects.forEach(function (p) { spell[p.project.toLowerCase()] = p.project; });
+        (data.references || []).forEach(function (r) {
+          if (r.project && !spell[r.project.toLowerCase()]) spell[r.project.toLowerCase()] = r.project;
+        });
+        var rows = parse($('paste').value, projName($('project').value));
+        var seen = {}, conflicts = {}, items = [];
+        rows.forEach(function (r) {
+          var art = refCode(r.raw);
+          var project = projName(r.project);
+          var item = { raw: r.raw, article: art, project: project, status: '', reason: '' };
+          if (!ARTICLE_RE.test(art)) item.reason = 'Référence invalide';
+          else item.reason = projProblem(project);
+          if (!item.reason && project) {
+            var k = project.toLowerCase();
+            if (!spell[k]) spell[k] = project;
+            item.project = spell[k];
+          }
+          if (!item.reason) {
+            if (Object.prototype.hasOwnProperty.call(seen, art)) {
+              if (seen[art] !== item.project.toLowerCase()) conflicts[art] = true;
+              return;
+            }
+            seen[art] = item.project.toLowerCase();
+          }
+          items.push(item);
+        });
+        var counts = { neu: 0, change: 0, same: 0, bad: 0 };
+        pending = [];
+        items.forEach(function (it) {
+          if (!it.reason && conflicts[it.article]) it.reason = 'En double avec des projets différents';
+          var cur = refs[it.article.toUpperCase()];
+          it.current = cur ? cur.project : '';
+          if (it.reason) {
+            it.status = 'bad';
+            counts.bad++;
+            return;
+          }
+          if (!cur) {
+            it.status = 'neu';
+            counts.neu++;
+          } else if (cur.project === it.project) {
+            it.status = 'same';
+            counts.same++;
+          } else {
+            it.status = 'change';
+            counts.change++;
+          }
+          pending.push({ article: it.article, project: it.project });
+        });
+        renderPreview(items, counts, refs);
+      }
+
+      var STATUS = {
+        neu: ['st-new', 'Nouvelle'], change: ['st-change', 'Changement'], same: ['st-same', 'Inchangée'], bad: ['st-bad', 'Invalide']
+      };
+
+      function renderPreview(items, counts, refs) {
+        if (!items.length) {
+          $('preview').innerHTML = '';
+          setMessage('msg', 'Collez au moins une référence.', 'err');
+          setBusy(false);
+          return;
+        }
+        var shown = items.slice(0, 300);
+        var html = '<div class="counts"><b>' + plural(counts.neu, 'nouvelle', 'nouvelles') + '</b> · ' +
+          plural(counts.change, 'changement', 'changements') + ' · ' + plural(counts.same, 'inchangée', 'inchangées') +
+          (counts.bad ? ' · <span style="color:var(--crit)">' + plural(counts.bad, 'invalide', 'invalides') + '</span>' : '') + '</div>';
+        html += '<div class="list">' + shown.map(function (it) {
+          var st = STATUS[it.status];
+          var des = it.status === 'bad' ? it.reason : (designationOf(it.article, refs) || 'jamais vue dans les données');
+          var move = it.status === 'bad' ? '' : (it.current && it.status !== 'same' ? esc(it.current) + ' → ' : '') +
+            (it.project ? '<b>' + esc(it.project) + '</b>' : '<i>sans projet</i>');
+          return '<div class="ref"><div class="move"><span class="code">' + esc(it.status === 'bad' ? it.raw : it.article) + '</span>' +
+            '<span class="st ' + st[0] + '">' + st[1] + '</span></div><span class="des">' + esc(des) + '</span>' +
+            (move ? '<div>' + move + '</div>' : '') + '</div>';
+        }).join('') + '</div>';
+        if (items.length > shown.length) html += '<div class="hint">… et ' + frNum(items.length - shown.length) + ' autres lignes.</div>';
+        $('preview').innerHTML = html;
+        var toSave = counts.neu + counts.change;
+        $('btnSave').textContent = 'Enregistrer (' + frNum(toSave) + ')';
+        if (pending.length > MAX_ROWS) {
+          pending = [];
+          setMessage('msg', 'Plus de ' + frNum(MAX_ROWS) + ' références : enregistrez-les en plusieurs fois.', 'err');
+        } else if (!toSave) {
+          setMessage('msg', pending.length ? 'Rien à changer : ces références ont déjà ce projet.' : 'Aucune référence valide.', pending.length ? '' : 'err');
+          pending = [];
+        } else {
+          setMessage('msg', 'Vérifiez l’aperçu puis « Enregistrer ».', '');
+        }
+        setBusy(false);
+      }
+
+      function save() {
+        if (busy || !pending.length) return;
+        setBusy(true);
+        $('btnSave').disabled = true;
+        setMessage('msg', 'Enregistrement et recalcul…', 'busy');
+        call('sidebar_saveReferences', [pending], function (res) {
+          pending = [];
+          $('btnSave').textContent = 'Enregistrer';
+          $('preview').innerHTML = (res.invalid && res.invalid.length) ? '<ul class="invalid">' + res.invalid.slice(0, 20).map(function (x) {
+            return '<li>' + esc(x.article) + ' : ' + esc(x.reason) + '</li>';
+          }).join('') + '</ul>' : '';
+          if (res.data) render(res.data);
+          else setBusy(false);
+          setMessage('msg', res.message || 'Enregistré.', res.ok === false ? 'err' : 'ok');
+          if (res.ok !== false) $('paste').value = '';
+        }, function (err) {
+          setBusy(false);
+          setMessage('msg', errorText(err), 'err');
+        });
+      }
+
+      // ---------------------------------------------------------------------------------------------------------
+      // Projects and blocks
+      // ---------------------------------------------------------------------------------------------------------
+      function colorOf(p) {
+        return p.color || (data.colors && data.colors[p.project]) || '#c9ced6';
+      }
+
+      function renderProjects() {
+        var refs = {};
+        (data.references || []).forEach(function (r) {
+          if (r.project) refs[r.project.toLowerCase()] = (refs[r.project.toLowerCase()] || 0) + 1;
+        });
+        $('projCount').textContent = String(projects.length);
+        if (!projects.length) {
+          $('projects').innerHTML = 'Aucun projet : collez des références avec un nom de projet, ou ajoutez-en un ci-dessous.';
+          return;
+        }
+        var blocks = data.blocks || [];
+        $('projects').className = '';
+        $('projects').innerHTML = projects.map(function (p, i) {
+          var n = refs[p.project.toLowerCase()] || 0;
+          return '<div class="proj"><div class="ph">' +
+            '<input type="color" class="sw" data-color="' + i + '" value="' + esc(colorOf(p)) + '" title="Couleur du projet">' +
+            '<b title="' + esc(p.project) + '">' + esc(p.project) + '</b>' +
+            '<span class="muted">' + plural(n, 'réf.', 'réf.') + '</span>' +
+            (p.color ? '<button type="button" class="reset" data-auto="' + i + '" title="Couleur automatique">auto</button>' : '<span class="auto">auto</span>') +
+            '</div><div class="chips">' + blocks.map(function (b) {
+              var on = p.blocks.indexOf(b.id) >= 0;
+              return '<button type="button" class="chip" data-p="' + i + '" data-b="' + esc(b.id) + '" aria-pressed="' + on + '" title="' +
+                esc((b.label ? b.label + ' · ' : '') + frNum(b.capacity) + ' places') + '">' + esc(b.id) + '</button>';
+            }).join('') + '</div></div>';
+        }).join('');
+      }
+
+      function markDirty() {
+        dirty = true;
+        setBusy(busy);
+        setMessage('msgZones', 'Modifications non enregistrées.', '');
+      }
+
+      $('projects').addEventListener('click', function (ev) {
+        var t = ev.target;
+        if (busy || !t || !t.getAttribute) return;
+        if (t.getAttribute('data-b') !== null) {
+          var p = projects[Number(t.getAttribute('data-p'))], id = t.getAttribute('data-b');
+          var at = p.blocks.indexOf(id);
+          if (at >= 0) p.blocks.splice(at, 1);
+          else p.blocks.push(id);
+          t.setAttribute('aria-pressed', String(at < 0));
+          markDirty();
+        } else if (t.getAttribute('data-auto') !== null) {
+          projects[Number(t.getAttribute('data-auto'))].color = '';
+          renderProjects();
+          markDirty();
+        }
+      });
+
+      $('projects').addEventListener('change', function (ev) {
+        var t = ev.target;
+        if (!t || t.getAttribute('data-color') === null) return;
+        projects[Number(t.getAttribute('data-color'))].color = String(t.value).toLowerCase();
+        renderProjects();
+        markDirty();
+      });
+
+      $('btnAdd').addEventListener('click', function () {
+        var name = projName($('newProject').value);
+        if (!name) return;
+        var problem = projProblem(name);
+        if (problem) {
+          setMessage('msgZones', problem + '.', 'err');
+          return;
+        }
+        var exists = projects.some(function (p) { return p.project.toLowerCase() === name.toLowerCase(); });
+        if (exists) {
+          setMessage('msgZones', 'Le projet « ' + name + ' » existe déjà.', 'err');
+          return;
+        }
+        projects.push({ project: name, blocks: [], color: '', comment: '' });
+        $('newProject').value = '';
+        fillDatalist();
+        renderProjects();
+        markDirty();
+      });
+
+      $('btnZones').addEventListener('click', function () {
+        if (busy || !dirty) return;
+        setBusy(true);
+        setMessage('msgZones', 'Enregistrement et recalcul…', 'busy');
+        call('sidebar_saveProjects', [projects], function (res) {
+          if (res.data) render(res.data);
+          else setBusy(false);
+          setMessage('msgZones', res.message || 'Enregistré.', 'ok');
+        }, function (err) {
+          setBusy(false);
+          setMessage('msgZones', errorText(err), 'err');
+        });
+      });
+
+      // ---------------------------------------------------------------------------------------------------------
+      // Links
+      // ---------------------------------------------------------------------------------------------------------
+      function renderLink() {
+        if (data.link) {
+          $('link').innerHTML = '<a href="' + esc(data.link) + '" target="_blank" rel="noopener">Ouvrir la page « Projets » (aperçu, zones sur le plan, références sans projet)</a>';
+          $('link').className = 'links';
+        } else {
+          $('link').textContent = data.linkHelp || 'Application Web non déployée.';
+          $('link').className = 'links hint';
+        }
+      }
+
+      $('btnPreview').addEventListener('click', preview);
+      $('btnSave').addEventListener('click', save);
+      $('paste').addEventListener('input', function () {
+        pending = [];
+        $('btnSave').disabled = true;
+        $('btnSave').textContent = 'Enregistrer';
+      });
+      $('project').addEventListener('input', function () {
+        pending = [];
+        $('btnSave').disabled = true;
+        $('btnSave').textContent = 'Enregistrer';
+      });
+      $('btnPanel').addEventListener('click', function () {
+        call('ouvrirPanneau', [], function () {}, function (err) { setMessage('msgZones', errorText(err), 'err'); });
+      });
+
+      load();
+    })();
+  </script>
+</body>
+</html>
