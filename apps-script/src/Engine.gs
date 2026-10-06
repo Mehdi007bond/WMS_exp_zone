@@ -29,6 +29,8 @@ function EngineModule_() {
   var NO_PROJECT = 'Sans projet';
   var QPP_ARTICLES = 'ARTICLES';
   var QPP_LABELS = 'ÉTIQUETTES';
+  // Pending level as written in CALC_EN_ATTENTE › Niveau (the result and the state keep 'crit' / 'warn').
+  var LEVEL_TEXT = { crit: 'alerte', warn: 'pré-alerte' };
   var DAY_MS = 86400000;
   var DAY_S = 86400;
   var MAX_LISTED_ALERTS = 20;
@@ -278,7 +280,7 @@ function EngineModule_() {
 
   function frPct_(fraction) {
     var p = round_(fraction * 100, 1);
-    return frNum_(p, p === Math.round(p) ? 0 : 1) + ' %';
+    return frNum_(p, p === Math.round(p) ? 0 : 1) + '\u00a0%';
   }
 
   function plural_(n, one, many) {
@@ -795,16 +797,21 @@ function EngineModule_() {
     }
 
     // Projects (ARTICLES › Projet, PROJETS) and the effective placement rules: input rules + one PROJET rule
-    // (priority 5) per project of PROJETS with blocks. No fallback rules.
+    // (priority 5) per project of PROJETS with blocks of the layout (a project whose blocks were all removed from
+    // LAYOUT is a project without blocks: free blocks). No fallback rules.
     var projects = normProjects_(input.projects, master, input.rules);
     var colors = projectColors_(projects);
+    var blockIds = {};
+    blocks.forEach(function (b) { blockIds[b.id] = true; });
     var ruleRows = (input.rules || []).slice(), generated = {};
     (input.projects || []).forEach(function (row) {
       var name = str_(row && row.project);
       var p = name ? projects.get(name.toLowerCase()) : null;
-      if (!p || generated[p.key] || !p.blocks.length) return;
+      if (!p || generated[p.key]) return;
+      var ids = p.blocks.filter(function (id) { return blockIds[id]; });
+      if (!ids.length) return;
       generated[p.key] = true;
-      ruleRows.push({ priority: 5, criterion: 'PROJET', value: p.name, blocks: p.blocks });
+      ruleRows.push({ priority: 5, criterion: 'PROJET', value: p.name, blocks: ids });
     });
     var rules = normRules_(ruleRows, projects);
     function projectOf_(art) {
@@ -855,7 +862,7 @@ function EngineModule_() {
       return { date: L.date, origin: L.origin, take: take, label: L.label, ts: L.ts, tsSec: L.tsSec };
     }
     // Issuing line without a label (v1): FIFO, LIFO for reversals, over every live layer; missing units are
-    // negative stock, clamped to 0. -> { chunks: [{ date, origin, take, label, ts, tsSec }], own: null }
+    // negative stock, clamped to 0. -> [{ date, origin, take, label, ts, tsSec }] in the order taken
     function consume_(b, l, need) {
       var chunks = [];
       if (b.total < need) {
@@ -869,11 +876,11 @@ function EngineModule_() {
         need -= take;
         chunks.push(chunk_(L, take));
       }
-      return { chunks: chunks, own: null };
+      return chunks;
     }
     // Issuing line with a label: its own layers first (oldest first), then FIFO over the unlabeled layers, never
     // another label. Missing units: stock from before the data when the label was never stored here, else negative.
-    // -> { chunks, own: the first chunk of its own label (dwell), or null }
+    // -> chunks in the order taken (the first one is of its own label when the label is here)
     function consumeLabel_(b, l, need) {
       var chunks = [], arr = b.byLabel ? b.byLabel.get(l.label) : null;
       if (arr) {
@@ -889,7 +896,6 @@ function EngineModule_() {
         }
         if (dead) b.byLabel.set(l.label, arr.filter(function (x) { return x.qty > 0; }));
       }
-      var own = chunks.length ? chunks[0] : null;
       while (need > 0) {
         var U = oldestUnlabeled_(b);
         if (!U) break;
@@ -902,7 +908,7 @@ function EngineModule_() {
         if (arr) diag.negative.push({ art: l.art, mag: l.mag, doc: l.doc, date: l.date, missing: need, uqs: l.uqs });
         else diag.preData++;
       }
-      return { chunks: chunks, own: own };
+      return chunks;
     }
     function apply_(l, day) {
       var q = qppOf_(l.art);
@@ -924,16 +930,19 @@ function EngineModule_() {
         if (l.mag === 'EXP2' && !l.rev) {
           day.exits += pal;
           var dest = destination_(l, pm);
-          taken.chunks.forEach(function (c) {
+          taken.forEach(function (c) {
             exits.push({ article: l.art, dateIn: c.date, dateOut: l.date, qty: c.take / 1000, pallets: q ? ratio_(c.take, q, 2) : null,
               destination: dest, stay: daysBetween_(c.date, l.date), doc: l.doc, mvt: l.mvt, origin: c.origin,
               label: c.label || l.label, tsIn: c.ts, tsOut: l.ts,
               stayHours: c.tsSec !== null && l.tsSec !== null ? hours_(l.tsSec - c.tsSec) : null });
           });
         }
-        // Dwell PRD2 -> EXP2: time between the declaration of the label and its transfer to EXP2.
-        var own = taken.own;
-        if (own && l.mag === 'PRD2' && pm === 'EXP2' && own.tsSec !== null && l.tsSec !== null) day.dwell.push(l.tsSec - own.tsSec);
+        // Dwell PRD2 -> EXP2: time between the declaration of the label and its transfer to EXP2, when the first
+        // layer taken is labeled (a labeled line takes its own label first; an unlabeled one the oldest layer).
+        var first = taken.length ? taken[0] : null;
+        if (first && first.label && l.mag === 'PRD2' && pm === 'EXP2' && first.tsSec !== null && l.tsSec !== null) {
+          day.dwell.push(l.tsSec - first.tsSec);
+        }
       }
       if (l.kind === 'DECL') day.declared += pal;
       else if (l.kind === 'DECL_REV') day.declared -= pal;
@@ -1418,22 +1427,22 @@ function EngineModule_() {
       return shown.join(', ') + (list.length > MAX_GROUPED_CODES ? ', …' : '');
     }
     if (missing.length > MAX_SINGLE_QPP_ALERTS) {
-      add_('warn', 'NO_QPP', plural_(missing.length, 'article', 'articles') + ' de l’onglet ARTICLES sans Qté par palette (' +
+      add_('warn', 'NO_QPP', plural_(missing.length, 'article', 'articles') + ' de l\u2019onglet ARTICLES sans Qté par palette (' +
         codes_(missing) + ') : complétez-la, puis « Recalculer » (onglet ACCUEIL)');
     } else {
       missing.forEach(function (s) {
         add_('warn', 'NO_QPP', 'Article ' + s.article + (s.designation ? ' (' + s.designation + ')' : '') +
-          ' : Qté par palette manquante dans l’onglet ARTICLES : complétez-la, puis « Recalculer » (onglet ACCUEIL)');
+          ' : Qté par palette manquante dans l\u2019onglet ARTICLES : complétez-la, puis « Recalculer » (onglet ACCUEIL)');
       });
     }
     if (absent.length > MAX_SINGLE_QPP_ALERTS) {
       add_('warn', 'UNKNOWN_ARTICLE', plural_(absent.length, 'article', 'articles') + ' sans quantité par palette (absents de ' +
-        'l’onglet ARTICLES, sans étiquette pour l’apprendre : ' + codes_(absent) + ') : ajoutez leur quantité par palette ' +
+        'l\u2019onglet ARTICLES, sans étiquette pour l\u2019apprendre : ' + codes_(absent) + ') : ajoutez leur quantité par palette ' +
         'dans ARTICLES, puis « Recalculer » (onglet ACCUEIL)');
     } else {
       absent.forEach(function (s) {
         add_('warn', 'UNKNOWN_ARTICLE', 'Article ' + s.article + (s.designation ? ' (' + s.designation + ')' : '') +
-          ' absent de l’onglet ARTICLES : ajoutez sa quantité par palette dans ARTICLES, puis « Recalculer » (onglet ACCUEIL)');
+          ' absent de l\u2019onglet ARTICLES : ajoutez sa quantité par palette dans ARTICLES, puis « Recalculer » (onglet ACCUEIL)');
       });
     }
 
@@ -1600,7 +1609,7 @@ function EngineModule_() {
       })),
       CALC_EN_ATTENTE: table_('CALC_EN_ATTENTE', result.pending.map(function (x) {
         return [x.article, x.designation, fmtDate_(x.date), x.doc, x.qty, blank_(x.pallets), x.days,
-          x.label || '', fmtTs_(x.ts), blank_(x.hours), x.level || '', x.project || ''];
+          x.label || '', fmtTs_(x.ts), blank_(x.hours), LEVEL_TEXT[x.level] || '', x.project || ''];
       })),
       CALC_FIFO_EXP2: table_('CALC_FIFO_EXP2', result.fifo.map(function (f) {
         return [f.article, f.designation, fmtDate_(f.date), f.doc, f.origin, f.qty, blank_(f.pallets), f.age,

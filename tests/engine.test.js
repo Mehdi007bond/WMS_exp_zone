@@ -138,9 +138,10 @@ function v2CellOk(name, col, got, row, header) {
   const v1 = (c) => row[header.indexOf(c)];
   if (name === 'CALC_STOCK' && col === 'Source qté/pal') return got === (v1('Qté par palette') === 'INCONNU' ? '' : 'ARTICLES');
   if (name === 'CALC_EN_ATTENTE' && col === 'Niveau') {
-    // day rule (rows without entry time): crit from pendingDaysCrit = 2 x pendingDaysWarn, warn from pendingDaysWarn
+    // day rule (rows without entry time): alerte (crit) from pendingDaysCrit = 2 x pendingDaysWarn, pré-alerte (warn)
+    // from pendingDaysWarn
     const days = Number(v1('Attente (jours)'));
-    return got === (days >= 2 * CFG.THRESHOLDS.pendingDaysWarn ? 'crit' : (days >= CFG.THRESHOLDS.pendingDaysWarn ? 'warn' : ''));
+    return got === (days >= 2 * CFG.THRESHOLDS.pendingDaysWarn ? 'alerte' : (days >= CFG.THRESHOLDS.pendingDaysWarn ? 'pré-alerte' : ''));
   }
   if (name === 'CALC_BLOCS' && col === 'Projet(s)') return got === (v1('Bloc') === 'À PLACER' ? 'Sans projet' : '');
   return got === '';
@@ -384,7 +385,7 @@ test('alerts cover stuck pending lines, block B6 at 100 %, unknown article, over
   const b6 = alerts.find(a => a.code === 'BLOCK_SAT' && a.text.includes('B6'));
   assert.ok(b6, 'B6 alert');
   assert.equal(b6.level, 'crit');
-  assert.ok(b6.text.includes('100 %'), b6.text);
+  assert.ok(b6.text.includes('100\u00a0%'), b6.text);
   assert.equal(alerts.filter(a => a.code === 'BLOCK_SAT').length, 1, 'only B6 is above 85 %');
   const unknown = alerts.find(a => a.code === 'UNKNOWN_ARTICLE');
   assert.ok(unknown && unknown.text.includes('1000571497'));
@@ -724,7 +725,13 @@ test('v2: an issue with a label takes its own layer; without a label it takes th
   const u = Engine.compute(v2Input(base.concat(xfer('A', null, 10, D5 + ' 08:40:00', 'PRD2', 'EXP2', 'T1'))));
   eq(u.pending.map(x => x.label), [lbl(2)], 'FIFO took label 1');
   eq(u.fifo.map(x => x.label), ['']);
-  assert.equal(u.kpi.dwellCount, 0, 'no dwell without a label');
+  // SPEC 4.6: the dwell is measured when the first layer taken is labeled, whatever the line: label 1, 08:00 -> 08:40
+  eq([u.kpi.dwellCount, u.kpi.dwellMedianH], [1, 0.67]);
+  // the first layer taken is unlabeled: no dwell
+  const v = Engine.compute(v2Input([decl('A', null, 10, D5 + ' 07:00:00')].concat(base,
+    xfer('A', null, 10, D5 + ' 08:40:00', 'PRD2', 'EXP2', 'T1'))));
+  eq(v.pending.map(x => x.label), [lbl(1), lbl(2)]);
+  assert.equal(v.kpi.dwellCount, 0);
 });
 
 test('v2: a label never stored here is stock from before the data; a label already gone is negative; never another label', () => {
@@ -782,7 +789,7 @@ test('v2: an unlabeled issue takes labeled layers FIFO (v1 rule), an unlabeled r
     mv('A', 'PRD2', '132', 'R1', D5, -4, D5 + ' 10:30:00', '') // newest layer: label 2
   ]));
   eq(r.pending.map(x => [x.label, x.qty]), [['', 3], [lbl(2), 6]]);
-  assert.equal(r.kpi.dwellCount, 0);
+  eq([r.kpi.dwellCount, r.kpi.dwellMedianH], [1, 2], 'its first layer is label 1, declared at 08:00');
   assert.equal(r.daily[0].declared, 2, '1 + ceil(5/10) + 1 - ceil(4/10)');
   assert.equal(r.kpi.pendingPallets, 2, 'label 2 (1) + 3 unlabeled units (1)');
 });
@@ -885,8 +892,10 @@ test('v2: pending hours and levels at the 4 h and 6 h boundaries; rows without e
   assert.equal(stuck.length, 1);
   assert.ok(stuck[0].text.includes('Doc.article D0'), stuck[0].text);
   const t = Engine.toTables(r).CALC_EN_ATTENTE;
-  eq(t[2], ['A', 'ART A', '05.10.2026', 'D6', 10, 1, 0, lbl(6), '05.10.2026 14:00:00', 6, 'crit', '']);
-  eq(t[1].slice(7), ['', '', '', 'warn', '']);
+  // the sheet writes the level in French: alerte (crit), pré-alerte (warn)
+  eq(t[2], ['A', 'ART A', '05.10.2026', 'D6', 10, 1, 0, lbl(6), '05.10.2026 14:00:00', 6, 'alerte', '']);
+  eq(t[1].slice(7), ['', '', '', 'pré-alerte', '']);
+  eq(t.slice(3).map(x => x[10]), ['pré-alerte', 'pré-alerte', '', '']);
 
   // Thresholds and project in the texts.
   const c = Engine.compute(v2Input(lines, {
@@ -1087,6 +1096,12 @@ test('v2: placement without any rule or project block spreads every article over
   eq(r.projectsList.map(p => [p.project, p.blocks, p.articles]),
     [['ATLAS', [], 3], ['boreal', [], 1], ['CORSO', [], 1], ['Sans projet', [], 1]]);
 
+  // A project whose blocks are no longer in the layout is a project without blocks: free blocks, no À PLACER.
+  const ghost = Engine.compute(placeInput({ projects: [{ project: 'ATLAS', blocks: ['B9'] }] }));
+  eq(ghost.blocks.map(b => [b.id, b.pallets, b.title]), r.blocks.map(b => [b.id, b.pallets, b.title]));
+  assert.equal(ghost.toPlace.pallets, 0);
+  eq(ghost.projectsList[0].blocks, []);
+
   // Every block targeted and an article without a rule: it goes to À PLACER (v1).
   const full = Engine.compute(placeInput({ rules: [{ priority: 1, criterion: 'PROJET', value: 'atlas', blocks: 'B1 B2 B3 B4' }] }));
   eq(full.blocks.map(b => b.title), ['ATLAS', 'ATLAS', 'ATLAS', 'ATLAS'], 'a PROJET rule of REGLES_PLACEMENT');
@@ -1170,6 +1185,147 @@ test('v2: the browser copy without CFG gives the same state (built-in palette, u
   const t = engine.compute(noThr).thresholds;
   for (const k of ['satWarn', 'satCrit', 'pendingDaysWarn', 'dockStagingWarn', 'pendingHoursWarn', 'pendingHoursCrit', 'labelIsPallet', 'trackAll']) {
     assert.equal(t[k], CFG.THRESHOLDS[k], k);
+  }
+});
+
+test('v2: thresholds read from PARAM_SEUILS as text (decimal comma, 1 / 0, empty = default)', () => {
+  const lines = [decl('A', 1, 10, D5 + ' 08:00:00'), decl('A', 2, 10, D5 + ' 10:00:00'), decl('Z', 3, 10, D5 + ' 13:45:00')];
+  const r = Engine.compute(v2Input(lines, { articles: [{ article: 'A' }, { article: 'Z' }],
+    thresholds: Object.assign({}, CFG.THRESHOLDS, { pendingHoursWarn: '3,5', pendingHoursCrit: '5,75', labelIsPallet: '0', trackAll: '' }) }));
+  eq([r.thresholds.pendingHoursWarn, r.thresholds.pendingHoursCrit, r.thresholds.labelIsPallet, r.thresholds.trackAll], [3.5, 5.75, 0, 0]);
+  eq(r.pending.map(x => [x.label, x.hours, x.level]), [[lbl(1), 5.75, 'crit'], [lbl(2), 3.75, 'warn'], [lbl(3), 0, '']]);
+  assert.equal(r.alerts[0].text, '1 palette en PRD2 depuis plus de 5,75 h · la plus ancienne : A depuis 5 h 45 (étiquette ' + lbl(1) + ')');
+});
+
+// Differential check of the label-aware layers (label index, unlabeled queue, compaction) against a naive model of
+// SPEC 4.4-4.6 written with plain arrays: random lines with reused labels, re-scans, reversals, unpaired legs, gaps.
+function randomLines(seed, n) {
+  let s = seed;
+  const rnd = () => ((s = (s * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  const out = [];
+  let t = Date.UTC(2026, 9, 1) / 1000, doc = 1000;
+  const fmt = (sec) => new Date(sec * 1000).toISOString().replace('T', ' ').slice(0, 19);
+  const post = (sec) => { // entries between 00:00 and 01:59 are posted on the previous day
+    const d = new Date(sec * 1000);
+    if (d.getUTCHours() < 2) d.setUTCDate(d.getUTCDate() - 1);
+    return d.toISOString().slice(0, 10);
+  };
+  const add = (a, mag, mvt, d, qty, sec, label) => out.push(mv(a, mag, mvt, String(d), post(sec), qty, fmt(sec), label));
+  while (out.length < n) {
+    t += Math.floor(rnd() * 900) + (rnd() < 0.01 ? 30 * 3600 : 0);
+    const a = pick(['A', 'B', 'C']), q = pick([6, 6, 6, 8, 12, 12, 3]), r = rnd(), d = ++doc;
+    const label = rnd() < 0.25 ? '' : lbl(Math.floor(rnd() * 40));
+    if (r < 0.35) add(a, rnd() < 0.85 ? 'PRD2' : 'EXP2', '131', d, q, t, label);
+    else if (r < 0.70) {
+      const from = rnd() < 0.8 ? 'PRD2' : pick(['EXP2', 'EMRT']);
+      let to = rnd() < 0.8 ? 'EXP2' : pick(['PRD2', 'EMRT']);
+      if (to === from) to = from === 'EXP2' ? 'PRD2' : 'EXP2';
+      add(a, from, '311', d, -q, t, label);
+      if (rnd() < 0.97) add(a, to, '311', d, q, t, label);
+    } else if (r < 0.80) add(a, 'EXP2', '601', d, -q * (1 + Math.floor(rnd() * 3)), t, rnd() < 0.5 ? '' : label);
+    else if (r < 0.85) add(a, 'PRD2', '132', d, -q, t, label);
+    else if (r < 0.90) { add(a, 'EXP2', '312', d, -q, t, label); add(a, 'PRD2', '312', d, q, t, label); }
+    else if (r < 0.93) add(a, 'EXP2', '602', d, q, t, '');
+    else if (r < 0.96) add(a, 'EMRT', '311', d, q, t, '');
+    else add(a, 'PRD2', '311', d, -q, t, label);
+  }
+  return out;
+}
+
+function naiveModel(lines, labelIsPallet) {
+  const ls = lines.map((l, i) => Object.assign({}, l, { i, q: Math.round(l.qty * 1000), kind: CFG.MVT_KINDS[l.mvt] }));
+  const c = (a, b) => (a < b ? -1 : (a > b ? 1 : 0));
+  ls.sort((a, b) => c(a.date, b.date) || c(a.ts, b.ts) || c(a.doc, b.doc) || ((a.q < 0 ? 0 : 1) - (b.q < 0 ? 0 : 1)) || (a.i - b.i));
+  const other = (l) => {
+    const o = ls.find(x => x !== l && x.doc === l.doc && x.article === l.article && (x.q > 0) !== (l.q > 0));
+    return o ? o.magasin : '';
+  };
+  const counts = {};
+  for (const l of ls) if (l.label && l.q > 0) (counts[l.article] = counts[l.article] || []).push(l.q);
+  const qpp = {};
+  for (const a of Object.keys(counts).sort()) {
+    const n = {};
+    counts[a].forEach(q => { n[q] = (n[q] || 0) + 1; });
+    qpp[a] = Object.keys(n).map(Number).sort((x, y) => (n[y] - n[x]) || (y - x))[0];
+  }
+  const buckets = {}, seen = {}, daily = {}, dwell = {};
+  let seq = 0, preData = 0, negative = 0;
+  const sec = (ts) => Date.parse(ts.replace(' ', 'T') + 'Z') / 1000;
+  for (const l of ls) {
+    const key = l.article + '|' + l.magasin, layers = buckets[key] = buckets[key] || [];
+    const day = daily[l.date] = daily[l.date] || { declared: 0, entries: 0, exits: 0 };
+    const q = qpp[l.article] || 0, pal = labelIsPallet && l.label ? 1 : (q ? Math.ceil(Math.abs(l.q) / q) : 0);
+    const rev = /_REV$/.test(l.kind);
+    if (l.q > 0) {
+      layers.push({ qty: l.q, label: l.label, ts: l.ts, seq: seq++ });
+      if (l.label) (seen[key] = seen[key] || new Set()).add(l.label);
+      if (l.magasin === 'EXP2' && !rev) day.entries += pal;
+    } else {
+      let need = -l.q;
+      const taken = [];
+      const takeFrom = (list) => list.forEach(L => {
+        if (need <= 0 || L.qty <= 0) return;
+        const t = Math.min(need, L.qty);
+        L.qty -= t;
+        need -= t;
+        taken.push(L);
+      });
+      if (l.label) {
+        takeFrom(layers.filter(L => L.label === l.label));
+        takeFrom(layers.filter(L => !L.label));
+        if (need > 0) seen[key] && seen[key].has(l.label) ? negative++ : preData++;
+      } else {
+        takeFrom(rev ? layers.slice().reverse() : layers);
+        if (need > 0) negative++;
+      }
+      if (l.magasin === 'EXP2' && !rev) day.exits += pal;
+      if (l.magasin === 'PRD2' && other(l) === 'EXP2' && taken.length && taken[0].label) {
+        (dwell[l.date] = dwell[l.date] || []).push(sec(l.ts) - sec(taken[0].ts));
+      }
+    }
+    if (l.kind === 'DECL') day.declared += pal;
+    else if (l.kind === 'DECL_REV') day.declared -= pal;
+  }
+  return { buckets, qpp, daily, dwell, preData, negative };
+}
+
+test('v2: label-aware layers match a naive model of SPEC 4.4-4.6 on random data (labelIsPallet 1 and 0)', () => {
+  for (const seed of [3, 9, 11]) {
+    const lines = randomLines(seed, 2500);
+    for (const lip of [1, 0]) {
+      const m = naiveModel(lines, lip);
+      const r = Engine.compute(v2Input(lines, { blocks: [], thresholds: Object.assign({}, CFG.THRESHOLDS, { labelIsPallet: lip }) }));
+      const what = `seed ${seed} labelIsPallet ${lip}`;
+      eq([r.counts.preData, r.counts.negative], [m.preData, m.negative], what + ' preData, negative');
+      eq(r.learnedQpp, Object.fromEntries(Object.entries(m.qpp).map(([a, q]) => [a, q / 1000])), what + ' learned qpp');
+      // live layers in seq order: PRD2 = pending rows, EXP2 = FIFO rows (each row carries its seq)
+      const rows = {};
+      r.pending.forEach(x => (rows[x.article + '|PRD2'] = rows[x.article + '|PRD2'] || []).push(x));
+      r.fifo.forEach(x => (rows[x.article + '|EXP2'] = rows[x.article + '|EXP2'] || []).push(x));
+      const pallets = { PRD2: 0, EXP2: 0, EMRT: 0 };
+      for (const [key, layers] of Object.entries(m.buckets)) {
+        const [art, mag] = key.split('|'), live = layers.filter(L => L.qty > 0), q = m.qpp[art] || 0;
+        const nLab = live.filter(L => L.label).length, unl = live.filter(L => !L.label).reduce((t, L) => t + L.qty, 0);
+        const tot = live.reduce((t, L) => t + L.qty, 0);
+        pallets[mag] += !q ? 0 : (lip && nLab ? nLab + Math.ceil(unl / q) : Math.ceil(tot / q));
+        if (mag === 'EMRT') {
+          assert.equal(r.stock.find(s => s.article === art).qty.EMRT, tot / 1000, what + ' ' + key);
+          continue;
+        }
+        eq((rows[key] || []).sort((a, b) => a.seq - b.seq).map(x => [x.qty, x.label, x.ts]),
+          live.map(L => [L.qty / 1000, L.label, L.ts]), what + ' ' + key);
+      }
+      eq([r.kpi.pendingPallets, r.kpi.exp2Pallets, r.kpi.emrtPallets], [pallets.PRD2, pallets.EXP2, pallets.EMRT], what + ' pallets');
+      assert.equal(r.pending.reduce((t, x) => t + (x.pallets || 0), 0), r.kpi.pendingPallets, what + ' pending rows');
+      assert.equal(r.fifo.reduce((t, x) => t + (x.pallets || 0), 0), r.kpi.exp2Pallets, what + ' FIFO rows');
+      for (const d of r.daily) {
+        eq({ declared: d.declared, entries: d.entries, exits: d.exits }, m.daily[d.date] || { declared: 0, entries: 0, exits: 0 }, what + ' ' + d.date);
+        const s = plain(Engine.dwellStats(m.dwell[d.date] || []));
+        eq([d.dwellCount, d.dwellMedianH, d.dwellP90H], [s.count, s.medianH, s.p90H], what + ' dwell ' + d.date);
+      }
+      assert.ok(r.counts.preData > 0 && r.counts.negative > 0 && r.kpi.dwellCount >= 0, what);
+    }
   }
 });
 
