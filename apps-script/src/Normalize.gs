@@ -7,16 +7,19 @@
  * so everything lives inside the factory and CFG is only read lazily, when it exists.
  *
  * Input rows (rows2d) are arrays of raw cell values, every physical row kept (blank ones included):
- *   - SheetJS: XLSX.utils.sheet_to_json(ws, Norm.SHEETJS_OPTIONS)  (Excel dates arrive as serial numbers)
- *   - Apps Script: range.getValues()                                  (dates arrive as Date objects)
+ *   - SheetJS: XLSX.utils.sheet_to_json(ws, Norm.SHEETJS_OPTIONS)  (Excel dates and times arrive as serial numbers)
+ *   - Apps Script: range.getValues()                                  (dates and times arrive as Date objects)
  *   - text exports (.txt / .csv): Norm.textToRows(decodedText)        (windows-1252 decoded by the caller)
  *
- * Contract: docs/ARCHITECTURE.md section 6. Oracle: sample-data/messy/ (README.md and expected.json).
+ * Contract: docs/ARCHITECTURE.md section 6 and docs/SPEC_V2.md section 2 (real 22-column export: entry time,
+ * label numbers in the texts, finished-goods filter). Oracles: sample-data/messy/ (README.md and expected.json)
+ * and sample-data/mb51-reel/expected.json (tools/mb51_reference.py).
  */
 function NormalizeModule_() {
-  // Movement line fields, in MOUVEMENTS column order (Clé, Source, Import, Ajouté le are added by Repo).
+  // Movement line fields, in MOUVEMENTS column order (Clé, Source, Import, Ajouté le are added by Repo), then the
+  // optional columns of the real export (docs/SPEC_V2.md 2.1). entryDate and entryTime only feed line.ts.
   var FIELDS = ['article', 'division', 'magasin', 'mvt', 'text', 's', 'doc', 'poste', 'date', 'qty', 'uqs',
-    'designation', 'user'];
+    'designation', 'user', 'entryDate', 'entryTime', 'headerText', 'itemText', 'reference', 'client', 'salesOrder'];
   // What to do when a file is not recognised (appended to the header errors).
   var REEXPORT_HINT = ' Exportez la liste MB51 (Liste des documents article) avec la mise en forme habituelle, ' +
     'sans la retravailler dans Excel, puis déposez-la à nouveau.';
@@ -26,12 +29,16 @@ function NormalizeModule_() {
   var FIELD_LABELS = {
     article: 'Article', division: 'Division', magasin: 'Magasin', mvt: 'MvT', text: 'Texte code mvt', s: 'S',
     doc: 'Doc.article', poste: 'Poste', date: 'Date cpt.', qty: 'Qté en UQS', uqs: 'UQS',
-    designation: 'Désignation article', user: 'Nom utilisateur'
+    designation: 'Désignation article', user: 'Nom utilisateur', entryDate: 'Date de saisie',
+    entryTime: 'Heure de saisie', headerText: "Texte d'en-tête pièce", itemText: 'Texte', reference: 'Référence',
+    client: 'Client', salesOrder: 'Commande client'
   };
 
   // Header synonyms per field, French and English, short and long ALV labels, plus SAP field names.
-  // Compared after normLabel_ (case, accents, spaces and punctuation ignored). Order = priority inside a field:
-  // the unit-of-entry quantity wins over the base-unit quantity when both columns are exported.
+  // Compared after normLabel_ (case, accents, spaces and punctuation ignored), exact match only, so a generic
+  // synonym ('Texte', 'Heure', 'Référence') never takes a longer label ('Texte code mouvement', 'Référence article').
+  // A normalised synonym belongs to one field only. Order = priority inside a field: the unit-of-entry quantity
+  // wins over the base-unit quantity when both columns are exported.
   var SYNONYMS = {
     article: ['Article', 'N° article', 'Numéro article', "Numéro d'article", 'Code article', 'Réf. article',
       'Référence article', 'Matériel', 'Material', 'Material Number', 'Matl', 'MATNR'],
@@ -52,27 +59,41 @@ function NormalizeModule_() {
       'Mat. Doc. Item', 'Material Doc. Item', 'Material Document Item', 'Matl Doc. Item', 'MatDoc Item', 'ZEILE'],
     date: ['Date cpt.', 'Date comptable', 'Date de comptabilisation', 'Date comptabilisation', 'Date compta.',
       'Date cptable', 'Date compt.', 'Pstng Date', 'Posting Date', 'Postg Date', 'Post. Date', 'BUDAT'],
-    qty: ['Qté en UQS', 'Quantité en UQS', 'Qté en unité de saisie', 'Quantité en unité de saisie', 'Qté UQS',
+    qty: ['Qté en UQS', 'Quantité en UQS', 'Qté en unité de saisie', 'Quantité en unité de saisie',
+      'Qté en unité saisie', 'Quantité en unité saisie', 'Qté unité saisie', 'Qté UQS',
       'Qté saisie', 'Quantité saisie', 'Qty in UnE', 'Qty in Un. of Entry', 'Qty in unit of entry',
       'Quantity in UnE', 'Quantity in Unit of Entry', 'ERFMG', 'Quantité', 'Qté', 'Quantity', 'Qty',
       'Qté en UQB', 'Quantité en UQB', 'Qté en unité de base', 'Quantité en unité de base', 'Qty in BUn',
       'Quantity in Base Unit', 'MENGE'],
-    uqs: ['UQS', 'Unité de saisie', 'Unité qté saisie', 'Unité de quantité de saisie', 'UnE', 'EUn', 'Entry Unit',
-      'Unit of Entry', 'Un. of Entry', 'ERFME', 'Unité', 'Unit', 'UQB', 'Unité de base', 'Unité de quantité de base',
-      'Unité qté base', 'BUn', 'Base Unit of Measure', 'Base Unit', 'MEINS'],
+    uqs: ['UQS', 'Unité de saisie', 'UQ de saisie', 'UQ saisie', 'Unité saisie', 'Unité qté saisie',
+      'Unité de quantité de saisie', 'UnE', 'EUn', 'Entry Unit', 'Unit of Entry', 'Un. of Entry', 'ERFME', 'Unité',
+      'Unit', 'UQB', 'Unité de base', 'Unité de quantité de base', 'Unité qté base', 'BUn', 'Base Unit of Measure',
+      'Base Unit', 'MEINS'],
     designation: ['Désignation article', 'Désignation', 'Désignation matériel', 'Texte article',
       'Texte court article', 'Libellé article', 'Material Description', 'Matl Description', 'Matl Desc.',
       'Material Text', 'Description', 'MAKTX'],
     user: ['Nom utilisateur', "Nom d'utilisateur", "Nom de l'utilisateur", 'Utilisateur', 'Code utilisateur',
-      'Saisi par', 'Créé par', 'User name', 'Username', 'User', 'Entered by', 'Created by', 'USNAM']
+      'Saisi par', 'Créé par', 'User name', 'Username', 'User', 'Entered by', 'Created by', 'USNAM'],
+    entryDate: ['Date de saisie', 'Date saisie', 'Saisi le', 'Entry Date', 'Entered on', 'CPUDT'],
+    entryTime: ['Heure de saisie', 'Heure saisie', 'Heure', 'Time of Entry', 'Entry Time', 'Time', 'CPUTM'],
+    headerText: ["Texte d'en-tête pièce", 'Texte en-tête pièce', "Texte d'en-tête", 'Texte en-tête',
+      'Document Header Text', 'Doc. Header Text', 'BKTXT'],
+    itemText: ['Texte', 'Texte poste', 'Texte du poste', 'Item Text', 'Text', 'SGTXT'],
+    reference: ['Référence', 'Reference', 'Réf.', 'XBLNR'],
+    client: ['Client', 'Customer', 'KUNNR'],
+    salesOrder: ['Commande client', 'Cde client', 'Sales Order', 'Sales Document', 'KDAUF']
   };
 
   // Recommended SheetJS reading options: raw cell values, every physical row kept.
   var SHEETJS_OPTIONS = { header: 1, raw: true, defval: null, blankrows: true };
 
+  // Label (container number) patterns, used when CFG.LABEL is absent (browser copy without CFG): same values.
+  var LABEL_DEFAULTS = { itemRe: '^\\d{6,12}$', headerRe: '^(\\d{6,12})(?:[_|].*)?$', headerMvts: ['101', '102', '131', '132'] };
+
   var HEADER_SCAN_ROWS = 50;         // rows inspected to find the header (title / blank lines may come first)
   var TRANSFER_MVTS = ['311', '312']; // documents whose legs must cancel out
   var MS_PER_DAY = 86400000;
+  var labelCache_ = null;            // compiled label patterns, rebuilt when CFG.LABEL changes
 
   var SYN_NORM = {};   // field -> normalized synonyms, priority order
   FIELDS.forEach(function (f) {
@@ -186,8 +207,18 @@ function NormalizeModule_() {
     return typeof CFG !== 'undefined' && CFG && CFG.PLANT ? CFG.PLANT : 'TA11';
   }
 
+  // Same defaults as CFG.AUTO_USERS (automatic scan user and the SAP batch job user).
   function autoUsers_() {
-    return typeof CFG !== 'undefined' && CFG && CFG.AUTO_USERS ? CFG.AUTO_USERS : ['BARFLOW_TA11'];
+    return typeof CFG !== 'undefined' && CFG && CFG.AUTO_USERS ? CFG.AUTO_USERS : ['BARFLOW_TA11', 'ADMINJOB'];
+  }
+
+  function exp2Code_() {
+    return typeof CFG !== 'undefined' && CFG && CFG.MAGASINS && CFG.MAGASINS.EXP2 ? String(CFG.MAGASINS.EXP2) : 'EXP2';
+  }
+
+  // Free text of a cell; a number (a label typed in a numeric cell) becomes its integer text, never '4.3E+08'.
+  function textOrCode_(v) {
+    return typeof v === 'number' ? codeText_(v, false) : cleanText_(v);
   }
 
   function cell_(row, col) {
@@ -319,6 +350,57 @@ function NormalizeModule_() {
     return null;
   }
 
+  // Seconds since midnight -> 'hh:mm:ss'; rounding up to 86400 stays on the same day (23:59:59, never 24:00:00).
+  function hmsFromSeconds_(sec) {
+    if (sec >= 86400) sec = 86399;
+    return pad2_(Math.floor(sec / 3600)) + ':' + pad2_(Math.floor(sec / 60) % 60) + ':' + pad2_(sec % 60);
+  }
+
+  function hmsChecked_(h, mi, se) {
+    if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59 && se >= 0 && se <= 59)) return null;
+    return pad2_(h) + ':' + pad2_(mi) + ':' + pad2_(se);
+  }
+
+  /**
+   * Entry time from a cell -> 'hh:mm:ss', or null when empty or unreadable (docs/SPEC_V2.md 2.2).
+   * Accepts a day fraction (0.4547916 = 10:54:54, rounded to the second), an Excel date-time serial (its fractional
+   * part), a JS Date (local hours: Apps Script gives time cells as Dates of 1899-12-30), text 'h:mm', 'hh:mm:ss',
+   * 'hh:mm:ss AM/PM' (12 AM = 00), 'hhmmss' (SAP, 6 digits), optionally after a date ('05.10.2026 10:54:54').
+   */
+  function parseTime(v) {
+    if (v === null || v === undefined) return null;
+    if (isDate_(v)) {
+      if (isNaN(v.getTime())) return null;
+      // Rounded to the nearest second: a time cell read back as 10:54:53.999 is 10:54:54.
+      return hmsFromSeconds_(Math.round((v.getHours() * 3600000 + v.getMinutes() * 60000 + v.getSeconds() * 1000 +
+        v.getMilliseconds()) / 1000));
+    }
+    if (typeof v === 'number') {
+      if (!isFinite(v) || v < 0) return null;
+      return hmsFromSeconds_(Math.round((v - Math.floor(v)) * 86400));
+    }
+    if (typeof v !== 'string') return null;
+    var s = v.replace(/\s+/g, ' ').trim(); // \s covers the no-break and narrow spaces
+    if (!s) return null;
+    // A date before the time (date-time text): the date is checked, then ignored.
+    var dt = /^(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}|\d{4}[-\/.]\d{1,2}[-\/.]\d{1,2})(?: |T)(.+)$/.exec(s);
+    if (dt) {
+      if (!parseDate(dt[1])) return null;
+      s = dt[2];
+    }
+    if (/^\d{6}$/.test(s)) return hmsChecked_(+s.slice(0, 2), +s.slice(2, 4), +s.slice(4, 6));
+    var m = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?(?: ?([AaPp])\.? ?[Mm]\.?)?$/.exec(s);
+    if (!m) return null;
+    var h = +m[1];
+    if (m[4]) {
+      var pm = m[4].toUpperCase() === 'P';
+      if (h > 12 || (h === 0 && pm)) return null;
+      if (h === 12) h = 0;
+      if (pm) h += 12;
+    }
+    return hmsChecked_(h, +m[2], m[3] ? +m[3] : 0);
+  }
+
   /**
    * Canonical user name. Automatic users are compared with spaces, '_', '-', '.' and case ignored:
    * 'BAR FLOW TA11', 'barflow_ta11' -> 'BARFLOW_TA11'. Other users are trimmed and upper-cased.
@@ -344,6 +426,59 @@ function NormalizeModule_() {
   // Screens never show user names: 'Auto' (BARFLOW) or 'Manuel'.
   function userKind(v) {
     return isAutoUser(v) ? 'Auto' : 'Manuel';
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Labels (container numbers)
+
+  function regExp_(src, fallback) {
+    if (Object.prototype.toString.call(src) === '[object RegExp]') {
+      return new RegExp(src.source, src.ignoreCase ? 'i' : ''); // no 'g': test() must not keep a lastIndex
+    }
+    try {
+      return new RegExp(String(src));
+    } catch (e) {
+      return new RegExp(fallback);
+    }
+  }
+
+  // CFG.LABEL (or the same defaults), compiled once per distinct configuration.
+  function labelRules_() {
+    var cfg = typeof CFG !== 'undefined' && CFG && CFG.LABEL ? CFG.LABEL : LABEL_DEFAULTS;
+    var item = cfg.itemRe || LABEL_DEFAULTS.itemRe;
+    var header = cfg.headerRe || LABEL_DEFAULTS.headerRe;
+    var mvts = Array.isArray(cfg.headerMvts) ? cfg.headerMvts : LABEL_DEFAULTS.headerMvts;
+    var src = String(item) + '\n' + String(header) + '\n' + mvts.join(',');
+    if (labelCache_ && labelCache_.src === src) return labelCache_;
+    var rules = { src: src, itemRe: regExp_(item, LABEL_DEFAULTS.itemRe), headerRe: regExp_(header, LABEL_DEFAULTS.headerRe),
+      headerMvts: {} };
+    mvts.forEach(function (m) { rules.headerMvts[codeText_(m, false)] = true; });
+    labelCache_ = rules;
+    return rules;
+  }
+
+  /**
+   * Label (container number, one pallet) of a movement line (docs/SPEC_V2.md 2.3): the item text when it matches
+   * CFG.LABEL.itemRe ('434505101' on a 311 scan), else for a declaration (headerMvts) group 1 of headerRe in the
+   * header text ('434514671|20261005010841' -> '434514671'), else ''. Tolerates raw values (numbers).
+   */
+  function labelOf(line) {
+    if (!line) return '';
+    var rules = labelRules_();
+    var item = textOrCode_(line.itemText);
+    if (item && rules.itemRe.test(item)) return item;
+    var mvt = codeText_(line.mvt, false);
+    if (!Object.prototype.hasOwnProperty.call(rules.headerMvts, mvt)) return '';
+    var header = textOrCode_(line.headerText);
+    var m = header ? rules.headerRe.exec(header) : null;
+    if (!m) return '';
+    return m[1] !== undefined ? m[1] : m[0];
+  }
+
+  // A line carries a label: its label field when present (normalised or saved lines), else derived from its texts.
+  function isLabeled_(line) {
+    if (line.label !== undefined && line.label !== null) return cleanText_(line.label) !== '';
+    return labelOf(line) !== '';
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -458,12 +593,15 @@ function NormalizeModule_() {
    *         (optional: flags ANTIDATE lines here; do not also pass it to flagTransfers for the same lines) }
    * -> { ok, error, file, plant, headerRow, preamble, mapping, dataRows,
    *      lines: [{ key, article, division, magasin, mvt, text, s, doc, poste, date, qty, uqs, designation, user,
-   *                source, file, row, rank }],
+   *                ts, label, headerText, itemText, reference, client, salesOrder, source, file, row, rank }],
    *      skipped: { header, subtotal, blank, other }, skippedRows: [{ row, kind }],
    *      rejected: [{ row, file, reason, doc, article, division, magasin, mvt }], flags: [], warnings: [] }
    * Rows after the header: blank -> skipped.blank; header repeated -> skipped.header; no Doc.article but a quantity
    * (subtotals, totals) -> skipped.subtotal; no Doc.article and no quantity (notes, separators) -> skipped.other;
    * every other row is a data row, valid or rejected with a French reason.
+   * v2 fields (docs/SPEC_V2.md 2.2) are text, '' when unknown: ts = 'yyyy-mm-dd hh:mm:ss' from the entry date (else
+   * the posting date) and the entry time, '' without a readable time (the line is still valid, a warning counts it);
+   * label from labelOf; reference keeps its leading zeros, client and salesOrder lose them when all digits.
    */
   function normalizeRows(rows2d, opts) {
     opts = opts || {};
@@ -496,6 +634,8 @@ function NormalizeModule_() {
     if (idx.division === undefined && plant) {
       res.warnings.push('Colonne Division absente : le filtre division ' + plant + " n'est pas appliqué.");
     }
+    var hasTime = idx.entryTime !== undefined;
+    var badTimes = 0;
     var ranks = {};
 
     function skip(kind, rowNo) {
@@ -536,6 +676,13 @@ function NormalizeModule_() {
         uqs: cleanText_(cell_(row, idx.uqs)).toUpperCase(),
         designation: cleanText_(cell_(row, idx.designation)),
         user: canonUser(cell_(row, idx.user)),
+        ts: '',
+        label: '',
+        headerText: textOrCode_(cell_(row, idx.headerText)),
+        itemText: textOrCode_(cell_(row, idx.itemText)),
+        reference: codeText_(cell_(row, idx.reference), false),
+        client: codeText_(cell_(row, idx.client), true),
+        salesOrder: codeText_(cell_(row, idx.salesOrder), true),
         source: source,
         file: file,
         row: rowNo,
@@ -565,12 +712,24 @@ function NormalizeModule_() {
         continue;
       }
       if (!line.division) line.division = plant;
+      if (hasTime) {
+        // Wall-clock time of SAP kept as text (no time zone, no Date object).
+        var timeRaw = cell_(row, idx.entryTime);
+        var time = parseTime(timeRaw);
+        if (time) line.ts = (parseDate(cell_(row, idx.entryDate)) || line.date) + ' ' + time;
+        else if (!isEmpty_(timeRaw)) badTimes++;
+      }
+      line.label = labelOf(line);
 
       var id = identityOf_(line);
       ranks[id] = (ranks[id] || 0) + 1;
       line.rank = ranks[id];
       line.key = keyOf(line, line.rank);
       res.lines.push(line);
+    }
+    if (badTimes) {
+      res.warnings.push(plural_(badTimes, 'ligne', 'lignes') + ' avec une ' + FIELD_LABELS.entryTime.toLowerCase() +
+        ' illisible : ' + (badTimes > 1 ? 'acceptées' : 'acceptée') + ' sans horodatage (attente comptée en jours).');
     }
     if (opts.lastImportedDate) res.flags = antidateFlags_(res.lines, opts.lastImportedDate);
     res.ok = true;
@@ -668,10 +827,86 @@ function NormalizeModule_() {
     return { fresh: fresh, duplicates: duplicates };
   }
 
+  // ---------------------------------------------------------------------------------------------------------------
+  // Finished-goods filter
+
+  // Tracked article codes -> { CODE: true } (upper case). Accepts an array of codes or of { article } / { a }
+  // objects (state.articles), a Set, a Map (keys) or a { code: true } object.
+  function trackedSet_(tracked) {
+    var set = {};
+    function add(v) {
+      if (v && typeof v === 'object' && !isDate_(v)) v = v.article !== undefined ? v.article : v.a;
+      var c = codeText_(v, true);
+      if (c) set[c.toUpperCase()] = true;
+    }
+    if (!tracked) return set;
+    if (Array.isArray(tracked)) {
+      tracked.forEach(add);
+    } else if (typeof tracked.forEach === 'function' && typeof tracked.has === 'function') {
+      if (typeof tracked.get === 'function') tracked.forEach(function (v, k) { add(k); });
+      else tracked.forEach(function (v) { add(v); });
+    } else if (typeof tracked === 'object') {
+      Object.keys(tracked).forEach(function (k) {
+        if (tracked[k]) add(k);
+      });
+    } else {
+      add(tracked);
+    }
+    return set;
+  }
+
+  // Keep test of the filter over a whole batch: { keep(line), batchTracked: [code] (sorted) }.
+  function trackedTest_(lines, tracked) {
+    var exp2 = exp2Code_();
+    var set = trackedSet_(tracked);
+    var batch = {}, batchCodes = {};
+    lines.forEach(function (l) {
+      if (!l || cleanText_(l.magasin).toUpperCase() !== exp2) return;
+      var a = codeText_(l.article, true);
+      batch[a.toUpperCase()] = true;
+      batchCodes[a] = true;
+    });
+    return {
+      batchTracked: Object.keys(batchCodes).sort(),
+      keep: function (l) {
+        if (cleanText_(l.magasin).toUpperCase() === exp2) return true;
+        var a = codeText_(l.article, true).toUpperCase();
+        return Object.prototype.hasOwnProperty.call(set, a) || Object.prototype.hasOwnProperty.call(batch, a);
+      }
+    };
+  }
+
+  /**
+   * Finished-goods filter (docs/SPEC_V2.md 2.4): a line is kept when its article is tracked (known tracked
+   * articles, see trackedSet_) or has a line in EXP2 among lines (batchTracked), or when the line is in EXP2.
+   * Does not modify its inputs.
+   * -> { kept: [line], dropped: [line], keptArticles, droppedArticles, batchTracked } (article codes, sorted)
+   */
+  function filterTracked(lines, tracked) {
+    var list = Array.isArray(lines) ? lines : [];
+    var t = trackedTest_(list, tracked);
+    var out = { kept: [], dropped: [], keptArticles: [], droppedArticles: [], batchTracked: t.batchTracked };
+    var ka = {}, da = {};
+    list.forEach(function (l) {
+      if (!l) return;
+      if (t.keep(l)) {
+        out.kept.push(l);
+        ka[codeText_(l.article, true)] = true;
+      } else {
+        out.dropped.push(l);
+        da[codeText_(l.article, true)] = true;
+      }
+    });
+    out.keptArticles = Object.keys(ka).sort();
+    out.droppedArticles = Object.keys(da).sort();
+    return out;
+  }
+
   function flag_(code, line, text) {
     return {
       code: code, text: text, file: line.file || '', row: line.row, doc: line.doc, article: line.article,
-      magasin: line.magasin, mvt: line.mvt, qty: line.qty, uqs: line.uqs, date: line.date, key: line.key
+      magasin: line.magasin, mvt: line.mvt, qty: line.qty, uqs: line.uqs, date: line.date, key: line.key,
+      label: line.label || ''
     };
   }
 
@@ -692,10 +927,13 @@ function NormalizeModule_() {
 
   /**
    * Batch checks, run once on the fresh lines of all files of an import:
-   *  - TRANSFERT_ORPHELIN: lines of a 311/312 document whose legs do not cancel out (sum per Doc.article and
-   *    Article != 0). opts.knownLines (lines already saved) take part in the pairing but are never flagged.
+   *  - TRANSFERT_ORPHELIN: unlabeled lines of a 311/312 document whose legs do not cancel out (sum per Doc.article
+   *    and Article != 0). opts.knownLines (lines already saved) take part in the pairing but are never flagged.
+   *    A labeled line (container scan) is never flagged: its other leg is in a storage location outside the
+   *    export (PRD5...), which is normal (docs/SPEC_V2.md 2.5); it still takes part in the sums.
    *  - ANTIDATE: when opts.lastImportedDate is given, lines dated before it.
-   * Flagged lines are still accepted. -> [{ code, text, file, row, doc, article, magasin, mvt, qty, uqs, date, key }]
+   * Flagged lines are still accepted.
+   * -> [{ code, text, file, row, doc, article, magasin, mvt, qty, uqs, date, key, label }]
    */
   function flagTransfers(lines, opts) {
     opts = opts || {};
@@ -724,6 +962,7 @@ function NormalizeModule_() {
       var G = groups[g];
       if (G.milli === 0 || !G.own.length) return;
       G.own.forEach(function (l) {
+        if (isLabeled_(l)) return;
         flags.push(flag_('TRANSFERT_ORPHELIN', l, 'Transfert orphelin : Doc.article ' + l.doc + ', article ' +
           l.article + ' : les lignes ' + l.mvt + " ne s'annulent pas (solde " + frNumber_(G.milli / 1000) +
           (l.uqs ? ' ' + l.uqs : '') + '). Ligne acceptée, origine inconnue.'));
@@ -736,23 +975,45 @@ function NormalizeModule_() {
   // ---------------------------------------------------------------------------------------------------------------
   // Preview
 
+  // Format of one file for the import page (« Format MB51 reconnu : 22 colonnes · heure de saisie ✓ · étiquettes ✓ »).
+  function formatOf_(r) {
+    var m = r.mapping;
+    var idx = m ? m.index : {};
+    var withTime = 0, withLabel = 0;
+    (r.lines || []).forEach(function (l) {
+      if (l.ts) withTime++;
+      if (l.label) withLabel++;
+    });
+    return {
+      file: r.file || '', columns: m ? m.matched + m.extra.length : 0, hasTime: idx.entryTime !== undefined,
+      hasLabels: withLabel > 0, hasClient: idx.client !== undefined, extra: m ? m.extra.slice() : [],
+      withTime: withTime, withLabel: withLabel
+    };
+  }
+
   /**
    * Preview numbers for one normalizeRows result or an array of them (a batch). When dedupe ran, attach its output
-   * to the result (result.fresh, result.duplicates) to get new / already known counts. batchFlags: optional flags
-   * from flagTransfers to count with the results' own flags.
-   * -> { files, preamble, read, valid, fresh, duplicates, rejected, skipped: { header, subtotal, blank, other, total },
-   *      flags, flagCodes, documents, dateMin, dateMax, byMagasin, byMvt, auto, manual, errors, warnings,
+   * to the result (result.fresh, result.duplicates) to get new / already known counts; when the finished-goods
+   * filter ran, attach the dropped lines (result.untracked) to get untracked counts (null otherwise, like fresh).
+   * batchFlags: optional flags from flagTransfers to count with the results' own flags.
+   * withTime / withLabel count the valid lines (before filter and dedupe); the per-line figures (documents, period,
+   * byMagasin, byMvt, auto, manual) count the fresh lines when known, else the valid ones.
+   * -> { files, preamble, read, valid, fresh, duplicates, untracked, untrackedArticles, rejected,
+   *      skipped: { header, subtotal, blank, other, total }, flags, flagCodes, documents, dateMin, dateMax, byMagasin,
+   *      byMvt, auto, manual, withTime, withLabel,
+   *      format: { file, columns, hasTime, hasLabels, hasClient, extra: [label], withTime, withLabel } (one file,
+   *              else null), formats: [format per file], errors, warnings,
    *      rows: [{ label, value }] (French labels), text (one French sentence) }
    */
   function summarize(result, batchFlags) {
     var list = Array.isArray(result) ? result : [result];
     var s = {
-      files: list.length, preamble: 0, read: 0, valid: 0, fresh: null, duplicates: null, rejected: 0,
-      skipped: { header: 0, subtotal: 0, blank: 0, other: 0, total: 0 }, flags: 0, flagCodes: {},
-      documents: 0, dateMin: '', dateMax: '', byMagasin: {}, byMvt: {}, auto: 0, manual: 0,
-      errors: [], warnings: [], rows: [], text: ''
+      files: list.length, preamble: 0, read: 0, valid: 0, fresh: null, duplicates: null, untracked: null,
+      untrackedArticles: null, rejected: 0, skipped: { header: 0, subtotal: 0, blank: 0, other: 0, total: 0 },
+      flags: 0, flagCodes: {}, documents: 0, dateMin: '', dateMax: '', byMagasin: {}, byMvt: {}, auto: 0, manual: 0,
+      withTime: 0, withLabel: 0, format: null, formats: [], errors: [], warnings: [], rows: [], text: ''
     };
-    var docs = {};
+    var docs = {}, untrackedArticles = {};
     var allFlags = [];
     list.forEach(function (r) {
       if (!r) return;
@@ -768,7 +1029,15 @@ function NormalizeModule_() {
       });
       if (r.fresh) s.fresh = (s.fresh || 0) + r.fresh.length;
       if (r.duplicates) s.duplicates = (s.duplicates || 0) + r.duplicates.length;
+      if (r.untracked) {
+        s.untracked = (s.untracked || 0) + r.untracked.length;
+        r.untracked.forEach(function (l) { untrackedArticles[l.article] = true; });
+      }
       allFlags = allFlags.concat(r.flags || []);
+      var format = formatOf_(r);
+      s.formats.push(format);
+      s.withTime += format.withTime;
+      s.withLabel += format.withLabel;
       (r.fresh || r.lines || []).forEach(function (l) {
         docs[l.doc] = true;
         if (!s.dateMin || l.date < s.dateMin) s.dateMin = l.date;
@@ -779,6 +1048,8 @@ function NormalizeModule_() {
         else s.manual++;
       });
     });
+    if (s.untracked !== null) s.untrackedArticles = Object.keys(untrackedArticles).length;
+    if (s.formats.length === 1) s.format = s.formats[0];
     allFlags = allFlags.concat(batchFlags || []);
     allFlags.forEach(function (f) { s.flagCodes[f.code] = (s.flagCodes[f.code] || 0) + 1; });
     s.flags = allFlags.length;
@@ -795,18 +1066,22 @@ function NormalizeModule_() {
 
     s.rows.push({ label: 'Lignes lues', value: s.read });
     s.rows.push({ label: 'Lignes valides', value: s.valid });
+    if (s.untracked !== null) s.rows.push({ label: 'Hors produits finis (ignorées)', value: s.untracked });
     if (s.fresh !== null) s.rows.push({ label: 'Nouvelles lignes', value: s.fresh });
     if (s.duplicates !== null) s.rows.push({ label: 'Déjà connues (ignorées)', value: s.duplicates });
     s.rows.push({ label: 'Rejetées', value: s.rejected });
     s.rows.push({ label: 'Ignorées (sous-totaux, en-têtes, vides)', value: s.skipped.total });
     s.rows.push({ label: 'Alertes', value: s.flags });
     s.rows.push({ label: 'Documents', value: s.documents });
+    s.rows.push({ label: 'Avec heure de saisie', value: s.withTime });
+    s.rows.push({ label: 'Avec étiquette', value: s.withLabel });
     if (period) s.rows.push({ label: 'Période', value: period });
 
     var parts = [plural_(s.read, 'ligne lue', 'lignes lues')];
     if (s.fresh !== null) parts.push(plural_(s.fresh, 'nouvelle', 'nouvelles'));
     else parts.push(plural_(s.valid, 'valide', 'valides'));
     if (s.duplicates !== null) parts.push(plural_(s.duplicates, 'déjà connue', 'déjà connues'));
+    if (s.untracked) parts.push(s.untracked + ' hors produits finis');
     parts.push(plural_(s.rejected, 'rejetée', 'rejetées'));
     parts.push(plural_(s.skipped.total, 'ignorée', 'ignorées') + (ignored.length ? ' (' + ignored.join(', ') + ')' : ''));
     if (s.flags) parts.push(plural_(s.flags, 'alerte', 'alertes'));
@@ -818,22 +1093,54 @@ function NormalizeModule_() {
   /**
    * Whole import in one call, as the import page and the server need it:
    * files: [{ name, rows (rows2d), firstRow?, headerRow? }] in import order;
-   * opts: { plant, existingKeys, knownLines, lastImportedDate, source }.
-   * Each file is normalised, deduplicated against existingKeys and the earlier files, then the batch checks run
-   * on all fresh lines. -> { ok, errors, files: [result + fresh, duplicates, summary], lines (fresh, file order),
-   *    duplicates, rejected, flags, summary }
+   * opts: { plant, existingKeys, knownLines, lastImportedDate, source, tracked, trackedOnly (default false) }.
+   * Each file is normalised. With trackedOnly, the finished-goods filter (filterTracked with opts.tracked) runs on
+   * the valid lines of all files together, before dedupe: dropped lines are only counted (file result .untracked),
+   * never returned for saving. The kept lines of each file are then deduplicated against existingKeys and the
+   * earlier files, and the batch checks run on all fresh lines.
+   * -> { ok, errors, warnings, files: [result + fresh, duplicates, untracked (trackedOnly), summary],
+   *      lines (fresh, file order), duplicates, rejected, flags, trackedOnly,
+   *      batchTracked: [code] (articles with a line in EXP2 in the files),
+   *      untracked: { lines, articles, list: [code] } (zeros without the filter), summary }
    */
   function normalizeBatch(files, opts) {
     opts = opts || {};
+    var list = (Array.isArray(files) ? files : []).map(function (f) { return f || {}; });
     var known = keyLookup_(opts.existingKeys);
     var added = {};
     var lookup = { has: function (k) { return known(k) || Object.prototype.hasOwnProperty.call(added, k); } };
-    var out = { ok: true, errors: [], files: [], lines: [], duplicates: [], rejected: [], flags: [], summary: null };
-    (files || []).forEach(function (f) {
-      var r = normalizeRows(f.rows, {
+    var out = {
+      ok: true, errors: [], warnings: [], files: [], lines: [], duplicates: [], rejected: [], flags: [],
+      trackedOnly: !!opts.trackedOnly, batchTracked: [], untracked: { lines: 0, articles: 0, list: [] }, summary: null
+    };
+    var results = list.map(function (f) {
+      return normalizeRows(f.rows, {
         plant: opts.plant, file: f.name, firstRow: f.firstRow, headerRow: f.headerRow, source: opts.source
       });
-      var d = dedupe(r.lines, lookup);
+    });
+    var valid = [];
+    results.forEach(function (r) { valid = valid.concat(r.lines); });
+    var test = trackedTest_(valid, opts.tracked);
+    out.batchTracked = test.batchTracked;
+    var droppedArticles = {};
+
+    results.forEach(function (r, i) {
+      var f = list[i];
+      var kept = r.lines;
+      if (out.trackedOnly) {
+        kept = [];
+        r.untracked = [];
+        r.lines.forEach(function (l) {
+          if (test.keep(l)) {
+            kept.push(l);
+          } else {
+            r.untracked.push(l);
+            droppedArticles[l.article] = true;
+          }
+        });
+        out.untracked.lines += r.untracked.length;
+      }
+      var d = dedupe(kept, lookup);
       d.fresh.forEach(function (l) { added[l.key] = true; });
       r.fresh = d.fresh;
       r.duplicates = d.duplicates;
@@ -846,11 +1153,19 @@ function NormalizeModule_() {
       out.duplicates = out.duplicates.concat(d.duplicates);
       out.rejected = out.rejected.concat(r.rejected);
     });
+    out.untracked.list = Object.keys(droppedArticles).sort();
+    out.untracked.articles = out.untracked.list.length;
+    // Everything dropped: nothing reaches EXP2 and nothing is tracked yet (a first import of declarations only).
+    if (out.trackedOnly && valid.length && out.untracked.lines === valid.length) {
+      out.warnings.push("Aucune ligne de produit fini : aucun article des fichiers ne passe par EXP2 ni n'est déjà " +
+        'suivi. Cochez « Importer aussi les articles hors produits finis » pour tout importer.');
+    }
     out.flags = flagTransfers(out.lines, { lastImportedDate: opts.lastImportedDate, knownLines: opts.knownLines });
     out.files.forEach(function (r) {
       r.summary = summarize(r, out.flags.filter(function (fl) { return fl.file === r.file; }));
     });
     out.summary = summarize(out.files, out.flags);
+    out.warnings.forEach(function (w) { out.summary.warnings.push(w); });
     return out;
   }
 
@@ -869,10 +1184,13 @@ function NormalizeModule_() {
     canonUser: canonUser,
     isAutoUser: isAutoUser,
     userKind: userKind,
+    parseTime: parseTime,
+    labelOf: labelOf,
     keyOf: keyOf,
     normalizeRows: normalizeRows,
     textToRows: textToRows,
     dedupe: dedupe,
+    filterTracked: filterTracked,
     flagTransfers: flagTransfers,
     summarize: summarize,
     normalizeBatch: normalizeBatch

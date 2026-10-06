@@ -1,6 +1,7 @@
 'use strict';
 // Import normaliser (apps-script/src/Normalize.gs) against the messy MB51 fixtures of sample-data/messy/
-// (expected.json is the oracle) plus unit tests of the parsing rules.
+// (expected.json is the oracle), the real-format export of sample-data/mb51-reel/ (expected.json written by
+// tools/mb51_reference.py, docs/SPEC_V2.md 2) plus unit tests of the parsing rules.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -97,11 +98,20 @@ const LAST_LOADED = ALL_BASE.map((l) => l.date).filter((d) => d < BATCH_START).s
 // ---------------------------------------------------------------------------------------------------------------
 // Messy fixtures vs expected.json
 
+// v1 exports have none of the optional v2 columns (SPEC_V2 2.1): no Poste and no entry time, texts or customer.
+const V2_FIELDS = ['entryDate', 'entryTime', 'headerText', 'itemText', 'reference', 'client', 'salesOrder'];
+
 test('messy: every file is read and its header found', () => {
   for (const f of REF.files) {
     assert.equal(f.res.ok, true, f.name + ': ' + f.res.error);
     assert.deepEqual(plain(f.res.mapping.missing), [], f.name);
-    assert.deepEqual(plain(f.res.mapping.optionalMissing), ['poste'], f.name + ' has no Poste column');
+    assert.deepEqual(plain(f.res.mapping.optionalMissing), ['poste'].concat(V2_FIELDS), f.name + ' has no Poste column');
+    assert.deepEqual(plain(f.res.mapping.extra), [], f.name + ' every column used');
+    assert.deepEqual(plain(f.res.warnings), [], f.name + ' no warning');
+    for (const l of f.res.lines) {
+      assert.equal(l.ts, '', 'no entry time in a v1 export');
+      assert.equal(l.label, '', 'no label in a v1 export');
+    }
   }
 });
 
@@ -329,6 +339,270 @@ test('Normalize.gs: Apps Script safe syntax', () => {
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// Real export format (sample-data/mb51-reel, docs/SPEC_V2.md 2) vs expected.json (tools/mb51_reference.py)
+
+const REEL_DIR = path.join(ROOT, 'sample-data', 'mb51-reel');
+const REEL_NAME = 'MB51_reel_anonymise.xlsx';
+const REEL = JSON.parse(fs.readFileSync(path.join(REEL_DIR, 'expected.json'), 'utf8')).normalize;
+const REEL_HEADER = ['Article', 'Division', 'Magasin', 'Code mouvement', 'Texte code mouvement', 'Stock spécial',
+  'Document article', 'Date comptable', 'Qté en unité saisie', 'UQ de saisie', 'Désignation article', 'Montant DI',
+  'Date de saisie', 'Heure de saisie', "Nom de l'utilisateur", "Texte d'en-tête pièce", 'Motif du mouvement', 'Texte',
+  'Référence', 'Client', 'Fournisseur', 'Commande client'];
+// Field of each of the 22 columns (null = not used by the twin, kept in mapping.extra without a warning).
+const REEL_FIELDS = ['article', 'division', 'magasin', 'mvt', 'text', 's', 'doc', 'date', 'qty', 'uqs', 'designation', null,
+  'entryDate', 'entryTime', 'user', 'headerText', null, 'itemText', 'reference', 'client', null, 'salesOrder'];
+const REEL_DATE_COLS = [7, 12];
+const REEL_TIME_COL = 13;
+const TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+let reelRows = null;
+// SheetJS raw rows of the fixture, read once (dates and times arrive as Excel serial numbers).
+function readReel() {
+  if (!reelRows) {
+    const wb = XLSX.readFile(path.join(REEL_DIR, REEL_NAME));
+    reelRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], Norm.SHEETJS_OPTIONS);
+  }
+  return reelRows;
+}
+
+let reelBatch = null;
+function reelFiltered() {
+  if (!reelBatch) reelBatch = Norm.normalizeBatch([{ name: REEL_NAME, rows: readReel() }], { trackedOnly: true });
+  return reelBatch;
+}
+
+const pad2 = (n) => String(n).padStart(2, '0');
+// Excel serial -> calendar day and wall-clock time (what Excel shows).
+function serialParts(v) {
+  const days = Math.floor(v);
+  const t = new Date(Date.UTC(1899, 11, 30) + days * 86400000);
+  const sec = Math.round((v - days) * 86400);
+  return { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate(), h: Math.floor(sec / 3600), mi: Math.floor(sec / 60) % 60, s: sec % 60 };
+}
+
+// The fixture as Apps Script range.getValues() returns it: Date objects (local midnight) for date cells, Dates of
+// 1899-12-30 for time cells, '' for empty cells, and digit codes turned into numbers as Sheets does when pasting.
+function asSheetValues(rows) {
+  return rows.map((r, i) => (i === 0 ? r.slice() : r.map((v, c) => {
+    if (v === null || v === undefined) return '';
+    if (REEL_DATE_COLS.includes(c)) {
+      const p = serialParts(v);
+      return new Date(p.y, p.m - 1, p.d);
+    }
+    if (c === REEL_TIME_COL) {
+      const p = serialParts(v);
+      return new Date(1899, 11, 30, p.h, p.mi, p.s);
+    }
+    if (typeof v === 'string' && /^[1-9]\d{0,14}$/.test(v)) return Number(v);
+    return v;
+  })));
+}
+
+// SAP French number text: thousands '.', decimals ',', trailing minus ('104.000-').
+function sapNumber(n) {
+  const parts = String(Math.abs(n)).split('.');
+  return parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.') + (parts[1] ? ',' + parts[1] : '') + (n < 0 ? '-' : '');
+}
+
+// The fixture as a « Texte avec tabulations » export: title and blank line, '05.10.2026', '10:54:54', CRLF.
+function asTabText(rows) {
+  const out = ['Liste des documents article', ''];
+  rows.forEach((r, i) => {
+    out.push(i === 0 ? r.join('\t') : r.map((v, c) => {
+      if (v === null || v === undefined) return '';
+      if (REEL_DATE_COLS.includes(c)) {
+        const p = serialParts(v);
+        return `${pad2(p.d)}.${pad2(p.m)}.${p.y}`;
+      }
+      if (c === REEL_TIME_COL) {
+        const p = serialParts(v);
+        return `${pad2(p.h)}:${pad2(p.mi)}:${pad2(p.s)}`;
+      }
+      return typeof v === 'number' ? sapNumber(v) : v;
+    }).join('\t'));
+  });
+  return out.join('\r\n') + '\r\n';
+}
+
+const lineSig = (l) => [l.key, l.ts, l.label, round3(l.qty), l.headerText, l.itemText, l.reference, l.client, l.salesOrder,
+  l.user].join('~');
+
+test('real format: the 22 columns are mapped as SPEC_V2 says, unused ones without a warning', () => {
+  const rows = readReel();
+  assert.deepEqual(rows[0], REEL_HEADER, 'fixture header');
+  const r = reelFiltered().files[0];
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.headerRow, 0);
+  const want = {};
+  REEL_FIELDS.forEach((f, c) => { if (f) want[f] = c; });
+  assert.deepEqual(plain(r.mapping.index), want);
+  assert.deepEqual(plain(r.mapping.missing), []);
+  assert.deepEqual(plain(r.mapping.optionalMissing), ['poste']);
+  assert.deepEqual(plain(r.mapping.extra), ['Montant DI', 'Motif du mouvement', 'Fournisseur']);
+  assert.deepEqual(plain(r.warnings), []);
+  assert.deepEqual(plain(r.summary.format), { file: REEL_NAME, columns: 22, hasTime: true, hasLabels: true, hasClient: true,
+    extra: ['Montant DI', 'Motif du mouvement', 'Fournisseur'], withTime: REEL.withTime, withLabel: REEL.withLabel });
+  // Same mapping whatever the column order (exact synonyms: no generic label takes another column).
+  const rev = Norm.mapHeaders(REEL_HEADER.slice().reverse());
+  for (const [f, c] of Object.entries(want)) assert.equal(rev.index[f], 21 - c, f);
+  assert.deepEqual(plain(rev.extra).sort(), ['Fournisseur', 'Montant DI', 'Motif du mouvement']);
+});
+
+test('real format: counts, filter, period and first line match expected.json', () => {
+  const b = reelFiltered();
+  const s = b.summary;
+  assert.equal(b.ok, true);
+  assert.equal(s.read, REEL.read);
+  assert.equal(s.valid, REEL.valid);
+  assert.equal(s.rejected, REEL.rejected);
+  assert.equal(s.withTime, REEL.withTime);
+  assert.equal(s.withLabel, REEL.withLabel);
+  assert.equal(s.dateMin, REEL.dateMin);
+  assert.equal(s.dateMax, REEL.dateMax);
+  assert.equal(s.skipped.total, 0);
+  // Finished-goods filter on the valid lines, before dedupe (SPEC_V2 2.4).
+  assert.equal(b.trackedOnly, true);
+  assert.equal(b.lines.length, REEL.kept);
+  assert.equal(s.fresh, REEL.kept);
+  assert.equal(s.duplicates, 0);
+  assert.equal(b.untracked.lines, REEL.dropped);
+  assert.equal(b.untracked.articles, REEL.droppedArticles);
+  assert.equal(b.untracked.list.length, REEL.droppedArticles);
+  assert.equal(s.untracked, REEL.dropped);
+  assert.equal(s.untrackedArticles, REEL.droppedArticles);
+  assert.equal(b.files[0].summary.untracked, REEL.dropped);
+  assert.equal(b.batchTracked.length, REEL.trackedArticles);
+  assert.equal(s.valid, s.fresh + s.duplicates + s.untracked);
+  const kept = new Set(b.lines.map((l) => l.article));
+  assert.equal(kept.size, REEL.trackedArticles, 'every kept article is a tracked one');
+  for (const a of b.untracked.list) assert.ok(!kept.has(a) && !b.batchTracked.includes(a), 'dropped article ' + a);
+  for (const a of b.batchTracked) assert.ok(kept.has(a));
+  // The French preview.
+  assert.equal(s.text, '4157 lignes lues · 2800 nouvelles · 0 déjà connue · 1357 hors produits finis · 0 rejetée · ' +
+    '0 ignorée · 3 alertes · période du 04/10/2026 au 05/10/2026');
+  const rows = Object.fromEntries(plain(s.rows).map((x) => [x.label, x.value]));
+  assert.equal(rows['Hors produits finis (ignorées)'], REEL.dropped);
+  assert.equal(rows['Avec heure de saisie'], REEL.withTime);
+  assert.equal(rows['Avec étiquette'], REEL.withLabel);
+  assert.equal(rows['Nouvelles lignes'], REEL.kept);
+  assert.deepEqual(plain(s.warnings), []);
+  // First line of the file (dropped by the filter: a raw material, but valid).
+  const first = plain(b.files[0].lines[0]);
+  for (const k of Object.keys(REEL.firstLine)) assert.equal(first[k], REEL.firstLine[k], 'firstLine ' + k);
+  assert.equal(first.user, 'OPERATEUR01');
+  assert.equal(first.headerText, 'transfert PRD5 test');
+  assert.ok(b.files[0].untracked.includes(b.files[0].lines[0]));
+});
+
+test('real format: timestamps and labels (entry date + entry time, label numbers from the texts)', () => {
+  const b = reelFiltered();
+  const all = b.files[0].lines;
+  for (const l of all) {
+    assert.equal(typeof l.ts, 'string');
+    assert.match(l.ts, TS_RE, 'ts of row ' + l.row);
+    assert.match(l.label, /^(\d{6,12})?$/, 'label of row ' + l.row);
+    assert.equal(l.label, Norm.labelOf(l), 'label = labelOf(line)');
+  }
+  // Night entries (00:00-01:59) are posted on the previous day: ts keeps the entry date.
+  const night = all.filter((l) => l.ts.slice(0, 10) !== l.date);
+  assert.ok(night.length > 0, 'the fixture has night entries');
+  for (const l of night) {
+    assert.ok(l.ts.slice(0, 10) > l.date, 'entry after posting: row ' + l.row);
+    assert.ok(l.ts.slice(11, 13) < '02', 'night entry: row ' + l.row);
+  }
+  for (const exp of REEL.labelSamples) {
+    const got = b.lines.find((l) => l.doc === exp.doc && l.article === exp.article && l.magasin === exp.magasin && l.mvt === exp.mvt);
+    assert.ok(got, 'label sample ' + exp.doc);
+    assert.equal(got.label, exp.label, exp.doc + ' label');
+    assert.equal(got.ts, exp.ts, exp.doc + ' ts');
+  }
+  assert.deepEqual(plain(b.lines.filter((l) => l.label).slice(0, 5).map((l) => ({ doc: l.doc, article: l.article,
+    magasin: l.magasin, mvt: l.mvt, label: l.label, ts: l.ts }))), REEL.labelSamples, 'first labeled kept lines in file order');
+  // Labels come from the item text of the 311 scans and from the header text of the 131 declarations only.
+  const by = {};
+  for (const l of all.filter((x) => x.label)) {
+    const src = l.itemText === l.label ? 'item' : 'header';
+    by[l.mvt + ' ' + src] = (by[l.mvt + ' ' + src] || 0) + 1;
+    if (src === 'header') assert.ok(l.headerText.startsWith(l.label), 'header label of row ' + l.row);
+  }
+  assert.deepEqual(Object.keys(by).sort(), ['131 header', '311 item']);
+  assert.ok(all.some((l) => l.mvt === '131' && /^Z001:/.test(l.headerText) && l.label === ''), 'Z001 headers carry no label');
+  assert.ok(all.some((l) => l.mvt === '311' && /^TA11P/.test(l.headerText) && l.label === l.itemText), '311: label from Texte');
+  // Users: the automatic scan user is recognised (screens show Auto / Manuel only).
+  assert.equal(b.summary.auto + b.summary.manual, REEL.kept);
+  assert.ok(b.lines.some((l) => l.user === 'BARFLOW_TA11'));
+});
+
+test('real format: labeled 311 legs are never TRANSFERT_ORPHELIN, unlabeled lone legs still are', () => {
+  const b = reelFiltered();
+  const orphans = plain(b.flags).filter((f) => f.code === 'TRANSFERT_ORPHELIN');
+  assert.equal(orphans.length, REEL.unpairedUnlabeled, 'same count as the reference (unlabeled unpaired legs)');
+  for (const f of orphans) {
+    assert.equal(f.label, '');
+    const line = b.lines.find((l) => l.key === f.key);
+    assert.equal(line.label, '');
+  }
+  // Without the labeled rule the labeled lone legs (other leg in PRD5...) would be flagged too.
+  const unlabeled = b.lines.map((l) => Object.assign({}, l, { label: '', itemText: '', headerText: '' }));
+  assert.ok(Norm.flagTransfers(unlabeled).length > orphans.length);
+  // Flags carry no user name.
+  assert.ok(!JSON.stringify(orphans).includes('OPERATEUR'));
+});
+
+test('real format: getValues() Dates and a tab-separated text export give the same lines as SheetJS', () => {
+  const rows = readReel();
+  const ref = reelFiltered();
+  const values = asSheetValues(rows);
+  // The copy really holds Sheets types: numeric codes (article, document, label texts) and Date cells.
+  assert.equal(typeof values[1][0], 'number');
+  assert.equal(typeof values[1][6], 'number');
+  assert.ok(values[1][7] instanceof Date && values[1][13] instanceof Date && values[1][13].getFullYear() === 1899);
+  assert.ok(values.some((r) => typeof r[17] === 'number') && values.some((r) => typeof r[15] === 'number'), 'numeric texts');
+  assert.ok(values.some((r) => typeof r[18] === 'string' && /^0\d+$/.test(r[18])), 'references with leading zeros stay text');
+  const sheet = Norm.normalizeBatch([{ name: 'MB51 (feuille)', rows: values }], { trackedOnly: true });
+  const text = Norm.textToRows(asTabText(rows));
+  assert.equal(text[1].length, 1, 'blank line kept');
+  const tsv = Norm.normalizeBatch([{ name: 'MB51.txt', rows: text }], { trackedOnly: true });
+  for (const [what, b] of [['getValues', sheet], ['text', tsv]]) {
+    assert.equal(b.ok, true, what);
+    assert.equal(b.summary.read, REEL.read, what);
+    assert.equal(b.summary.rejected, 0, what);
+    assert.equal(b.summary.withTime, REEL.withTime, what);
+    assert.equal(b.summary.withLabel, REEL.withLabel, what);
+    assert.equal(b.untracked.lines, REEL.dropped, what);
+    assert.deepEqual(plain(b.files[0].lines.map(lineSig)), plain(ref.files[0].lines.map(lineSig)), what + ': same valid lines');
+    assert.deepEqual(plain(b.lines.map((l) => l.key)), plain(ref.lines.map((l) => l.key)), what + ': same kept lines');
+    assert.deepEqual(plain(b.files[0].warnings), [], what);
+  }
+  assert.equal(tsv.files[0].preamble, 2);
+  // Re-importing any copy against the saved keys adds nothing.
+  const again = Norm.normalizeBatch([{ name: 'MB51.txt', rows: text }], { trackedOnly: true, existingKeys: ref.lines.map((l) => l.key) });
+  assert.equal(again.lines.length, 0);
+  assert.equal(again.duplicates.length, REEL.kept);
+  assert.equal(again.untracked.lines, REEL.dropped);
+});
+
+test('real format: without the filter every valid line is kept; the browser copy (no CFG) agrees', () => {
+  const rows = readReel();
+  const b = Norm.normalizeBatch([{ name: REEL_NAME, rows }]);
+  assert.equal(b.trackedOnly, false);
+  assert.equal(b.lines.length, REEL.valid);
+  assert.deepEqual(plain(b.untracked), { lines: 0, articles: 0, list: [] });
+  assert.equal(b.summary.untracked, null);
+  assert.equal(b.summary.untrackedArticles, null);
+  assert.equal(b.batchTracked.length, REEL.trackedArticles, 'batch tracked articles are reported anyway');
+  assert.doesNotMatch(b.summary.text, /hors produits finis/);
+  assert.ok(!plain(b.summary.rows).some((x) => x.label === 'Hors produits finis (ignorées)'));
+
+  const browser = vm.createContext({});
+  vm.runInContext('var Norm = (' + ctx.NormalizeModule_.toString() + ')();', browser);
+  const bb = browser.Norm.normalizeBatch([{ name: REEL_NAME, rows }], { trackedOnly: true });
+  assert.deepEqual(plain(bb.lines.map(lineSig)), plain(reelFiltered().lines.map(lineSig)));
+  assert.equal(bb.summary.withLabel, REEL.withLabel);
+  assert.equal(bb.summary.auto, reelFiltered().summary.auto, 'same automatic users without CFG');
+});
+
+// ---------------------------------------------------------------------------------------------------------------
 // Unit tests
 
 test('parseNumber: SAP French text, trailing minus, spaces, real numbers', () => {
@@ -402,14 +676,14 @@ test('mapHeaders: French and English synonyms, short and long labels', () => {
       owner.set(n, field);
     }
   }
-  // Full English header, any order.
+  // Full English header, any order ('Entry Date' is a v2 field since SPEC_V2 2.1; 'Amount in LC' is not used).
   const en = Norm.mapHeaders(['Mat. Doc.', 'Item', 'Pstng Date', 'Material', 'Plant', 'SLoc', 'MvT', 'Mvt Type Text', 'S',
-    'Qty in UnE', 'EUn', 'Material Description', 'User name', 'Entry Date']);
+    'Qty in UnE', 'EUn', 'Material Description', 'User name', 'Entry Date', 'Amount in LC']);
   assert.deepEqual(plain(en.missing), []);
-  assert.deepEqual(plain(en.optionalMissing), []);
-  assert.deepEqual(plain(en.extra), ['Entry Date']);
+  assert.deepEqual(plain(en.optionalMissing), V2_FIELDS.filter((f) => f !== 'entryDate'));
+  assert.deepEqual(plain(en.extra), ['Amount in LC']);
   assert.deepEqual(plain(en.index), { article: 3, division: 4, magasin: 5, mvt: 6, text: 7, s: 8, doc: 0, poste: 1,
-    date: 2, qty: 9, uqs: 10, designation: 11, user: 12 });
+    date: 2, qty: 9, uqs: 10, designation: 11, user: 12, entryDate: 13 });
   // Priority: the unit-of-entry quantity wins over the base-unit one, whatever the column order.
   const both = Norm.mapHeaders(['Quantité', 'UQB', 'Qté en UQS', 'UQS']);
   assert.equal(both.index.qty, 2);
@@ -460,7 +734,8 @@ test('normalizeRows: classification of rows and normalised fields', () => {
   assert.deepEqual(a, {
     key: '4901257367|1000102657|PRD2|101|-1440|2026-10-02|1', article: '1000102657', division: 'TA11', magasin: 'PRD2',
     mvt: '101', text: 'EM entrée en stock', s: 'E', doc: '4901257367', poste: '', date: '2026-10-02', qty: -1440,
-    uqs: 'PC', designation: 'PF BAC', user: 'BARFLOW_TA11', source: 'IMPORT', file: 'f.xlsx', row: 4, rank: 1
+    uqs: 'PC', designation: 'PF BAC', user: 'BARFLOW_TA11', source: 'IMPORT', file: 'f.xlsx', row: 4, rank: 1,
+    ts: '', label: '', headerText: '', itemText: '', reference: '', client: '', salesOrder: ''   // v2 fields, no v2 column
   });
   assert.equal(b.date, '2026-10-03');
   assert.equal(b.qty, 729.25);
@@ -664,4 +939,317 @@ test('summarize: preview numbers and French sentence', () => {
   assert.equal(s2.text, '3 lignes lues · 1 nouvelle · 1 déjà connue · 1 rejetée · 1 ignorée (1 sous-total) · 1 alerte · période le 03/10/2026');
   const bad = plain(Norm.summarize(Norm.normalizeRows([['?']], { file: 'vide.txt' })));
   assert.match(bad.errors[0], /^vide\.txt : En-tête MB51 introuvable/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// v2 unit tests (docs/SPEC_V2.md 2)
+
+test('parseTime: day fractions, date-time serials, Dates, SAP text forms', () => {
+  const ok = [
+    [0, '00:00:00'], [0.5, '12:00:00'], [0.4547916666666666, '10:54:54'], [0.07140046296296296, '01:42:49'],
+    [0.999999, '23:59:59'], [0.99999999, '23:59:59'], [1 / 86400, '00:00:01'], [0.5 / 86400, '00:00:01'],
+    [46300.4547916666666, '10:54:54'], [46300, '00:00:00'], [46300.99999999, '23:59:59'], [1, '00:00:00'],
+    [new Date(1899, 11, 30, 10, 54, 54), '10:54:54'], [new Date(2026, 9, 5, 7, 5, 0), '07:05:00'],
+    [new Date(1899, 11, 30, 10, 54, 53, 999), '10:54:54'], [new Date(1899, 11, 30, 23, 59, 59, 700), '23:59:59'],
+    [new Date(1899, 11, 30), '00:00:00'],
+    ['10:54:54', '10:54:54'], [' 10:54:54 ', '10:54:54'], ['\u00a010:54:54\t', '10:54:54'], ['\u202f07:05\u202f', '07:05:00'], ['7:05', '07:05:00'],
+    ['07:05', '07:05:00'], ['0:00', '00:00:00'], ['23:59:59', '23:59:59'], ['10:54:54.250', '10:54:54'],
+    ['10:54:54 PM', '22:54:54'], ['10:54:54 AM', '10:54:54'], ['10:54:54PM', '22:54:54'], ['10:54:54 pm', '22:54:54'],
+    ['10:54 p.m.', '22:54:00'], ['12:00:01 AM', '00:00:01'], ['12:30:00 PM', '12:30:00'], ['1:05:09 PM', '13:05:09'],
+    ['105454', '10:54:54'], ['000000', '00:00:00'], ['235959', '23:59:59'], [' 070500 ', '07:05:00'],
+    ['05.10.2026 10:54:54', '10:54:54'], ['2026-10-05 10:54:54', '10:54:54'], ['2026-10-05T07:05', '07:05:00']
+  ];
+  for (const [v, want] of ok) assert.equal(Norm.parseTime(v), want, String(v));
+  const bad = ['24:00', '24:00:00', '10:60', '10:54:60', '13:00 PM', '00:30 PM', '7:5', '10:5:00', '1054', '1054545',
+    '246000', '106000', '105460', '10.54.54', '10h54', 'abc', '10:54:54 XM', '', '   ', '05.10.2026', '31.02.2026 10:00',
+    null, undefined, true, false, {}, [], -0.1, -1, NaN, Infinity, new Date('invalid')];
+  for (const v of bad) assert.equal(Norm.parseTime(v), null, 'null for ' + JSON.stringify(v));
+  // Never 24:00:00, whatever the float noise.
+  for (let i = 0; i < 2000; i++) {
+    const t = Norm.parseTime(46300 + i / 2000 + 1e-9);
+    assert.match(t, /^([01]\d|2[0-3]):[0-5]\d:[0-5]\d$/);
+  }
+});
+
+test('labelOf: SPEC_V2 examples, item text first, header text of declarations only, raw values', () => {
+  const cases = [
+    [{ mvt: '131', headerText: '434514671|20261005010841' }, '434514671'],
+    [{ mvt: '131', headerText: '434409999_1|202610050101' }, '434409999'],
+    [{ mvt: '131', headerText: 'Z001:618402867320260005' }, ''],
+    [{ mvt: '311', itemText: '434505101' }, '434505101'],
+    [{ mvt: '311', headerText: 'TA11P101844856' }, ''],
+    [{ mvt: '131', headerText: '434523710' }, '434523710'],
+    [{ mvt: '101', headerText: '434523710|x' }, '434523710'],
+    [{ mvt: '102', headerText: '434523710' }, '434523710'],
+    [{ mvt: '132', headerText: '434523710' }, '434523710'],
+    [{ mvt: '311', headerText: '434523710' }, '', 'a header label only on a declaration'],
+    [{ mvt: '601', headerText: '434523710|20261005010841' }, ''],
+    [{ mvt: '131', headerText: '434523710-1' }, '', 'only _ or | after the number'],
+    [{ mvt: '131', headerText: '12345|20261005' }, '', '5 digits'],
+    [{ mvt: '131', headerText: '1234567890123' }, '', '13 digits'],
+    [{ mvt: '311', itemText: '123456' }, '123456'],
+    [{ mvt: '311', itemText: '123456789012' }, '123456789012'],
+    [{ mvt: '311', itemText: '12345' }, ''],
+    [{ mvt: '311', itemText: '1234567890123' }, ''],
+    [{ mvt: '311', itemText: '434505101|x' }, '', 'item text: digits only'],
+    [{ mvt: '311', itemText: ' 434505101 ' }, '434505101'],
+    [{ mvt: '311', itemText: 'Lot 05102026' }, ''],
+    [{ mvt: '131', itemText: '434500001', headerText: '434500002|20261005' }, '434500001', 'item text wins'],
+    [{ mvt: '131', itemText: 'abc', headerText: '434500002' }, '434500002'],
+    [{ mvt: 131, headerText: 434523710 }, '434523710', 'numbers (Sheets values)'],
+    [{ mvt: 311, itemText: 434505101 }, '434505101'],
+    [{ mvt: '131' }, ''], [{}, '']
+  ];
+  for (const [line, want, why] of cases) assert.equal(Norm.labelOf(line), want, JSON.stringify(line) + (why ? ' ' + why : ''));
+  assert.equal(Norm.labelOf(null), '');
+  assert.equal(Norm.labelOf(undefined), '');
+});
+
+test('labelOf: patterns from CFG.LABEL, the same defaults without CFG, invalid pattern falls back', () => {
+  const src = fs.readFileSync(path.join(SRC, 'Normalize.gs'), 'utf8');
+  // CFG.LABEL of Config.gs = the normaliser defaults.
+  assert.deepEqual(plain(ctx.CFG.LABEL), { itemRe: '^\\d{6,12}$', headerRe: '^(\\d{6,12})(?:[_|].*)?$', headerMvts: ['101', '102', '131', '132'] });
+  const none = loadGs(['Normalize']);
+  assert.equal(none.Norm.labelOf({ mvt: '131', headerText: '434514671|20261005010841' }), '434514671');
+  assert.equal(none.Norm.labelOf({ mvt: '311', itemText: '434505101' }), '434505101');
+  // Custom patterns, read at call time (CFG may change, the compiled patterns follow).
+  const custom = vm.createContext({ CFG: { LABEL: { itemRe: '^L\\d{4}$', headerRe: '^H-(\\d{4})', headerMvts: ['311'] } } });
+  vm.runInContext(src, custom);
+  assert.equal(custom.Norm.labelOf({ mvt: '311', itemText: 'L1234' }), 'L1234');
+  assert.equal(custom.Norm.labelOf({ mvt: '311', itemText: '434505101' }), '');
+  assert.equal(custom.Norm.labelOf({ mvt: '311', headerText: 'H-4321 x' }), '4321');
+  assert.equal(custom.Norm.labelOf({ mvt: '131', headerText: 'H-4321' }), '');
+  vm.runInContext("CFG.LABEL = { itemRe: '(', headerRe: '^X(\\\\d+)$', headerMvts: ['131'] };", custom);
+  assert.equal(custom.Norm.labelOf({ mvt: '311', itemText: '434505101' }), '434505101', 'invalid itemRe -> default');
+  assert.equal(custom.Norm.labelOf({ mvt: '131', headerText: 'X77' }), '77');
+  vm.runInContext('CFG.LABEL = { itemRe: /^\\d{3}$/g };', custom);
+  assert.equal(custom.Norm.labelOf({ mvt: '311', itemText: '123' }), '123');
+  assert.equal(custom.Norm.labelOf({ mvt: '311', itemText: '123' }), '123', 'RegExp with g: no lastIndex state');
+  assert.equal(custom.Norm.labelOf({ mvt: '131', headerText: '434514671|1' }), '434514671', 'missing keys -> defaults');
+});
+
+test('mapHeaders: v2 synonyms, no collision between generic and long labels', () => {
+  const cases = {
+    qty: ['Qté en unité saisie', 'Quantité en unité saisie', 'Qté unité saisie', 'QTE EN UNITE SAISIE'],
+    uqs: ['UQ de saisie', 'UQ saisie', 'Unité saisie'],
+    entryDate: ['Date de saisie', 'Date saisie', 'Saisi le', 'Entry Date', 'Entered on', 'CPUDT'],
+    entryTime: ['Heure de saisie', 'Heure saisie', 'Heure', 'Time of Entry', 'Entry Time', 'Time', 'CPUTM'],
+    headerText: ["Texte d'en-tête pièce", 'Texte en-tête pièce', "Texte d'en-tête", 'Texte en-tête', 'Document Header Text',
+      'Doc. Header Text', 'BKTXT', 'Texte d’en-tête pièce'],
+    itemText: ['Texte', 'Texte poste', 'Texte du poste', 'Item Text', 'Text', 'SGTXT'],
+    reference: ['Référence', 'Reference', 'Réf.', 'XBLNR'],
+    client: ['Client', 'Customer', 'KUNNR'],
+    salesOrder: ['Commande client', 'Cde client', 'Sales Order', 'Sales Document', 'KDAUF']
+  };
+  for (const [field, labels] of Object.entries(cases)) {
+    for (const label of labels) assert.equal(Norm.mapHeaders(['xx', label]).index[field], 1, `${label} -> ${field}`);
+  }
+  for (const f of V2_FIELDS) assert.ok(Norm.FIELD_LABELS[f], 'French label of ' + f);
+  assert.equal(Norm.FIELD_LABELS.entryTime, 'Heure de saisie');
+  assert.equal(Norm.FIELD_LABELS.headerText, "Texte d'en-tête pièce");
+  const idx = (h) => plain(Norm.mapHeaders(h).index);
+  // The three texts, any order.
+  for (const h of [['Texte', 'Texte code mouvement', "Texte d'en-tête pièce"], ["Texte d'en-tête pièce", 'Texte code mouvement', 'Texte']]) {
+    const m = idx(h);
+    assert.equal(h[m.itemText], 'Texte');
+    assert.equal(h[m.text], 'Texte code mouvement');
+    assert.equal(h[m.headerText], "Texte d'en-tête pièce");
+  }
+  // Référence vs Référence article.
+  let m = Norm.mapHeaders(['Référence', 'Référence article', 'Article']);
+  assert.equal(m.index.reference, 0);
+  assert.equal(m.index.article, 2);
+  assert.deepEqual(plain(m.extra), ['Référence article']);
+  m = Norm.mapHeaders(['Référence article', 'Référence']);
+  assert.equal(m.index.article, 0);
+  assert.equal(m.index.reference, 1);
+  // Generic time labels never take a more specific column.
+  m = Norm.mapHeaders(['Heure', 'Heure de saisie', 'Date comptable']);
+  assert.equal(m.index.entryTime, 1);
+  assert.deepEqual(plain(m.extra), ['Heure']);
+  m = Norm.mapHeaders(['Time', 'Entry Time']);
+  assert.equal(m.index.entryTime, 1);
+  m = Norm.mapHeaders(['Date de saisie', 'Date comptable', 'Heure']);
+  assert.deepEqual([m.index.entryDate, m.index.date, m.index.entryTime], [0, 1, 2]);
+  // Unit-of-entry quantity and unit before the base ones, with the real labels.
+  m = Norm.mapHeaders(['Qté en unité de base', 'Unité de base', 'Qté en unité saisie', 'UQ de saisie']);
+  assert.deepEqual([m.index.qty, m.index.uqs], [2, 3]);
+  // Client vs Commande client vs Fournisseur.
+  m = Norm.mapHeaders(['Commande client', 'Fournisseur', 'Client']);
+  assert.deepEqual([m.index.salesOrder, m.index.client], [0, 2]);
+  assert.deepEqual(plain(m.extra), ['Fournisseur']);
+});
+
+const H2 = ['Article', 'Division', 'Magasin', 'Code mouvement', 'Document article', 'Date comptable', 'Qté en unité saisie',
+  'UQ de saisie', 'Date de saisie', 'Heure de saisie', "Texte d'en-tête pièce", 'Texte', 'Référence', 'Client',
+  'Commande client', 'Montant DI', "Nom de l'utilisateur"];
+const row2 = (o) => H2.map((h) => (Object.prototype.hasOwnProperty.call(o, h) ? o[h] : {
+  Article: 'AB12345', Division: 'TA11', Magasin: 'PRD2', 'Code mouvement': '131', 'Document article': '6900000001',
+  'Date comptable': '05.10.2026', 'Qté en unité saisie': '24', 'UQ de saisie': 'PCE', 'Date de saisie': '05.10.2026',
+  'Heure de saisie': '10:54:54', "Texte d'en-tête pièce": '434500001|20261005105454', Texte: '', Référence: '',
+  Client: '', 'Commande client': '', 'Montant DI': '0', "Nom de l'utilisateur": 'BARFLOWTA11'
+}[h]));
+
+test('normalizeRows: v2 fields (ts, label, texts, reference, customer, sales order)', () => {
+  const r = Norm.normalizeRows([H2,
+    row2({}),
+    row2({ 'Document article': '6900000002', 'Date comptable': '04.10.2026', 'Date de saisie': '05.10.2026', 'Heure de saisie': '00:42:10' }),
+    row2({ 'Document article': '6900000003', 'Date de saisie': '', 'Heure de saisie': '10:00' }),
+    row2({ 'Document article': '6900000004', 'Heure de saisie': '' }),
+    row2({ 'Document article': '6900000005', 'Heure de saisie': 'midi' }),
+    row2({ 'Document article': '6900000006', 'Date de saisie': 'hier', 'Heure de saisie': '235959' }),
+    row2({ 'Document article': '6900000007', 'Code mouvement': '311', "Texte d'en-tête pièce": ' TA11P101844856 ', Texte: ' 434500001 ',
+      Référence: '0700011312', Client: '0000123456', 'Commande client': 1234567890 }),
+    row2({ 'Document article': '6900000008', 'Code mouvement': '601', "Texte d'en-tête pièce": '434500009', Client: 'CLIENT A',
+      'Commande client': '0012345678', Référence: 300506 })
+  ], { file: 'v2.txt' });
+  assert.equal(r.ok, true);
+  assert.equal(r.lines.length, 8);
+  assert.deepEqual(plain(r.mapping.extra), ['Montant DI']);
+  const by = Object.fromEntries(plain(r.lines).map((l) => [l.doc, l]));
+  const a = by['6900000001'];
+  assert.equal(a.ts, '2026-10-05 10:54:54');
+  assert.equal(a.label, '434500001');
+  assert.equal(a.headerText, '434500001|20261005105454');
+  assert.equal(a.itemText, '');
+  assert.equal(a.user, 'BARFLOW_TA11');
+  assert.equal(a.key, '6900000001|AB12345|PRD2|131|24|2026-10-05|1', 'ts and label are not part of the key');
+  assert.equal(by['6900000002'].ts, '2026-10-05 00:42:10', 'night entry: entry date, not the posting date');
+  assert.equal(by['6900000002'].date, '2026-10-04');
+  assert.equal(by['6900000003'].ts, '2026-10-05 10:00:00', 'no entry date: posting date + time');
+  assert.equal(by['6900000004'].ts, '', 'no time: no ts');
+  assert.equal(by['6900000005'].ts, '', 'unreadable time: no ts, line kept');
+  assert.equal(by['6900000006'].ts, '2026-10-05 23:59:59', 'unreadable entry date: posting date');
+  const t = by['6900000007'];
+  assert.deepEqual([t.label, t.headerText, t.itemText, t.reference, t.client, t.salesOrder],
+    ['434500001', 'TA11P101844856', '434500001', '0700011312', '123456', '1234567890']);
+  const s = by['6900000008'];
+  assert.deepEqual([s.label, s.client, s.salesOrder, s.reference], ['', 'CLIENT A', '12345678', '300506']);
+  for (const l of r.lines) assert.equal(typeof l.ts, 'string');
+  // One warning for the unreadable time, none for the empty one or the unused column.
+  assert.deepEqual(plain(r.warnings), ['1 ligne avec une heure de saisie illisible : acceptée sans horodatage (attente comptée en jours).']);
+  const sum = plain(Norm.summarize(r));
+  assert.equal(sum.withTime, 6);
+  assert.equal(sum.withLabel, 7, 'six 131 header labels and one 311 item label');
+  assert.deepEqual(sum.format, { file: 'v2.txt', columns: 17, hasTime: true, hasLabels: true, hasClient: true, extra: ['Montant DI'],
+    withTime: 6, withLabel: 7 });
+  assert.equal(sum.untracked, null);
+  // Without the time column: ts stays empty, no warning.
+  const noTime = Norm.normalizeRows([H2.filter((h) => h !== 'Heure de saisie'), row2({}).filter((v, i) => H2[i] !== 'Heure de saisie')]);
+  assert.equal(noTime.lines[0].ts, '');
+  assert.equal(noTime.lines[0].label, '434500001');
+  assert.deepEqual(plain(noTime.warnings), []);
+  assert.equal(plain(Norm.summarize(noTime)).format.hasTime, false);
+  // Several unreadable times: plural warning.
+  const bad = Norm.normalizeRows([H2, row2({ 'Heure de saisie': 'x' }), row2({ 'Document article': '6900000002', 'Heure de saisie': '25:00' })]);
+  assert.match(bad.warnings[0], /^2 lignes avec une heure de saisie illisible : acceptées sans horodatage/);
+});
+
+test('flagTransfers: a labeled 311/312 leg is never an orphan, unlabeled legs keep the v1 rule', () => {
+  const L = (doc, magasin, qty, extra) => Object.assign({ doc, article: 'AB12345', magasin, mvt: '311', qty, date: '2026-10-05',
+    uqs: 'PCE', file: 'r.xlsx', row: 1, key: doc + magasin + qty }, extra || {});
+  const lines = [
+    L('A', 'PRD2', -24, { label: '434500001' }),                                      // other leg in PRD5: normal
+    L('B', 'EXP2', 24, { itemText: '434500002' }),                                    // label from the item text
+    L('C', 'EXP2', 24),                                                               // unlabeled lone leg
+    L('D', 'PRD2', -24, { label: '434500003' }), L('D', 'EXP2', 20),                  // only the unlabeled leg flagged
+    L('E', 'PRD2', -24, { label: '434500004' }), L('E', 'EXP2', 24, { label: '434500004' }), // balanced
+    L('F', 'EXP2', 24, { label: '', itemText: '434500005' }),                         // label field wins (normalised line)
+    L('G', 'EXP2', 12, { mvt: '312', label: '434500006' })                            // reversal with a label
+  ];
+  const flags = plain(Norm.flagTransfers(lines));
+  assert.deepEqual(flags.map((f) => [f.code, f.doc, f.magasin, f.label]), [
+    ['TRANSFERT_ORPHELIN', 'C', 'EXP2', ''], ['TRANSFERT_ORPHELIN', 'D', 'EXP2', ''], ['TRANSFERT_ORPHELIN', 'F', 'EXP2', '']]);
+  assert.match(flags[1].text, /solde -4 PCE/);
+});
+
+test('filterTracked: tracked articles plus the EXP2 articles of the batch; EXP2 lines always kept', () => {
+  const L = (article, magasin, doc) => ({ article, magasin, doc: doc || article + magasin, mvt: '131', qty: 1, date: '2026-10-05' });
+  const lines = [
+    L('FG1', 'PRD2'), L('FG1', 'EXP2'), L('SF1', 'PRD2'), L('RM1', 'EMRT'), L('RM1', 'PRD2'), L('FG2', 'PRD2'),
+    L('123', 'PRD2'), L('LF23855', 'PRD2'), L('FG3', 'exp2 ')
+  ];
+  const copy = JSON.stringify(lines);
+  const none = plain(Norm.filterTracked(lines));
+  assert.deepEqual(none.batchTracked, ['FG1', 'FG3']);
+  assert.deepEqual(none.keptArticles, ['FG1', 'FG3']);
+  assert.deepEqual(none.droppedArticles, ['123', 'FG2', 'LF23855', 'RM1', 'SF1']);
+  assert.equal(none.kept.length + none.dropped.length, lines.length);
+  assert.deepEqual(none.kept.map((l) => l.doc), ['FG1PRD2', 'FG1EXP2', 'FG3exp2 ']);
+  // Known tracked articles in every accepted form (leading zeros and case ignored).
+  const forms = [['FG2', '000123', 'lf23855'], new Set(['FG2', '123', 'LF23855']), new Map([['FG2', 1], ['123', 1], ['LF23855', 1]]),
+    { FG2: true, 123: true, LF23855: true, SF1: false }, [{ a: 'FG2' }, { a: '123' }, { article: 'LF23855' }]];
+  for (const tracked of forms) {
+    const r = plain(Norm.filterTracked(lines, tracked));
+    assert.deepEqual(r.keptArticles, ['123', 'FG1', 'FG2', 'FG3', 'LF23855'], JSON.stringify(tracked));
+    assert.deepEqual(r.droppedArticles, ['RM1', 'SF1']);
+    assert.deepEqual(r.batchTracked, ['FG1', 'FG3'], 'batchTracked = EXP2 articles of the lines only');
+  }
+  assert.equal(JSON.stringify(lines), copy, 'inputs untouched');
+  assert.deepEqual(plain(Norm.filterTracked(null)), { kept: [], dropped: [], keptArticles: [], droppedArticles: [], batchTracked: [] });
+  assert.equal(Norm.filterTracked(lines, 'FG2').keptArticles.includes('FG2'), true, 'a single code');
+});
+
+test('normalizeBatch: trackedOnly filters all files together before dedupe; trackedOnly false keeps all', () => {
+  const decl = [H2,
+    row2({ Article: 'FG1', 'Document article': '6900000001' }),
+    row2({ Article: 'SF1', 'Document article': '6900000002', "Texte d'en-tête pièce": 'Z001:6184' }),
+    row2({ Article: 'FG2', 'Document article': '6900000003' }),
+    row2({ Article: 'SF1', 'Document article': '6900000004', Division: 'TA12' })];
+  const trans = [H2,
+    row2({ Article: 'FG1', 'Document article': '6900000010', 'Code mouvement': '311', 'Qté en unité saisie': '24-', Texte: '434500001' }),
+    row2({ Article: 'FG1', 'Document article': '6900000010', 'Code mouvement': '311', Magasin: 'EXP2', Texte: '434500001' }),
+    row2({ Article: 'SF1', 'Document article': '6900000011', 'Code mouvement': '311', Magasin: 'EMRT', 'Qté en unité saisie': '5-' })];
+  const files = [{ name: 'decl.xlsx', rows: decl }, { name: 'trans.xlsx', rows: trans }];
+  const known = Norm.normalizeRows(decl).lines;
+  const existingKeys = [known.find((l) => l.article === 'SF1').key, known.find((l) => l.article === 'FG2').key];
+
+  const all = Norm.normalizeBatch(files, { existingKeys });
+  assert.equal(all.summary.valid, 6);
+  assert.equal(all.lines.length, 4);
+  assert.equal(all.duplicates.length, 2);
+  assert.deepEqual(plain(all.untracked), { lines: 0, articles: 0, list: [] });
+  assert.equal(all.files[0].untracked, undefined);
+  assert.equal(all.summary.untracked, null);
+
+  const b = Norm.normalizeBatch(files, { existingKeys, trackedOnly: true, tracked: ['FG2'] });
+  assert.equal(b.ok, true);
+  assert.deepEqual(plain(b.batchTracked), ['FG1']);
+  // FG1 of decl.xlsx is kept thanks to the EXP2 leg of trans.xlsx (all files together).
+  assert.deepEqual(plain(b.lines.map((l) => [l.file, l.article, l.magasin])), [['decl.xlsx', 'FG1', 'PRD2'],
+    ['trans.xlsx', 'FG1', 'PRD2'], ['trans.xlsx', 'FG1', 'EXP2']]);
+  // The filter runs before dedupe: the known SF1 line is untracked, not a duplicate; the known FG2 line is a duplicate.
+  assert.deepEqual(plain(b.duplicates.map((l) => l.article)), ['FG2']);
+  assert.deepEqual(plain(b.untracked), { lines: 2, articles: 1, list: ['SF1'] });
+  assert.deepEqual(plain(b.files.map((r) => r.untracked.length)), [1, 1]);
+  assert.deepEqual(plain(b.files.map((r) => [r.summary.untracked, r.summary.untrackedArticles])), [[1, 1], [1, 1]]);
+  assert.equal(b.summary.untracked, 2);
+  assert.equal(b.summary.untrackedArticles, 1, 'distinct articles over the files');
+  assert.equal(b.rejected.length, 1, 'rejected lines are not part of the filter');
+  assert.equal(b.summary.valid, b.summary.fresh + b.summary.duplicates + b.summary.untracked);
+  assert.equal(b.summary.text, '7 lignes lues · 3 nouvelles · 1 déjà connue · 2 hors produits finis · 1 rejetée · 0 ignorée · période le 05/10/2026');
+  assert.deepEqual(plain(b.flags), [], 'labeled and balanced legs: no orphan');
+  assert.deepEqual(plain(b.warnings), []);
+  const rows = plain(b.summary.rows).map((x) => x.label);
+  assert.deepEqual(rows.slice(0, 4), ['Lignes lues', 'Lignes valides', 'Hors produits finis (ignorées)', 'Nouvelles lignes']);
+  assert.equal(b.summary.format, null, 'two files: one format each');
+  assert.deepEqual(plain(b.summary.formats.map((f) => [f.file, f.columns, f.withLabel])), [['decl.xlsx', 17, 2], ['trans.xlsx', 17, 2]]);
+
+  // Nothing tracked at all: everything dropped, with a French hint.
+  const lonely = Norm.normalizeBatch([{ name: 'decl.xlsx', rows: decl }], { trackedOnly: true });
+  assert.equal(lonely.lines.length, 0);
+  assert.equal(lonely.untracked.lines, 3);
+  assert.match(lonely.warnings[0], /^Aucune ligne de produit fini/);
+  assert.ok(lonely.summary.warnings.includes(lonely.warnings[0]));
+  // Without valid lines there is nothing to say.
+  assert.deepEqual(plain(Norm.normalizeBatch([{ name: 'x', rows: [H2] }], { trackedOnly: true }).warnings), []);
+  assert.equal(Norm.normalizeBatch([null], {}).ok, false, 'a missing file is an error, not a crash');
+});
+
+test('Normalize.gs: ES5 style (no arrow functions, let/const, template literals)', () => {
+  const src = fs.readFileSync(path.join(SRC, 'Normalize.gs'), 'utf8');
+  assert.doesNotMatch(src, /=>/);
+  assert.doesNotMatch(src, /\b(let|const)\s/);
+  assert.doesNotMatch(src, /`/);
+  assert.doesNotMatch(src, /\bclass\s/);
 });
