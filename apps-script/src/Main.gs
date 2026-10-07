@@ -621,7 +621,7 @@ function homeStatus_() {
   var pending = '—';
   if (state) {
     var s = summary_(state);
-    var oldest = k.oldestPendingHours !== null && k.oldestPendingHours !== undefined ? frHours_(k.oldestPendingHours)
+    var oldest = s.oldestPendingHours !== null ? frHours_(s.oldestPendingHours)
       : (k.oldestPendingDays ? plural_(k.oldestPendingDays, 'jour', 'jours') : '');
     pending = plural_(k.pendingPallets || 0, 'palette', 'palettes') + ' · PRD2 > ' + frNum_(s.pendingHoursCrit, 1).replace(/,0$/, '') +
       ' h : ' + frNum_(s.pendingCrit, 0) + (oldest ? ' (plus ancienne : ' + oldest + ')' : '');

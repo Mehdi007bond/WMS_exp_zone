@@ -162,7 +162,7 @@
         }
         R.fresh.title = fr.text;
       } else {
-        R.fresh.innerHTML = 'Données SAP du <b>—</b>';
+        R.fresh.innerHTML = 'En attente du premier import SAP';
       }
     }
 
@@ -178,7 +178,7 @@
         var crit = Number(k.pendingCrit) || 0;
         tile.extra = '<div class="xl' + (crit > 0 ? ' crit' : '') + '" data-r="pendingCrit">dont &gt; ' + esc(hText(thr.pendingHoursCrit)) + ' h : ' +
           f.num(crit, 0) + '</div>';
-        tile.s = 'plus ancienne : ' + esc(f.hm(k.oldestPendingHours));
+        tile.s = 'plus ancienne : ' + esc(f.hm(App.oldestWaitHours(s)));
       } else {
         tile.s = k.stuckPendingLines ? f.days(k.oldestPendingDays) + ' max · <b>' + f.plural(k.stuckPendingLines, 'ligne', 'lignes') + ' ≥ ' + thr.pendingDaysWarn + ' j</b>'
           : 'plus ancienne : ' + f.days(k.oldestPendingDays);
@@ -192,7 +192,7 @@
       if (k.daysToSaturation !== null && k.daysToSaturation !== undefined) satSub = '≈ ' + f.num(Math.round(k.daysToSaturation), 0) + ' j avant saturation';
       else if (k.netPerDay !== null && k.netPerDay !== undefined && k.netPerDay < 0) satSub = 'en baisse : ' + f.signed(k.netPerDay, 1) + ' pal/j';
       else if (k.netPerDay === 0) satSub = 'stable sur 7 jours';
-      else satSub = 'tendance : à venir';
+      else satSub = 'tendance après 7 jours'; // the trend needs 7 days of data (Engine: netPerDay)
       var satColor = k.saturation >= thr.satCrit ? '#ff8f8f' : k.saturation >= thr.satWarn ? '#fbd46a' : '';
       var dockSat = Number(k.dockSaturation) || 0;
       var series = (s.daily || []).map(function (d) { return d.saturation; });
@@ -228,8 +228,12 @@
         (s.blocks || []).map(function (b) {
           var v = Number(b.saturation) || 0;
           var name = blockName(b);
+          // A block shared by several projects: the first one and « +n » (a cut « ETNA / ZE… » reads worse from 5 m);
+          // the 3D labels and the plan show every name.
+          var names = name ? name.split(' / ') : [];
+          var shown = names.length > 1 ? names[0] + ' +' + (names.length - 1) : name;
           return '<div class="tv-brow"><span class="n" title="' + esc('Bloc ' + b.id + (name ? ' · ' + name : '')) + '"><b>' + esc(b.id) + '</b>' +
-            (name ? ' ' + esc(name) : '') + '</span><div class="bar"><i style="width:' + Math.min(100, v * 100) + '%;background:' + App.satColor(v, thr) + '"></i></div>' +
+            (shown ? ' ' + esc(shown) : '') + '</span><div class="bar"><i style="width:' + Math.min(100, v * 100) + '%;background:' + App.satColor(v, thr) + '"></i></div>' +
             '<span class="p">' + f.pctInt(v) + '</span></div>';
         }).join('');
     }
@@ -315,7 +319,7 @@
         if (code === 'PRD2_CRIT') {
           var nc = isNum(k.pendingCrit) && Number(k.pendingCrit) > 0 ? Number(k.pendingCrit) : leadingCount(g.list[0].text);
           add('crit', '<b>' + f.plural(nc || 0, 'palette', 'palettes') + '</b> en PRD2 depuis plus de ' + esc(hText(thr.pendingHoursCrit)) + ' h' +
-            (isNum(k.oldestPendingHours) ? ' · max ' + esc(f.hm(k.oldestPendingHours)) : ''), code);
+            (isNum(k.oldestPendingHours) ? ' · max ' + esc(f.hm(App.oldestWaitHours(s))) : ''), code);
         } else if (code === 'PRD2_WARN') {
           var nw = isNum(k.pendingWarn) && Number(k.pendingWarn) > 0 ? Number(k.pendingWarn) : leadingCount(g.list[0].text);
           add(g.level, '<b>' + f.plural(nw || 0, 'palette', 'palettes') + '</b> en PRD2 depuis ' + esc(hText(thr.pendingHoursWarn)) + ' à ' +
@@ -357,6 +361,18 @@
       return items;
     }
 
+    // Reason written under the plan: blocks of their projects full, or (references without a project) no free block
+    // or free blocks full; v1: capacity of the family blocks.
+    function toPlaceReason(s) {
+      var list = ((s.blockContents || {})['À PLACER'] || []);
+      if (list.some(function (e) { return e.project && e.project !== App.NO_PROJECT; })) return 'blocs du projet pleins';
+      if (App.hasProjects(s)) {
+        var free = (s.blocks || []).filter(function (b) { return b.title === 'Libre' || !b.title; }).length;
+        return free ? 'blocs libres pleins' : 'aucun bloc libre (page PC Projets)';
+      }
+      return App.hasFamilies(s) ? '' : 'capacité des blocs dépassée';
+    }
+
     // Why pallets are 'À PLACER': their projects (blocks full), no project, or (v1) the family blocks are full.
     function toPlaceWhy(s) {
       var list = ((s.blockContents || {})['À PLACER'] || []);
@@ -370,7 +386,7 @@
       });
       if (named.length) return ' (projet ' + esc(named.slice(0, 2).join(', ')) + (named.length > 2 ? '…' : '') + ')';
       if (none && App.hasProjects(s)) return ' (sans projet)';
-      return App.hasProjects(s) ? '' : ' (blocs de la famille pleins)';
+      return App.hasProjects(s) || !App.hasFamilies(s) ? '' : ' (blocs de la famille pleins)';
     }
 
     function ticker(s) {
@@ -406,7 +422,7 @@
         R.stage.innerHTML = '';
         var rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
         twin = App.mountTwin(R.stage, s, { autoRotate: false, theme: 'dark', mode: 'project', boost: 1.4, labelPx: Math.round(rem * 1.5),
-          dockLabels: false });
+          isoLabelPx: Math.round(rem * 1.3), dockLabels: false });
       } else {
         twin.update(s);
       }
@@ -421,7 +437,9 @@
       (s.blocks || []).forEach(function (b) { sat[b.id] = b.saturation; });
       window.Plan2D.build(R.plan, s.layout, {
         sat: sat, thresholds: thr, ghosts: k.pendingPallets || 0, ghostsCrit: k.pendingCrit || 0, trucks: s.docks || [],
-        projectColors: App.hasProjects(s) ? s.projects : null
+        projectColors: App.hasProjects(s) ? s.projects : null,
+        // Project names readable from 5 m (the tags shrink to fit the narrow blocks).
+        titleSize: 12
       });
       var projects = App.projectLegend(s);
       R.planRamp.innerHTML = window.Plan2D.legendHtml(thr) + (projects.length ? window.Plan2D.projectLegendHtml(projects) : '') +
@@ -437,7 +455,7 @@
         return '<div class="row"><b>' + esc(b.id) + '</b><div class="bar"><i style="width:' + Math.min(100, v * 100) + '%;background:' + App.satColor(v, thr) + '"></i></div>' +
           '<span class="p">' + f.pctInt(v) + '</span><span class="lbl">' + (name ? '<b class="proj">' + esc(name) + '</b> · ' : '') + info.join(' · ') + '</span></div>';
       }).join('') + (k.toPlacePallets ? '<div class="tp"><b>' + f.plural(k.toPlacePallets, 'palette', 'palettes') + ' à placer</b>' + toPlaceWhy(s) +
-        ' : capacité des blocs dépassée ou bloc non affecté.</div>' : '');
+        (toPlaceReason(s) ? ' : ' + toPlaceReason(s) : '') + '.</div>' : '');
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -464,7 +482,7 @@
             s: f.plural(Number(k.pendingCrit) || 0, 'palette', 'palettes') + ' · à transférer d’urgence', cls: ps.crit || Number(k.pendingCrit) ? 'crit' : '' },
           { l: 'De ' + hText(thr.pendingHoursWarn) + ' à ' + hText(thr.pendingHoursCrit) + ' h', v: f.num(ps.warn, 0) + ' <small>' + (ps.warn > 1 ? 'étiquettes' : 'étiquette') + '</small>',
             s: f.plural(Number(k.pendingWarn) || 0, 'palette', 'palettes') + ' · à surveiller', cls: ps.warn ? 'warn' : '' },
-          { l: 'Plus ancienne attente', v: o && isNum(o.hours) ? esc(f.hm(o.hours)) : '—',
+          { l: 'Plus ancienne attente', v: o && isNum(o.hours) ? esc(App.waitText(o, s)) : '—',
             s: o ? esc(o.article) + (o.label ? ' · ' + esc(o.label) : '') : 'aucune' }
         ]);
         R.ptable.innerHTML = rows.length ? '<table><thead><tr><th>Étiquette</th><th>Article</th><th>Projet</th><th>Déclarée le</th><th class="num">Attente</th></tr></thead><tbody>' +
@@ -474,7 +492,7 @@
             return '<tr class="' + (lvl ? 'lv-' + lvl : '') + '"><td class="mono">' + (p.label ? esc(p.label) : '<span class="dim">sans étiquette</span>') + '</td>' +
               '<td class="mono">' + esc(p.article) + '</td><td>' + esc(p.project || '—') + '</td>' +
               '<td>' + esc(p.ts ? f.stampShort(p.ts) : f.date(p.date)) + '</td>' +
-              '<td class="num"><span class="tv-chip ' + cls + '">' + (isNum(p.hours) ? esc(f.hm(p.hours)) : f.days(p.days)) + '</span></td></tr>';
+              '<td class="num"><span class="tv-chip ' + cls + '">' + (isNum(p.hours) ? esc(App.waitText(p, s)) : f.days(p.days)) + '</span></td></tr>';
           }).join('') + '</tbody></table><div class="more" data-more hidden></div>'
           : '<div class="more">Aucune palette en attente : tout ce qui a été déclaré est transféré en EXP2.</div>';
         var buckets = App.pendingBuckets(rows, thr);

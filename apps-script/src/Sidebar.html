@@ -209,7 +209,8 @@
       // 44.04 -> '44 h 02'.
       function frHours(h) {
         if (h === null || h === undefined || isNaN(h)) return '';
-        var min = Math.round(h * 60);
+        // Minutes truncated, as on the screens and in the alert texts.
+        var min = Math.floor(Math.max(0, h) * 60 + 1e-6);
         return Math.floor(min / 60) + ' h ' + (min % 60 < 10 ? '0' : '') + (min % 60);
       }
 

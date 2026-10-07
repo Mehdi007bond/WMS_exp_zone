@@ -114,8 +114,12 @@
     .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
     .newp { display: flex; gap: 6px; margin-top: 10px; }
     .newp button { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
-    .links a { display: block; color: var(--accent); margin: 3px 0; word-break: break-all; }
+    .links a { display: block; color: var(--accent); margin: 3px 0; overflow-wrap: anywhere; }
     .invalid { margin: 6px 0 0; padding: 0 0 0 16px; font-size: 12px; color: var(--crit); }
+    .notes { font-size: 11px; color: var(--muted); margin: -2px 0 6px; }
+    .ref .why { display: block; font-size: 11px; color: var(--muted); }
+    .ref.bad .des { color: var(--crit); white-space: normal; }
+    .newtag { font-size: 10px; font-weight: 600; color: var(--accent); margin-left: 4px; }
   </style>
 </head>
 <body>
@@ -124,10 +128,11 @@
 
   <section class="card">
     <h2>Coller des références</h2>
-    <textarea id="paste" rows="6" spellcheck="false" placeholder="Une référence par ligne&#10;ou deux colonnes copiées d’Excel :&#10;référence ⇥ projet"></textarea>
-    <label>Projet (lignes sans 2<sup>e</sup> colonne)
+    <textarea id="paste" rows="6" spellcheck="false" placeholder="Une référence par ligne&#10;ou 2 colonnes d’Excel :&#10;référence ⇥ projet"></textarea>
+    <label><span>Projet des lignes sans 2<sup>e</sup> colonne</span>
       <input id="project" list="projectList" maxlength="40" autocomplete="off" placeholder="Choisir ou saisir un nouveau nom">
     </label>
+    <p class="hint" style="margin:4px 0 0">Un nouveau nom crée le projet ; « Sans projet » retire le projet. Lignes vides, espaces et doublons ignorés.</p>
     <datalist id="projectList"></datalist>
     <div class="actions">
       <button type="button" id="btnPreview">Aperçu</button>
@@ -208,22 +213,133 @@
         return err && err.message ? err.message : String(err);
       }
 
-      // Same rules as the server (Api.gs): the server checks again before writing.
-      function refCode(v) {
-        var s = String(v === null || v === undefined ? '' : v).trim().toUpperCase();
-        if (/^\d+$/.test(s)) s = s.replace(/^0+(?=\d)/, '');
-        return s;
+      // Same rules as the server (Api.gs) and the web page « Projets » (PagesPc.html): the server checks again.
+      var HEADER_RE = /^(articles?|references?( articles?)?|ref\.?( article)?|code( article)?|code produit|n[o°]\.? ?(d')?article|numero( d'article)?|materiel|material|part ?number|pn)$/;
+      var PROJECT_HEADER_RE = /^(projets?|projects?|nom (du )?projet)$/;
+
+      function fold(v) {
+        var t = String(v === null || v === undefined ? '' : v);
+        if (t.normalize) t = t.normalize('NFD');
+        return t.replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      }
+
+      // Spaces of every kind (no-break, thin, figure, BOM) -> one plain space, trimmed.
+      function cleanSpaces(v) {
+        return String(v === null || v === undefined ? '' : v).replace(/[\u00a0\u202f\u2007\u2009\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
+      }
+
+      function unquote(t) {
+        var m = /^"([\s\S]*)"$/.exec(t);
+        return m ? m[1].replace(/""/g, '"').trim() : t;
+      }
+
+      // Article code as the server stores it: upper case, leading zeros removed from all-digit codes. split: the line
+      // had columns (a space is then a wrong character, not a missing separator). -> { code, error }
+      function normArticle(raw, split) {
+        var t = unquote(cleanSpaces(raw));
+        if (/^\d{1,3}( \d{3})+$/.test(t)) t = t.replace(/ /g, '');
+        var code = t.toUpperCase();
+        if (/^\d+$/.test(code)) code = code.replace(/^0+(?=\d)/, '');
+        var error = '';
+        if (!code) error = 'Référence vide';
+        else if (/^\d+([.,]\d+)?E[+-]?\d+$/.test(code)) error = 'Référence en notation scientifique (Excel) : mettez la colonne au format Texte';
+        else if (/\s/.test(code) && !split) error = 'Espace dans la référence : séparez référence et projet par une tabulation (copie Excel) ou un point-virgule';
+        else if (!ARTICLE_RE.test(code)) error = 'Référence invalide : lettres, chiffres et . _ / - seulement, 40 caractères au plus';
+        return { code: code, error: error };
       }
 
       function projName(v) {
-        return String(v === null || v === undefined ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+        return cleanSpaces(String(v === null || v === undefined ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' '));
       }
 
       function projProblem(n) {
         if (n.length > 40) return 'Nom de projet trop long (40 caractères au plus)';
         if (/[,;|]/.test(n)) return 'Nom de projet invalide (sans virgule, point-virgule ni barre verticale)';
-        if (n.toLowerCase() === NO_PROJECT.toLowerCase()) return 'Nom réservé : « ' + NO_PROJECT + ' »';
+        if (fold(n) === fold(NO_PROJECT)) return 'Nom réservé : « ' + NO_PROJECT + ' »';
         return '';
+      }
+
+      // Project cell or field: '' / '-' = none given, « Sans projet » = remove the project. -> { name, given, remove, error }
+      function normProject(raw) {
+        var t = unquote(projName(raw));
+        if (!t || t === '-' || t === '—') return { name: '', given: false, remove: false, error: '' };
+        if (fold(t) === fold(NO_PROJECT)) return { name: '', given: true, remove: true, error: '' };
+        var problem = projProblem(t);
+        return { name: t, given: true, remove: false, error: problem };
+      }
+
+      /**
+       * One reference per line, or two columns copied from Excel (reference TAB project; « ; » separates too). Blank
+       * lines, spaces and a header line (Référence / Projet) are skipped; a reference given twice is merged (its last
+       * project wins). Lines without their own project take the field. An Excel row whose reference cell is empty is
+       * skipped (its project is not a reference). A line of more than two columns is refused unless a header line
+       * names the columns (a designation must never be taken for a project).
+       * -> { rows: [{ raw, article, error, project, remove, projectError, given, line, count, conflict }], blank, header,
+       *      merged, noRef }
+       */
+      function parse(text, fieldProject) {
+        var def = normProject(fieldProject);
+        var out = { rows: [], blank: 0, header: false, merged: 0, noRef: 0 };
+        var byCode = {}, first = true, colRef = 0, colProj = 1, byHeader = false;
+        String(text || '').replace(/(\r\n|\r|\n)$/, '').split(/\r\n|\r|\n/).forEach(function (line, i) {
+          var t = String(line).replace(/\ufeff/g, '');
+          if (!cleanSpaces(t)) {
+            out.blank++;
+            return;
+          }
+          var cols = t.indexOf('\t') >= 0 ? t.split('\t') : t.indexOf(';') >= 0 ? t.split(';') : [t];
+          while (cols.length > 1 && !cleanSpaces(cols[cols.length - 1])) cols.pop();
+          if (first) {
+            first = false;
+            var refAt = -1, projAt = -1;
+            cols.forEach(function (c, k) {
+              var n = fold(cleanSpaces(c)).replace(/[\u2019\u0060]/g, '\'');
+              if (refAt < 0 && HEADER_RE.test(n)) refAt = k;
+              else if (projAt < 0 && PROJECT_HEADER_RE.test(n)) projAt = k;
+            });
+            if (refAt >= 0 || projAt >= 0) {
+              out.header = true;
+              byHeader = true;
+              colRef = refAt >= 0 ? refAt : 0;
+              colProj = projAt;
+              return;
+            }
+          }
+          if (!cleanSpaces(cols[colRef])) {
+            out.noRef++;
+            return;
+          }
+          var a = normArticle(cols[colRef], cols.length > 1);
+          if (!a.error && !byHeader && cols.filter(function (c) { return cleanSpaces(c); }).length > 2) {
+            a.error = 'Plus de deux colonnes : collez seulement Référence et Projet';
+          }
+          var p = colProj >= 0 && cols.length > colProj ? normProject(cols[colProj]) : { name: '', given: false, remove: false, error: '' };
+          var use = p.given ? p : def;
+          var row = { raw: unquote(cleanSpaces(cols[colRef])), article: a.code, error: a.error, project: use.name, remove: use.remove,
+            projectError: use.error || '', given: use.given, line: i + 1, count: 1, conflict: [] };
+          if (!a.error) {
+            var prev = byCode[a.code];
+            if (prev) {
+              prev.count++;
+              out.merged++;
+              if (row.given) {
+                var before = prev.remove ? NO_PROJECT : prev.project, after = row.remove ? NO_PROJECT : row.project;
+                if (prev.given && fold(before) !== fold(after)) {
+                  if (prev.conflict.indexOf(before) < 0) prev.conflict.push(before);
+                  if (prev.conflict.indexOf(after) < 0) prev.conflict.push(after);
+                }
+                prev.project = row.project;
+                prev.remove = row.remove;
+                prev.projectError = row.projectError;
+                prev.given = true;
+              }
+              return;
+            }
+            byCode[a.code] = row;
+          }
+          out.rows.push(row);
+        });
+        return out;
       }
 
       // ---------------------------------------------------------------------------------------------------------
@@ -280,121 +396,105 @@
       // ---------------------------------------------------------------------------------------------------------
       // Paste -> preview
       // ---------------------------------------------------------------------------------------------------------
-      // One reference per line (or several separated by spaces, commas, semicolons), or two columns from Excel
-      // (reference TAB project). A first line of headers (Référence / Article) is skipped, and so is an Excel row
-      // whose reference cell is empty (its project is not a reference).
-      function parse(text, fieldProject) {
-        var rows = [];
-        var header = /^(r[ée]f[ée]rences?|articles?|codes?)$/i;
-        String(text || '').replace(/\r\n?/g, '\n').split('\n').forEach(function (line, i) {
-          if (!line.trim()) return;
-          var cells = line.split('\t');
-          if (cells.length >= 2) {
-            if (!cells[0].trim() || (i === 0 && header.test(cells[0].trim()))) return;
-            var p = cells[1].trim();
-            rows.push({ raw: cells[0].trim(), project: p !== '' ? p : fieldProject });
-            return;
-          }
-          line.split(/[\s,;]+/).forEach(function (ref) {
-            if (!ref || (i === 0 && header.test(ref))) return;
-            rows.push({ raw: ref, project: fieldProject });
-          });
+      // Spelling of a project already used (PROJETS first, then ARTICLES), else the name as typed.
+      function spelling() {
+        var spell = {};
+        projects.forEach(function (p) { spell[fold(p.project)] = p.project; });
+        (data.references || []).forEach(function (r) {
+          if (r.project && !spell[fold(r.project)]) spell[fold(r.project)] = r.project;
         });
-        return rows;
+        return spell;
       }
 
       function preview() {
         if (!data || !data.installed) return;
         var refs = referencesByArticle();
-        var spell = {};
-        projects.forEach(function (p) { spell[p.project.toLowerCase()] = p.project; });
-        (data.references || []).forEach(function (r) {
-          if (r.project && !spell[r.project.toLowerCase()]) spell[r.project.toLowerCase()] = r.project;
-        });
-        var rows = parse($('paste').value, projName($('project').value));
-        var seen = {}, conflicts = {}, items = [];
-        rows.forEach(function (r) {
-          var art = refCode(r.raw);
-          var project = projName(r.project);
-          var item = { raw: r.raw, article: art, project: project, status: '', reason: '' };
-          if (!ARTICLE_RE.test(art)) item.reason = 'Référence invalide';
-          else item.reason = projProblem(project);
-          if (!item.reason && project) {
-            var k = project.toLowerCase();
-            if (!spell[k]) spell[k] = project;
-            item.project = spell[k];
-          }
-          if (!item.reason) {
-            if (Object.prototype.hasOwnProperty.call(seen, art)) {
-              if (seen[art] !== item.project.toLowerCase()) conflicts[art] = true;
-              return;
-            }
-            seen[art] = item.project.toLowerCase();
-          }
-          items.push(item);
-        });
-        var counts = { neu: 0, change: 0, same: 0, bad: 0 };
+        var known = spelling(), spell = {};
+        Object.keys(known).forEach(function (k) { spell[k] = known[k]; });
+        var parsed = parse($('paste').value, $('project').value);
+        var counts = { neu: 0, change: 0, same: 0, bad: 0 }, fresh = [];
         pending = [];
-        items.forEach(function (it) {
-          if (!it.reason && conflicts[it.article]) it.reason = 'En double avec des projets différents';
-          var cur = refs[it.article.toUpperCase()];
-          it.current = cur ? cur.project : '';
-          if (it.reason) {
+        var items = parsed.rows.map(function (r) {
+          var it = { raw: r.raw, article: r.article, line: r.line, count: r.count, conflict: r.conflict, status: '', why: '', current: '', target: '' };
+          var cur = refs[r.article];
+          it.current = cur ? cur.project || '' : '';
+          if (r.error || r.projectError) it.why = r.error || r.projectError;
+          else if (!r.given) it.why = 'Projet manquant : saisissez-le dans « Projet » ou en 2e colonne';
+          if (it.why) {
             it.status = 'bad';
             counts.bad++;
-            return;
+            return it;
           }
-          if (!cur) {
-            it.status = 'neu';
-            counts.neu++;
-          } else if (cur.project === it.project) {
-            it.status = 'same';
-            counts.same++;
-          } else {
-            it.status = 'change';
-            counts.change++;
-          }
-          pending.push({ article: it.article, project: it.project });
+          // A new name takes its first spelling in the paste (the server keeps the first one it writes): « zephyr » in
+          // the field and « ZEPHYR » in a cell make one project.
+          var key = fold(r.project);
+          if (!r.remove && !spell[key]) spell[key] = r.project;
+          it.target = r.remove ? '' : spell[key];
+          if (it.target && !known[key] && fresh.indexOf(it.target) < 0) fresh.push(it.target);
+          if (!cur) it.status = it.target ? 'neu' : 'same';
+          else it.status = fold(it.current) === fold(it.target) ? 'same' : 'change';
+          if (it.status === 'same' && !cur) it.why = 'déjà sans projet';
+          counts[it.status]++;
+          if (it.status !== 'same') pending.push({ article: it.article, project: it.target });
+          return it;
         });
-        renderPreview(items, counts, refs);
+        var notes = [];
+        if (parsed.header) notes.push('ligne d’en-tête ignorée');
+        if (parsed.blank) notes.push(plural(parsed.blank, 'ligne vide ignorée', 'lignes vides ignorées'));
+        if (parsed.noRef) notes.push(plural(parsed.noRef, 'ligne sans référence ignorée', 'lignes sans référence ignorées'));
+        if (parsed.merged) notes.push(plural(parsed.merged, 'doublon fusionné', 'doublons fusionnés'));
+        if (fresh.length) notes.push((fresh.length > 1 ? 'nouveaux projets : ' : 'nouveau projet : ') + fresh.join(', '));
+        renderPreview(items, counts, refs, notes, fresh);
       }
 
       var STATUS = {
         neu: ['st-new', 'Nouvelle'], change: ['st-change', 'Changement'], same: ['st-same', 'Inchangée'], bad: ['st-bad', 'Invalide']
       };
 
-      function renderPreview(items, counts, refs) {
+      function renderPreview(items, counts, refs, notes, fresh) {
         if (!items.length) {
           $('preview').innerHTML = '';
+          $('btnSave').textContent = 'Enregistrer';
           setMessage('msg', 'Collez au moins une référence.', 'err');
           setBusy(false);
           return;
         }
+        // Invalid lines first (to correct), then the changes, the new ones, the unchanged ones.
+        var order = { bad: 0, change: 1, neu: 2, same: 3 };
+        items.sort(function (a, b) { return (order[a.status] - order[b.status]) || (a.line - b.line); });
         var shown = items.slice(0, 300);
         var html = '<div class="counts"><b>' + plural(counts.neu, 'nouvelle', 'nouvelles') + '</b> · ' +
           plural(counts.change, 'changement', 'changements') + ' · ' + plural(counts.same, 'inchangée', 'inchangées') +
-          (counts.bad ? ' · <span style="color:var(--crit)">' + plural(counts.bad, 'invalide', 'invalides') + '</span>' : '') + '</div>';
+          (counts.bad ? ' · <span style="color:var(--crit)">' + plural(counts.bad, 'invalide', 'invalides') + '</span>' : '') + '</div>' +
+          (notes.length ? '<div class="notes">' + esc(notes.join(' · ')) + '</div>' : '');
+        // An invalid line shows what was pasted and why (« ligne 6 » to find it in the box); a valid one its designation.
         html += '<div class="list">' + shown.map(function (it) {
           var st = STATUS[it.status];
-          var des = it.status === 'bad' ? it.reason : (designationOf(it.article, refs) || 'jamais vue dans les données');
-          var move = it.status === 'bad' ? '' : (it.current && it.status !== 'same' ? esc(it.current) + ' → ' : '') +
-            (it.project ? '<b>' + esc(it.project) + '</b>' : '<i>sans projet</i>');
-          return '<div class="ref"><div class="move"><span class="code">' + esc(it.status === 'bad' ? it.raw : it.article) + '</span>' +
-            '<span class="st ' + st[0] + '">' + st[1] + '</span></div><span class="des">' + esc(des) + '</span>' +
-            (move ? '<div>' + move + '</div>' : '') + '</div>';
+          var bad = it.status === 'bad';
+          var des = bad ? it.why : (designationOf(it.article, refs) || 'jamais vue dans les données');
+          var extra = [];
+          if (bad) extra.push('ligne ' + it.line);
+          else if (it.why) extra.push(it.why);
+          if (it.count > 1) extra.push('collée ' + it.count + ' fois');
+          if (it.conflict.length) extra.push('projets différents : ' + it.conflict.join(', ') + ' (le dernier est retenu)');
+          var move = bad ? '' : (it.current && it.status !== 'same' ? esc(it.current) + ' → ' : '') +
+            (it.target ? '<b>' + esc(it.target) + '</b>' + (fresh.indexOf(it.target) >= 0 ? '<span class="newtag">nouveau</span>' : '') : '<i>sans projet</i>');
+          return '<div class="ref' + (bad ? ' bad' : '') + '"><div class="move"><span class="code">' + esc(bad ? it.raw : it.article) + '</span>' +
+            '<span class="st ' + st[0] + '">' + st[1] + '</span></div><span class="des">' + esc(des) + '</span>' + (move ? '<div>' + move + '</div>' : '') +
+            (extra.length ? '<span class="why">' + esc(extra.join(' · ')) + '</span>' : '') + '</div>';
         }).join('') + '</div>';
         if (items.length > shown.length) html += '<div class="hint">… et ' + frNum(items.length - shown.length) + ' autres lignes.</div>';
         $('preview').innerHTML = html;
-        var toSave = counts.neu + counts.change;
-        $('btnSave').textContent = 'Enregistrer (' + frNum(toSave) + ')';
+        var toSave = pending.length;
+        $('btnSave').textContent = toSave ? 'Enregistrer (' + frNum(toSave) + ')' : 'Enregistrer';
         if (pending.length > MAX_ROWS) {
           pending = [];
           setMessage('msg', 'Plus de ' + frNum(MAX_ROWS) + ' références : enregistrez-les en plusieurs fois.', 'err');
         } else if (!toSave) {
-          setMessage('msg', pending.length ? 'Rien à changer : ces références ont déjà ce projet.' : 'Aucune référence valide.', pending.length ? '' : 'err');
-          pending = [];
+          setMessage('msg', counts.bad ? 'Aucune ligne valide à enregistrer : corrigez les lignes invalides.' : 'Rien à changer : ces références ont déjà ce projet.',
+            counts.bad ? 'err' : '');
         } else {
-          setMessage('msg', 'Vérifiez l’aperçu puis « Enregistrer ».', '');
+          setMessage('msg', (counts.bad ? 'Les lignes invalides ne sont pas enregistrées. ' : '') + 'Vérifiez l’aperçu puis « Enregistrer ».', '');
         }
         setBusy(false);
       }
@@ -445,7 +545,8 @@
             '<input type="color" class="sw" data-color="' + i + '" value="' + esc(colorOf(p)) + '" title="Couleur du projet">' +
             '<b title="' + esc(p.project) + '">' + esc(p.project) + '</b>' +
             '<span class="muted">' + plural(n, 'réf.', 'réf.') + '</span>' +
-            (p.color ? '<button type="button" class="reset" data-auto="' + i + '" title="Couleur automatique">auto</button>' : '<span class="auto">auto</span>') +
+            (p.color ? '<button type="button" class="reset" data-auto="' + i + '" title="Revenir à la couleur automatique">couleur auto</button>' :
+              '<span class="auto" title="Couleur choisie automatiquement : cliquez sur le carré pour la changer">automatique</span>') +
             '</div><div class="chips">' + blocks.map(function (b) {
               var on = p.blocks.indexOf(b.id) >= 0;
               return '<button type="button" class="chip" data-p="' + i + '" data-b="' + esc(b.id) + '" aria-pressed="' + on + '" title="' +

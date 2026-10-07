@@ -8,7 +8,7 @@
  *             state.projects, by family for v1 data, grey when neither), trucks (state.docks), pending ghosts
  *             (state.kpi.pendingPallets, red for state.kpi.pendingCrit), block tags (title = project names)
  *     opts:   { mode: 'project' | 'age' | 'saturation' ('family' = 'project'), boost (canvas resolution factor),
- *               pending (override) }
+ *               pending (override), labelPx (font size of the tags, else from the scale) }
  *   IsoView.legend(mode, state) -> [{ color, label }] (same entries as Twin3D.legend)
  *
  * The canvas takes the CSS size of its element; the picture is always dark (TV palette).
@@ -206,7 +206,8 @@
     var spanX = (BW + BH) * c30, spanY = (BW + BH) * s30 + 5;
     var s = Math.min((W - 30) / spanX, (H - 40) / spanY);
     var ox = (W - spanX * s) / 2 + BH * c30 * s, oy = 30 + 3.2 * s + Math.max(0, (H - 40 - spanY * s) / 2);
-    var fs = Math.round(Math.max(11, Math.min(24, s * 1.25)));
+    // Tag font: from the scale of the drawing, or opts.labelPx (the TV asks for labels readable from 5 m).
+    var fs = Number(opts.labelPx) > 0 ? Math.round(Number(opts.labelPx)) : Math.round(Math.max(11, Math.min(24, s * 1.25)));
 
     function P(x, y, z) {
       return [ox + (x - y) * c30 * s, oy + (x + y) * s30 * s - z * s];
@@ -336,39 +337,50 @@
 
     // Labels.
     ctx.textBaseline = 'middle';
-    // Tag centered on a 3D point; sub: smaller second line (block id and saturation under the project names).
-    function tag(x, y, z, txt, bg, fg, size, weight, sub) {
+    // Tag centered on a 3D point; txt: one line or several (one project per line); sub: smaller last line (block id
+    // and saturation under the project names). tagBox measures it, drawTag paints it (centered on box.x, box.y).
+    function tagBox(x, y, z, txt, bg, fg, size, weight, sub) {
       var p = P(x, y, z);
       size = size || fs;
-      var font = (weight || 600) + ' ' + size + 'px "IBM Plex Sans", system-ui, sans-serif';
-      var subSize = Math.round(size * 0.8), subFont = '600 ' + subSize + 'px "IBM Plex Sans", system-ui, sans-serif';
-      ctx.font = font;
-      var w = ctx.measureText(txt).width;
-      if (sub) {
-        ctx.font = subFont;
-        w = Math.max(w, ctx.measureText(sub).width);
+      var lines = Object.prototype.toString.call(txt) === '[object Array]' ? txt : [txt];
+      var t = { x: p[0], y: p[1], lines: lines, sub: sub || '', bg: bg, fg: fg, size: size, lineH: size + 2,
+        font: (weight || 600) + ' ' + size + 'px "IBM Plex Sans", system-ui, sans-serif', subSize: Math.round(size * 0.8) };
+      t.subFont = '600 ' + t.subSize + 'px "IBM Plex Sans", system-ui, sans-serif';
+      ctx.font = t.font;
+      var w = 0;
+      lines.forEach(function (l) { w = Math.max(w, ctx.measureText(l).width); });
+      if (t.sub) {
+        ctx.font = t.subFont;
+        w = Math.max(w, ctx.measureText(t.sub).width);
       }
-      w += size;
-      var hh = size + 8 + (sub ? subSize + 2 : 0);
-      ctx.fillStyle = bg;
+      t.w = w + size;
+      t.hh = lines.length * t.lineH + 6 + (t.sub ? t.subSize + 2 : 0);
+      return t;
+    }
+    function drawTag(t) {
+      var x0 = t.x - t.w / 2, y0 = t.y - t.hh / 2;
+      ctx.fillStyle = t.bg;
       ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(p[0] - w / 2, p[1] - hh / 2, w, hh, 4);
-      else ctx.rect(p[0] - w / 2, p[1] - hh / 2, w, hh);
+      if (ctx.roundRect) ctx.roundRect(x0, y0, t.w, t.hh, 4);
+      else ctx.rect(x0, y0, t.w, t.hh);
       ctx.fill();
-      ctx.fillStyle = fg;
+      ctx.fillStyle = t.fg;
       ctx.textAlign = 'center';
-      ctx.font = font;
-      if (!sub) {
-        ctx.fillText(txt, p[0], p[1] + 0.5);
-        return;
-      }
-      ctx.fillText(txt, p[0], p[1] - hh / 2 + 4 + size / 2 + 0.5);
-      ctx.font = subFont;
-      ctx.fillText(sub, p[0], p[1] + hh / 2 - 4 - subSize / 2 + 0.5);
+      ctx.font = t.font;
+      t.lines.forEach(function (l, i) {
+        ctx.fillText(l, t.x, y0 + 3 + i * t.lineH + t.lineH / 2 + 0.5);
+      });
+      if (!t.sub) return;
+      ctx.font = t.subFont;
+      ctx.fillText(t.sub, t.x, y0 + t.hh - 4 - t.subSize / 2 + 0.5);
+    }
+    function tag(x, y, z, txt, bg, fg, size, weight, sub) {
+      drawTag(tagBox(x, y, z, txt, bg, fg, size, weight, sub));
     }
     var thr = (window.App && window.App.thresholds) ? window.App.thresholds(state) : (conf().THRESHOLDS || { satWarn: 0.85, satCrit: 0.95 });
     var projected = hasProjects(state);
     if (opts.labels !== false) {
+      var boxes = [];
       L.blocks.forEach(function (b) {
         var bs = blockState[b.id];
         var v = bs && bs.saturation !== null && bs.saturation !== undefined ? Number(bs.saturation) : 0;
@@ -379,9 +391,24 @@
         // when the state has projects: before any project is set, every block would read 'Libre'.
         var title = String((bs && bs.title) || b.title || '');
         if (title === 'Libre' && !projected) title = '';
-        if (title) tag(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, title, col, fg, null, 700, b.id + ' · ' + pctTxt);
-        else tag(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, b.id + '  ' + pctTxt, col, fg);
+        // One project per line (a shared block stays narrow); beyond three: the first two and '+ n'.
+        var names = title ? title.split(' / ') : [];
+        if (names.length > 3) names = names.slice(0, 2).concat(['+ ' + (names.length - 2)]);
+        if (title) boxes.push(tagBox(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, names, col, fg, null, 700, b.id + ' · ' + pctTxt));
+        else boxes.push(tagBox(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, b.id + '  ' + pctTxt, col, fg));
       });
+      // Block tags never cover each other (project names are wider than the block ids): a tag that overlaps one
+      // higher on the picture moves down below it, as in the 3D view.
+      boxes.sort(function (p1, p2) { return (p1.y - p1.hh / 2) - (p2.y - p2.hh / 2); });
+      for (var ia = 0; ia < boxes.length; ia++) {
+        for (var ib = 0; ib < ia; ib++) {
+          var A = boxes[ia], B = boxes[ib];
+          if (Math.abs(A.x - B.x) < (A.w + B.w) / 2 + 3 && A.y - A.hh / 2 < B.y + B.hh / 2 + 3 && A.y + A.hh / 2 > B.y - B.hh / 2 - 3) {
+            A.y = B.y + B.hh / 2 + 3 + A.hh / 2;
+          }
+        }
+      }
+      boxes.forEach(drawTag);
       if (pending > 0) {
         var hCrit = Number((thr && thr.pendingHoursCrit) || 6);
         tag(conv ? conv.x + conv.w / 2 : 14, conv ? conv.y + 1 : BH - 2.4, 1.6, 'En attente PRD2 : ' + pending + ' pal' +

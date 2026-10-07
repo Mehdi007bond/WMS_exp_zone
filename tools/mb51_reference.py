@@ -2,7 +2,7 @@
 """Independent reference calculation for the real-format MB51 fixture (sample-data/mb51-reel/).
 
 Implements, in plain Python and without sharing any code with the Apps Script engine, the v2 rules of
-docs/ARCHITECTURE.md (sections "MB51 réel" and "Engine v2"): label derivation, timestamps, finished-goods filter,
+docs/SPEC_V2.md (sections 2 and 4, summarised in docs/ARCHITECTURE.md): label derivation, timestamps, finished-goods filter,
 label-aware FIFO layers, pallets per label, pending ages in hours, PRD2 -> EXP2 dwell times.
 Writes sample-data/mb51-reel/expected.json, which tests/normalize.test.js and tests/engine.test.js must match.
 

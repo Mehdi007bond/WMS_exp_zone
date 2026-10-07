@@ -762,13 +762,18 @@ function EngineModule_() {
 
     // Article info: opening rows first, then movements, then ARTICLES (same priority as the oracle).
     var info = new Map();
+    // seen: the article is in the data (an opening row or a movement), not only in ARTICLES.
     function setInfo_(art, designation, uqs) {
-      if (!info.has(art)) info.set(art, { designation: designation, uqs: uqs, lastTs: '', lastDate: '' });
+      if (!info.has(art)) info.set(art, { designation: designation, uqs: uqs, lastTs: '', lastDate: '', seen: false });
     }
-    openRows.forEach(function (r) { setInfo_(r.art, r.designation, r.uqs); });
+    openRows.forEach(function (r) {
+      setInfo_(r.art, r.designation, r.uqs);
+      info.get(r.art).seen = true;
+    });
     lines.forEach(function (l) {
       setInfo_(l.art, l.designation, l.uqs);
       var v = info.get(l.art);
+      v.seen = true;
       if (l.ts > v.lastTs) v.lastTs = l.ts;
       if (l.date > v.lastDate) v.lastDate = l.date;
     });
@@ -991,7 +996,7 @@ function EngineModule_() {
       var row = { article: art, designation: inf.designation, uqs: inf.uqs, qpp: q ? (m && m.qppM ? m.qpp : q / 1000) : null,
         family: m ? m.family : '', known: !!q, inArticles: !!m, qty: {}, pallets: {},
         qppSource: q ? (m && m.qppM ? QPP_ARTICLES : QPP_LABELS) : '', project: pr ? pr.name : '', projectKey: pr ? pr.key : '',
-        lastTs: inf.lastTs, lastDate: inf.lastDate };
+        lastTs: inf.lastTs, lastDate: inf.lastDate, seen: inf.seen };
       MAGS.forEach(function (mag) {
         var b = buckets.get(art + '|' + mag);
         row.qty[mag] = (b ? b.total : 0) / 1000;
@@ -1000,7 +1005,9 @@ function EngineModule_() {
       stockByArt[art] = row;
       return row;
     });
-    var unknown = stock.filter(function (s) { return !s.known; }).map(function (s) { return s.article; });
+    // Articles of the data without a quantity per pallet. A reference only typed in ARTICLES (a project prepared
+    // before its first pallet) has no quantity to count: no alert for it.
+    var unknown = stock.filter(function (s) { return !s.known && s.seen; }).map(function (s) { return s.article; });
 
     // Remaining layers: PRD2 = pending, EXP2 = FIFO. Labeled layers are 1 pallet each; the unlabeled ones share
     // the rest with the v1 attribution (all layers together when there is no label or labelIsPallet = 0).
@@ -1411,9 +1418,16 @@ function EngineModule_() {
     if (result.toPlace.pallets > 0) {
       // Named after its projects when it holds some, else after its families (v1), else nothing.
       var tp = result.toPlace, named = tp.projects.filter(function (x) { return x !== NO_PROJECT; }).length;
-      var what = named ? ' (projet ' + tp.projects.join(', ') + ')' :
-        (tp.families && tp.families !== NO_FAMILY ? ' (famille ' + tp.families + ')' : '');
-      add_('warn', 'TO_PLACE', plural_(tp.pallets, 'palette', 'palettes') + ' hors capacité des blocs' + what + ' : à placer');
+      var family = tp.families && tp.families !== NO_FAMILY;
+      if (!named && !family && tp.projects.length) {
+        // Only references without a project: they go to the free blocks (no project), and there is none, or they are full.
+        var free = result.blocks.filter(function (b) { return b.title === 'Libre'; }).length;
+        add_('warn', 'TO_PLACE', plural_(tp.pallets, 'palette', 'palettes') + ' sans projet à placer : ' +
+          (free ? 'blocs libres pleins' : 'aucun bloc libre') + ' (page Projets)');
+      } else {
+        var what = named ? ' (projet ' + tp.projects.join(', ') + ')' : (family ? ' (famille ' + tp.families + ')' : '');
+        add_('warn', 'TO_PLACE', plural_(tp.pallets, 'palette', 'palettes') + ' hors capacité des blocs' + what + ' : à placer');
+      }
     }
     if (k.noProjectArticles > 0) {
       add_('warn', 'NO_PROJECT', plural_(k.noProjectArticles, 'référence suivie', 'références suivies') +
@@ -1441,7 +1455,7 @@ function EngineModule_() {
 
     // Articles without a quantity per pallet: one alert each (v1), grouped per code beyond a few (real exports
     // carry raw-material moves of finished goods without labels: no wall of identical lines).
-    var noQpp = result.stock.filter(function (s) { return !s.known; });
+    var noQpp = result.stock.filter(function (s) { return !s.known && s.seen; });
     var missing = noQpp.filter(function (s) { return s.inArticles; }), absent = noQpp.filter(function (s) { return !s.inArticles; });
     function codes_(list) {
       var shown = list.slice(0, MAX_GROUPED_CODES).map(function (s) { return s.article; });

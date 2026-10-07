@@ -525,6 +525,8 @@ body.theme-tv { height: 100vh; overflow: hidden; cursor: none; font-size: 1rem; 
 .tv-table .dim { color: var(--ink-3); }
 .tv-chip { font: 600 1.3rem/1 var(--f-body); padding: .35rem .6rem; border-radius: 999px; background: #1f2b38; color: var(--ink-2); display: inline-block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .tv-chip.w { background: #3a2c06; color: #ffd56b; } .tv-chip.c { background: #3d1515; color: #ffb4b4; }
+/* Waiting time in the TV tables: as large as the row (the figure that matters from 5 m). */
+.tv-table td .tv-chip { font-size: 1.6rem; padding: .12rem .6rem; font-variant-numeric: tabular-nums; }
 .tv-chip.b { background: #1c2e41; color: #9cc8f5; } .tv-chip.g { background: #12301a; color: #8fe08f; }
 .tv-chart { background: var(--panel); border: 1px solid var(--line); border-radius: .6rem; padding: 1rem 1.2rem; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: .6rem; min-height: 0; }
 .tv-chart h3 { font: 500 1.5rem/1.2 var(--f-body); color: var(--ink-2); }

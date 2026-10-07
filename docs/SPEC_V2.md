@@ -130,7 +130,8 @@ New and changed columns are **appended at the end** of existing tabs, so a sheet
   - `pendingHoursWarn` = 4 (`Seuil attente PRD2 - pré-alerte`, heures),
   - `pendingHoursCrit` = 6 (`Seuil attente PRD2 - alerte`, heures, « Une référence en PRD2 depuis plus de 6 h est un vrai problème »),
   - `labelIsPallet` = 1 (`1 étiquette = 1 palette`, 1/0),
-  - `importTrackedOnly` = 1 (`Import : produits finis seulement`, 1/0).
+  - `importTrackedOnly` = 1 (`Import : produits finis seulement`, 1/0),
+  - `trackAll` = 0 (`Calcul : tous les articles`, 1/0; the engine switch of 4.2). *Corrected after the code (docs review of 07.10.2026): the migration adds this fifth row too, since `CFG.THRESHOLDS` holds it.*
 - `CALC_*`: v1 columns first (unchanged, the oracle still compares them), then:
   - `CALC_STOCK` + `Source qté/pal`, `Projet`
   - `CALC_EN_ATTENTE` + `Étiquette`, `Saisie le`, `Attente (h)`, `Niveau`, `Projet`
@@ -187,7 +188,7 @@ Layers per (article, magasin) carry `{ qty (milli), label, ts, date, doc, origin
 ### 4.6 Time
 
 - `asOf` (date) as v1. `asOfTs` = the latest `ts` among the processed lines dated ≤ `asOf` (`''` when none): « the time of the data ».
-- Pending rows (live PRD2 layers): `hours = (asOfTs − ts) / 3600` rounded to 2 decimals when both are known, else `null`. `level` = `crit` when `hours ≥ pendingHoursCrit`, `warn` when `hours ≥ pendingHoursWarn`, else `''`; rows without `ts` keep the day rule (`days ≥ pendingDaysCrit` → `crit`, `≥ pendingDaysWarn` → `warn`).
+- Pending rows (live PRD2 layers): `hours = (asOfTs − ts) / 3600` rounded to 2 decimals when both are known, else `null`. A row is judged in hours when its `hours` is known **and** the layer is a declared container (it carries a label, or it was pushed by a declaration 101/131): `level` = `crit` when `hours ≥ pendingHoursCrit`, `warn` when `hours ≥ pendingHoursWarn`, else `''`. The other rows keep the day rule (`days ≥ pendingDaysCrit` → `crit`, `≥ pendingDaysWarn` → `warn`; `pendingDaysCrit` = 2 × `pendingDaysWarn` unless set): rows without `ts`, and unlabeled stock moved into PRD2 by a transfer (returns from EMRT or EXP2, legs from a storage location outside the export) or from the opening stock. *Corrected after the code (docs review of 07.10.2026): the first version judged every row with a `ts` in hours.*
 - FIFO EXP2 rows: `ageHours`; exits: `tsIn`, `tsOut`, `stayHours` (when both known).
 - **Dwell PRD2 → EXP2**: when a PRD2 issuing line whose other leg is in EXP2 consumes a labeled layer (the first one it takes from) and both `ts` are known, `dwellHours = (line.ts − layer.ts) / 3600`, recorded on the line's posting date. Daily `dwellMedianH` (median: mean of the two middle values when even) and `dwellP90H` (nearest rank: sorted[ceil(0.9 n) − 1]), rounded to 2 decimals, `null` when none.
 
@@ -197,7 +198,7 @@ Layers per (article, magasin) carry `{ qty (milli), label, ts, date, doc, origin
 - Effective rules = `input.rules` (criteria `ARTICLE`, `PROJET`, `FAMILLE`) + one generated rule per `PROJETS` row with blocks: `{ priority: 5, criterion: 'PROJET', value: project, blocks }`. Matching: sort by priority, then `ARTICLE` < `PROJET` < `FAMILLE`, then input order; the first matching rule wins (v1 distribution inside a rule: proportional to free capacity, largest remainder, overflow `À PLACER`).
 - Articles matching no rule (no project, or a project without blocks): spread over the **free blocks** (blocks targeted by no effective rule), same proportional distribution; when there is no free block they go to `À PLACER` (v1). In the oracle every block is targeted, so nothing changes.
 - `input.rules` empty → no rules (no F1–F5 fallback).
-- Blocks: `result.blocks[]` gains `projects` (names whose rule targets the block, rule order) and `title` = `projects.join(' / ')`, else `'Famille ' + families` when families, else `'Libre'`. `blockContents[]` entries gain `project`. `toPlace.projects` lists the projects in `À PLACER` (`Sans projet` for none).
+- Blocks: `result.blocks[]` gains `projects` (names whose rule targets the block, rule order) and `title` = `projects.join(' / ')`, else `'Famille ' + families` when `FAMILLE` rules target it, else `'Article A1'` / `'Articles A1, A2'` when only `ARTICLE` rules target it, else `'Libre'`. *Corrected after the code (docs review of 07.10.2026): the `ARTICLE` case was missing.* `blockContents[]` entries gain `project`. `toPlace.projects` lists the projects in `À PLACER` (`Sans projet` for none).
 - Colors: `result.projects` = `{ name: color }` from `PROJETS › Couleur`, else a fixed palette in sorted name order (12 colors readable on light and dark backgrounds, distinct from the saturation blue/amber/red); `'Sans projet'` = `#c9ced6`. Families keep their v1 colors.
 
 ### 4.8 KPIs and alerts
@@ -206,8 +207,9 @@ New KPIs: `asOfTs`, `pendingLabels` (pending rows with a label), `pendingWarn` a
 
 New alerts (French, critical first as v1):
 
-- `PRD2_CRIT` (`crit`), when `pendingCrit > 0`: « n palette(s) en PRD2 depuis plus de 6 h · la plus ancienne : <article> <projet> depuis 8 h 12 (étiquette 434503024) ». The threshold value comes from `pendingHoursCrit` (`6` in the text).
-- `PRD2_WARN` (`warn`), when `pendingWarn > 0`: « n palette(s) en PRD2 depuis 4 à 6 h ».
+- `PRD2_CRIT` (`crit`), when the rows judged in hours (4.6) hold pallets at level `crit`: « n palette(s) en PRD2 depuis plus de 6 h · la plus ancienne : <article> <projet> depuis 8 h 12 (étiquette 434503024) », n = those pallets, the oldest = the row judged in hours with the longest wait. The threshold value comes from `pendingHoursCrit` (`6` in the text).
+- `PRD2_WARN` (`warn`), when the rows judged in hours hold pallets at level `warn`: « n palette(s) en PRD2 depuis 4 à 6 h ».
+- *Corrected after the code (docs review of 07.10.2026): the first version tied both alerts to the KPIs `pendingCrit` / `pendingWarn`, which also count the rows judged in days (those raise `PENDING_STUCK`). On data where every pending row has an entry time, both give the same number.*
 - `NO_PROJECT` (`warn`), when `noProjectArticles > 0`: « n référence(s) suivie(s) sans projet : affectez-les dans la page Projets ».
 - `UNPAIRED_TRANSFER`: counts only **unlabeled** unpaired legs (labeled legs are normal, see 1).
 - `PENDING_STUCK` (days) stays for rows without `ts`.
@@ -239,7 +241,7 @@ daily[]: + dwellMedianH, dwellP90H
 
 ### 5.1 Reads (no key)
 
-`api_getProjects()` → `{ version, projects: [{ project, blocks: [ids], color, comment }], references: [{ article, designation, project }], blocks: [{ id, label, capacity }], settings: { pendingHoursWarn, pendingHoursCrit } }`, read from `ARTICLES`, `PROJETS` and `LAYOUT` (small tabs). Article statistics come from `state.articles` on the client.
+`api_getProjects()` → `{ version, projects: [{ project, blocks: [ids], color, comment, listed }], references: [{ article, designation, project }], blocks: [{ id, label, capacity }], settings: { pendingHoursWarn, pendingHoursCrit } }`, read from `ARTICLES`, `PROJETS`, `LAYOUT` and `PARAM_SEUILS` (small tabs). Project names only typed in `ARTICLES › Projet` follow the `PROJETS` rows with `listed: false` and no blocks. Article statistics come from `state.articles` on the client. *Corrected after the code (docs review of 07.10.2026): `PARAM_SEUILS` and `listed` were missing.*
 
 ### 5.2 Writes (admin key, script lock, recalculation, version bump, ACCUEIL refresh)
 
@@ -276,7 +278,7 @@ Sim.mb51Rows(movements, { noise: true, seed })          -> [header row of the 22
                                                            that the finished-goods filter must drop)
 ```
 
-Defaults: `days` 7 (1–60), `palletsPerDay` 450 labels (20–1,500), `seed` 2026, `startDate` 7 days before today's default end `2026-10-05`.
+Defaults: `days` 7 (1–60), `palletsPerDay` 450 labels (20–1,500), `seed` 2026, `endDate` `2026-10-05` in `Sim` (`Sim.DEFAULTS`), `startDate` = `endDate` − (`days` − 1). The app (menu, ACCUEIL button, control panel, `api_simulate`) passes `endDate` = yesterday. *Corrected after the code (docs review of 07.10.2026).*
 
 Model:
 - ~36 fictional finished-goods articles (codes shaped like the real ones: two letters + five digits, or eight digits; never real codes), designations like `PROJECTEUR ATLAS ECO TD G`, unit PCE, quantity per label from {6, 8, 12, 15, 18, 24, 50, 60, 80, 84}. 6 fictional projects `ATLAS`, `BOREAL`, `CORSO`, `DELTA`, `ETNA`, `FJORD` with blocks (`ATLAS` → B1, B7; `BOREAL` → B2, B8; `CORSO` → B3; `DELTA` → B4; `ETNA` → B5; `FJORD` → B6) and colors; 3 articles without a project.

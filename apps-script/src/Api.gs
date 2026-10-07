@@ -974,7 +974,7 @@ function summary_(state) {
     pendingCrit: over,
     pendingWarn: Number(k.pendingWarn) || 0,
     pendingHoursCrit: hCrit,
-    oldestPendingHours: k.oldestPendingHours === undefined ? null : k.oldestPendingHours,
+    oldestPendingHours: oldestWaitHours_(state),
     alerts: (state.alerts || []).length,
     critical: crit,
     text: 'Au ' + dataTimeText_(state) + ' : ' +
@@ -1006,11 +1006,41 @@ function pendingHoursCrit_(state) {
   return isFinite(n) && n >= 0 ? n : 6;
 }
 
-// Hours as on the screens: 44.04 -> '44 h 02', 0.5 -> '0 h 30'.
+// Hours as on the screens and in the alert texts (minutes truncated): 44.04 -> '44 h 02', 0.5 -> '0 h 30'.
 function frHours_(h) {
-  if (h === null || h === undefined || !isFinite(h)) return '';
-  var min = Math.round(Number(h) * 60);
+  if (h === null || h === undefined || h === '' || !isFinite(h)) return '';
+  var min = Math.floor(Math.max(0, Number(h)) * 60 + 1e-6);
   return Math.floor(min / 60) + ' h ' + pad2_(min % 60);
+}
+
+// SAP wall-clock time 'yyyy-mm-dd hh:mm:ss' -> seconds on a continuous scale (read as UTC: only differences are used);
+// null when not a time stamp.
+function tsSeconds_(ts) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(String(ts || ''));
+  if (!m) return null;
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] || 0)) / 1000;
+}
+
+// Oldest wait in PRD2 in hours (kpi.oldestPendingHours, null when unknown), to the second when its row is in
+// state.pending (labels first): the rounded hours of the state (2 decimals = 36 s) can read one minute less than the
+// alert text, which the engine writes from the seconds. Same rule as App.oldestWaitHours on the screens.
+function oldestWaitHours_(state) {
+  var k = (state && state.kpi) || {};
+  var h = k.oldestPendingHours;
+  if (h === null || h === undefined || h === '' || !isFinite(h)) return null;
+  var to = tsSeconds_(dataTs_(state));
+  var best = null, bestLabel = false;
+  ((state && state.pending) || []).forEach(function (p) {
+    if (!p || p.hours === null || p.hours === undefined || Number(p.hours) !== Number(h)) return;
+    var from = tsSeconds_(p.ts);
+    if (from === null || to === null || to < from) return;
+    var w = (to - from) / 3600, lab = !!p.label;
+    if (best === null || (lab && !bestLabel) || (lab === bestLabel && w > best)) {
+      best = w;
+      bestLabel = lab;
+    }
+  });
+  return best !== null ? best : Number(h);
 }
 
 // Runs after a successful write: refreshes the ACCUEIL status when Main.gs is loaded (sheet only, best effort).

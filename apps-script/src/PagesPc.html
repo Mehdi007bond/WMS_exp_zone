@@ -106,7 +106,7 @@
         none = true;
       }
     });
-    if (!App.hasProjects(s)) return 'la capacité des blocs de leur famille est dépassée';
+    if (!App.hasProjects(s)) return App.hasFamilies(s) ? 'la capacité des blocs de leur famille est dépassée' : 'la capacité des blocs est dépassée';
     var parts = [];
     if (named.length) parts.push('blocs du projet ' + named.join(', ') + ' pleins');
     if (none) parts.push('références sans projet et aucun bloc libre (page Projets)');
@@ -167,8 +167,8 @@
       var fr = App.freshness(s);
       var conn = App.connection();
       var sim = !!(s && s.source === 'SIMULATION');
-      R.fresh.innerHTML = '<span class="dot ' + (conn ? 'crit' : sim ? 'ok' : fr.level) + '"></span><span class="lbl">' + (s ? esc(fr.lead) : 'Données SAP du') + '</span><b>' +
-        esc(s ? fr.asOfLabel : '—') + '</b>' + (s && fr.imported ? '<span class="lbl"> · ' + esc(fr.verb + ' ' + fr.imported) + '</span>' : '') +
+      R.fresh.innerHTML = '<span class="dot ' + (conn ? 'crit' : sim ? 'ok' : fr.level) + '"></span><span class="lbl">' + (s ? esc(fr.lead) : '') + '</span><b>' +
+        esc(s ? fr.asOfLabel : 'Aucune donnée SAP') + '</b>' + (s && fr.imported ? '<span class="lbl"> · ' + esc(fr.verb + ' ' + fr.imported) + '</span>' : '') +
         (sim ? '<span class="tag sim">SIMULÉES</span>' : '');
       R.fresh.title = s ? fr.text + (fr.ago ? ' (' + fr.ago + ')' : '') + ' · ' + fr.label : 'Aucune donnée';
       R.sim.hidden = !sim;
@@ -274,7 +274,7 @@
       if (!t) return;
       var docks = s.docks || [];
       var projects = App.hasProjects(s);
-      var waits = isNum(k.oldestPendingHours) ? 'max ' + f.hm(k.oldestPendingHours) + (Number(k.pendingCrit) > 0 ? ' · <b class="bad-t">' + num(k.pendingCrit) + ' &gt; ' + esc(App.hText(thr.pendingHoursCrit)) + ' h</b>' : '')
+      var waits = isNum(k.oldestPendingHours) ? 'max ' + f.hm(App.oldestWaitHours(s)) + (Number(k.pendingCrit) > 0 ? ' · <b class="bad-t">' + num(k.pendingCrit) + ' &gt; ' + esc(App.hText(thr.pendingHoursCrit)) + ' h</b>' : '')
         : f.days(k.oldestPendingDays);
       t.innerHTML = '<div class="panel"><h2>Légende<small>' + esc({ project: projects ? 'couleur du projet' : App.hasFamilies(s) ? 'famille de produit' : 'aucun projet : page Projets', age: 'âge de la palette la plus ancienne', saturation: 'saturation du bloc' }[mode]) + '</small></h2>' + legendHtml(s) + '</div>' +
         '<div class="panel" data-r="pick"><h2>Sélection</h2>' + pickHtml() + '</div>' +
@@ -649,13 +649,14 @@
         '<span class="lk-proj">Projet : ' + (project ? projTag(s, project) : '<b class="warn-t">sans projet</b>') +
         ' <button type="button" class="btn sm" data-go-projects>' + (project ? 'Changer' : 'Affecter') + '</button></span>';
       var oldest = fifo[0];
+      var oldestH = oldest && isNum(oldest.ageHours) ? App.waitHours(oldest, s, 'ageHours') : null;
       var pendOld = pend.filter(function (p) { return isNum(p.hours); }).sort(function (a, b) { return b.hours - a.hours; })[0];
       var html = '<div class="stats">' +
         stat('EXP2 · notre entrepôt', pal(E.pallets) + ' <small>pal</small>', num(E.qty, undefined) + ' ' + esc(uqs) + (labeled ? ' · ' + f.plural(fifo.filter(function (r) { return r.label; }).length, 'étiquette', 'étiquettes') : '')) +
         stat('En attente · PRD2', pal(Pd.pallets) + ' <small>pal</small>', num(Pd.qty, undefined) + ' ' + esc(uqs) +
-          (pendOld ? ' · depuis ' + esc(f.hm(pendOld.hours)) : pend[0] ? ' · depuis le ' + f.date(pend[0].date) : ''), pendOld && pendOld.level === 'crit' ? 'crit' : '') +
+          (pendOld ? ' · depuis ' + esc(App.waitText(pendOld, s)) : pend[0] ? ' · depuis le ' + f.date(pend[0].date) : ''), pendOld && pendOld.level === 'crit' ? 'crit' : '') +
         stat('EMRT · externe', pal(M.pallets) + ' <small>pal</small>', num(M.qty, undefined) + ' ' + esc(uqs)) +
-        stat('Plus ancienne entrée EXP2', oldest ? (isNum(oldest.ageHours) && oldest.ageHours < 48 ? esc(f.hm(oldest.ageHours)) : num(oldest.age) + ' <small>jours</small>') : '—',
+        stat('Plus ancienne entrée EXP2', oldest ? (oldestH !== null && oldestH < 48 ? esc(f.hm(oldestH)) : num(oldest.age) + ' <small>jours</small>') : '—',
           oldest ? 'entrée le ' + esc(when(oldest.ts, oldest.date)) : 'aucun stock en EXP2') +
         '</div>';
       html += '<div class="cols"><div class="col">';
@@ -670,7 +671,7 @@
             fifo.map(function (r) {
               return '<tr><td class="mono">' + (r.label ? esc(r.label) : '<span class="muted">sans étiquette</span>') + '<span class="sub">' + esc(r.doc || '') + '</span></td>' +
                 '<td>' + esc(when(r.ts, r.date)) + '</td><td>' + esc(r.origin || '') + '</td><td class="num">' + num(r.qty, undefined) + '</td><td class="num">' + pal(r.pallets) + '</td>' +
-                '<td class="num">' + (isNum(r.ageHours) ? esc(f.hm(r.ageHours)) : f.days(r.age)) + '</td><td>' + place() + '</td></tr>';
+                '<td class="num">' + (isNum(r.ageHours) ? esc(App.waitText(r, s, 'ageHours')) : f.days(r.age)) + '</td><td>' + place() + '</td></tr>';
             }).join('') + '</tbody></table></div>' + (fifoUnl ? PAL_NOTE : '') : '<div class="empty-note">Aucun stock de cet article en EXP2.</div>') + '</div>';
       } else {
         html += '<div class="panel"><h2>Stock EXP2 par date d’entrée<small>FIFO · ' + f.plural(fifo.length, 'ligne', 'lignes') + '</small></h2>' +
@@ -687,7 +688,7 @@
             var lvl = App.pendingLevel(p, thr);
             return '<tr class="' + (lvl ? 'lv-' + lvl : '') + '">' + (labeled ? '<td class="mono">' + (p.label ? esc(p.label) : '<span class="muted">sans étiquette</span>') + '</td>' : '') +
               '<td>' + esc(when(p.ts, p.date)) + '</td><td class="mono">' + esc(p.doc || '') + '</td><td class="num">' + num(p.qty, undefined) + '</td><td class="num">' + pal(p.pallets) +
-              '</td><td class="num"><span class="chipd ' + levelChip(lvl) + '">' + (isNum(p.hours) ? esc(f.hm(p.hours)) : f.days(p.days)) + '</span></td></tr>';
+              '</td><td class="num"><span class="chipd ' + levelChip(lvl) + '">' + (isNum(p.hours) ? esc(App.waitText(p, s)) : f.days(p.days)) + '</span></td></tr>';
           }).join('') + '</tbody></table></div>' + (pendUnl ? PAL_NOTE : '') + '</div>';
       }
       html += '<div class="panel"><h2>Sorties d’EXP2<small>entrée → sortie · ' + f.plural(exits.length, 'ligne', 'lignes') + '</small></h2>' +
@@ -696,20 +697,25 @@
             return '<tr>' + (labeled ? '<td class="mono">' + (r.label ? esc(r.label) : '<span class="muted">—</span>') + '</td>' : '') +
               '<td>' + esc(when(r.tsIn, r.dateIn)) + '</td><td>' + esc(when(r.tsOut, r.dateOut)) + '</td><td class="num">' + num(r.qty, undefined) + '</td><td class="num">' +
               (r.pallets === null || r.pallets === undefined ? '?' : num(r.pallets, 1)) + '</td><td>' + esc(r.destination || '') + '</td><td class="num">' +
-              (isNum(r.stayHours) ? esc(f.hm(r.stayHours)) : f.days(r.stay)) + '</td><td class="mono">' + esc(r.doc || '') + '</td></tr>';
+              (isNum(r.stayHours) ? esc(f.hm(App.waitHours({ ts: r.tsIn, stayHours: r.stayHours }, { asOfTs: r.tsOut }, 'stayHours'))) : f.days(r.stay)) + '</td><td class="mono">' + esc(r.doc || '') + '</td></tr>';
           }).join('') + '</tbody></table></div><div class="panel-note">Pal (équiv.) : quantité sortie ÷ quantité par palette (0,4 = 40 % d’une palette).</div>' :
           '<div class="empty-note">Aucune sortie d’EXP2 sur la période.</div>') + '</div>';
       html += '</div><div class="col">';
       html += '<div class="panel mini"><h2>Où est-il ?<small>position théorique</small></h2><svg data-r="mini" role="img" aria-label="Plan miniature : blocs de l’article en surbrillance"></svg>' +
         '<div class="small">' + (locs.length ? locs.map(function (l) {
-          return 'Bloc <b>' + esc(l.block) + '</b>' + (blockTitles[l.block] ? ' (' + esc(blockTitles[l.block]) + ')' : '') + ' : ' + f.plural(l.pallets, 'palette', 'palettes') + ' (âge max ' + f.days(l.ageMax) + ')';
+          // Age in hours like the table (43 h 42, not « 1 j ») when the article is in one block and its entry time is known.
+          var age = locs.length === 1 && oldestH !== null && oldestH < 48 ? 'plus ancienne : ' + f.hm(oldestH) : 'âge max ' + f.days(l.ageMax);
+          return 'Bloc <b>' + esc(l.block) + '</b>' + (blockTitles[l.block] ? ' (' + esc(blockTitles[l.block]) + ')' : '') + ' : ' + f.plural(l.pallets, 'palette', 'palettes') + ' (' + esc(age) + ')';
         }).join('<br>') : 'Aucune palette placée dans un bloc.') +
         (toPlace ? '<br><span class="bad-t">' + f.plural(toPlace.pallets, 'palette', 'palettes') + ' à placer (' +
           (project ? 'blocs du projet pleins' : App.hasProjects(s) ? 'sans projet : affectez-le dans la page Projets' : 'blocs de la famille pleins') + ').</span>' : '') +
-        '<br>Position exacte dès que les règles de placement seront fournies.</div></div>';
+        '<br>' + (App.hasProjects(s) ? 'Bloc déduit du projet de l’article (page Projets) : SAP ne donne pas l’emplacement exact.' :
+          App.hasFamilies(s) ? 'Bloc déduit de la famille (onglet REGLES_PLACEMENT) : SAP ne donne pas l’emplacement exact.' :
+          'Aucun projet : les blocs se remplissent au prorata. Affectez les références et les blocs aux projets dans la page Projets.') + '</div></div>';
       var mv = res.movements || [];
       html += '<div class="panel"><h2>Lignes SAP<small>MB51 · ' + f.plural(res.movementsTotal || mv.length, 'ligne', 'lignes') + (mv.length < (res.movementsTotal || 0) ? ', ' + mv.length + ' affichées' : '') + '</small></h2>' +
-        (mv.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date cpt. · Doc.</th><th>MvT</th><th>Mag.</th><th class="num">Qté</th><th>Saisie</th></tr></thead><tbody>' +
+        // The first column shows the entry time when SAP gives it (v2 export), else the posting date (Date cpt.).
+        (mv.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>' + (mv.some(function (m) { return m.ts; }) ? 'Saisie le' : 'Date cpt.') + ' · Doc.</th><th>MvT</th><th>Mag.</th><th class="num">Qté</th><th>Saisie</th></tr></thead><tbody>' +
           mv.map(function (m) {
             return '<tr><td>' + esc(m.ts ? f.stamp(m.ts) : f.date(m.date)) + '<span class="sub">' + esc(m.doc) + (m.label ? ' · étiq. ' + esc(m.label) : '') + '</span></td><td class="mono" title="' + esc(m.text || '') + '">' + esc(m.mvt) + (m.s ? ' ' + esc(m.s) : '') +
               '</td><td>' + esc(m.magasin) + '</td><td class="num">' + num(m.qty, undefined) + '</td><td>' + esc(m.user || '') + '</td></tr>';
@@ -797,7 +803,7 @@
         (ps.unlabeled ? '<span class="muted">+ ' + f.plural(ps.unlabeled, 'ligne', 'lignes') + ' sans étiquette</span>' : '') +
         '<span class="sep">·</span><span class="' + (ps.crit ? 'bad-t' : '') + '"><b data-r="critCount">' + num(ps.crit) + '</b> depuis plus de ' + esc(crit) + ' h</span>' +
         (ps.critUnlabeled ? '<span class="muted">(+ ' + f.plural(ps.critUnlabeled, 'ligne', 'lignes') + ' sans étiquette)</span>' : '') +
-        '<span class="sep">·</span><span>plus ancienne <b data-r="oldest">' + (o && isNum(o.hours) ? esc(f.hm(o.hours)) : '—') + '</b></span>' +
+        '<span class="sep">·</span><span>plus ancienne <b data-r="oldest">' + (o && isNum(o.hours) ? esc(App.waitText(o, s)) : '—') + '</b></span>' +
         '<span class="muted">à l’heure des données (' + esc(s.asOfTs ? f.stampShort(s.asOfTs) : f.date(s.asOf)) + ')</span></div>';
       var dwell = isNum(k.dwellMedianH) ? esc(f.hm(k.dwellMedianH)) : '—';
       var html = head + '<div class="stats">' +
@@ -829,7 +835,7 @@
         if (filter.level === 'warn' && !lvl) return false;
         return true;
       });
-      html += '<div class="cols side-400"><div class="panel"><h2>Déclarées en PRD2, pas encore transférées en EXP2<small>une ligne par étiquette · la plus ancienne d’abord · cliquez pour ouvrir la fiche article</small></h2>' +
+      html += '<div class="cols side-400"><div class="panel"><h2>Déclarées en PRD2, pas encore transférées en EXP2<small>une ligne par étiquette · clic : fiche article</small></h2>' +
         '<div class="toolbar"><label class="field inline"><span>Projet</span><select data-r="fProject"><option value="">Tous les projets</option>' +
         names.map(function (n) { return '<option value="' + esc(n) + '"' + (n === filter.project ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') + '</select></label>' +
         '<label class="field inline"><span>Attente</span><select data-r="fLevel"><option value="">Toutes</option>' +
@@ -843,13 +849,13 @@
               '<td class="mono">' + (p.label ? esc(p.label) : '<span class="muted">sans étiquette</span><span class="sub">' + num(p.qty, undefined) + ' ' + esc(p.uqs || '') + '</span>') + '</td>' +
               '<td class="mono">' + esc(p.article) + '</td><td>' + esc(p.designation || '') + '</td><td>' + projTag(s, p.project) + '</td>' +
               '<td>' + esc(p.ts ? f.stampShort(p.ts) : f.date(p.date)) + '</td>' +
-              '<td class="num"><span class="chipd ' + levelChip(lvl) + '">' + (isNum(p.hours) ? esc(f.hm(p.hours)) : f.days(p.days)) + '</span></td>' +
+              '<td class="num"><span class="chipd ' + levelChip(lvl) + '">' + (isNum(p.hours) ? esc(App.waitText(p, s)) : f.days(p.days)) + '</span></td>' +
               '<td>' + esc(p.user || '') + '</td></tr>';
           }).join('') + '</tbody></table></div>' :
           '<div class="empty-note">' + (ps.rows.length ? 'Aucune ligne pour ce filtre.' : 'Aucune palette en attente : tout ce qui a été déclaré est transféré en EXP2.') + '</div>') +
         (ps.truncated ? '<div class="panel-note">Liste limitée aux ' + num(ps.rows.length) + ' plus anciennes (' + num(ps.total) + ' au total).</div>' : '') +
         '<div class="panel-note">Rouge : en PRD2 depuis plus de ' + esc(crit) + ' h · orange : depuis ' + esc(warn) + ' h (seuils de l’onglet PARAM_SEUILS). Attente = heure des données − heure de déclaration.</div></div>';
-      // Side: waiting time chart and per project counts.
+      // Side: waiting time chart and per project pallets (the unit of the tiles: 145 pal, 86 palettes > 6 h).
       var buckets = App.pendingBuckets(ps.rows, thr);
       var per = {}, order = [];
       ps.rows.forEach(function (p) {
@@ -858,10 +864,11 @@
           per[n] = { n: 0, crit: 0, warn: 0 };
           order.push(n);
         }
-        per[n].n++;
+        var pal = Number(p.pallets) || 0;
+        per[n].n += pal;
         var lvl = App.pendingLevel(p, thr);
-        if (lvl === 'crit') per[n].crit++;
-        else if (lvl === 'warn') per[n].warn++;
+        if (lvl === 'crit') per[n].crit += pal;
+        else if (lvl === 'warn') per[n].warn += pal;
       });
       order.sort(function (a, b) { return (per[b].crit - per[a].crit) || (per[b].n - per[a].n) || a.localeCompare(b, 'fr'); });
       html += '<div class="col"><div class="panel"><h2>Étiquettes par durée d’attente</h2>' +
@@ -870,7 +877,7 @@
         }), { w: 380, h: 210, ariaLabel: 'Étiquettes en attente par durée d’attente' }) +
         '<div class="panel-note">Une étiquette déclarée est normalement transférée en EXP2 dans l’heure (délai médian du jour : ' + dwell + '). Au-delà de ' + esc(crit) +
         ' h, c’est un vrai problème : palette oubliée en production.</div></div>' +
-        (order.length ? '<div class="panel"><h2>Par projet</h2><table class="tbl"><thead><tr><th>Projet</th><th class="num">En attente</th><th class="num">&gt; ' + esc(crit) + ' h</th></tr></thead><tbody>' +
+        (order.length ? '<div class="panel"><h2>Par projet<small>palettes</small></h2><table class="tbl"><thead><tr><th>Projet</th><th class="num">En attente</th><th class="num">&gt; ' + esc(crit) + ' h</th></tr></thead><tbody>' +
           order.map(function (n) {
             return '<tr class="link" tabindex="0" data-filter-project="' + esc(n) + '"><td>' + (n === App.NO_PROJECT ? '<span class="muted">' + esc(n) + '</span>' : projTag(s, n)) + '</td><td class="num">' + num(per[n].n) +
               '</td><td class="num">' + (per[n].crit ? '<span class="chipd c">' + num(per[n].crit) + '</span>' : '0') + '</td></tr>';
@@ -970,9 +977,10 @@
 
   /**
    * Article code as the server stores it: trimmed, upper case, leading zeros removed from all-digit codes,
-   * ^[0-9A-Za-z._/-]{1,40}$. Digits grouped by Excel or a mail ('73 871 645') are joined. -> { code, error }
+   * ^[0-9A-Za-z._/-]{1,40}$. Digits grouped by Excel or a mail ('73 871 645') are joined. split: the pasted line had
+   * columns (a space is then a wrong character, not a missing separator). -> { code, error }
    */
-  function normArticle(raw) {
+  function normArticle(raw, split) {
     var s = unquote(cleanSpaces(raw));
     if (/^\d{1,3}( \d{3})+$/.test(s)) s = s.replace(/ /g, '');
     var code = s.toUpperCase();
@@ -980,7 +988,7 @@
     var error = '';
     if (!code) error = 'Référence vide';
     else if (/^\d+([.,]\d+)?E[+-]?\d+$/.test(code)) error = 'Référence affichée en notation scientifique par Excel (ex. 7,39E+07) : mettez la colonne au format Texte, puis recopiez-la';
-    else if (/\s/.test(code)) error = 'Espace dans la référence : séparez la référence et le projet par une tabulation (copie Excel) ou un point-virgule';
+    else if (/\s/.test(code) && !split) error = 'Espace dans la référence : séparez la référence et le projet par une tabulation (copie Excel) ou un point-virgule';
     else if (!ARTICLE_RE.test(code)) error = 'Référence invalide : lettres, chiffres et . _ / - seulement, 40 caractères au plus';
     return { code: code, error: error };
   }
@@ -1004,17 +1012,18 @@
 
   /**
    * References pasted in the Projets page. One reference per line, or two columns copied from Excel
-   * (Référence ⇥ Projet; « ; » separates too). Blank lines, surrounding spaces and a header line are ignored; a
-   * reference given twice is merged (its last project wins, conflicts are listed); numeric codes lose their leading
-   * zeros like on the server. A line without its own project takes defaultProject. With a header line, the columns
-   * are found by their titles (Article / Référence, Projet), so more columns can be pasted; without one, a line of
-   * more than two columns is refused (a designation must never be taken for a project).
+   * (Référence ⇥ Projet; « ; » separates too). Blank lines, surrounding spaces and a header line are ignored, and so
+   * is an Excel row whose reference cell is empty (its project is not a reference); a reference given twice is merged
+   * (its last project wins, conflicts are listed); numeric codes lose their leading zeros like on the server. A line
+   * without its own project takes defaultProject. With a header line, the columns are found by their titles
+   * (Article / Référence, Projet), so more columns can be pasted; without one, a line of more than two columns is
+   * refused (a designation must never be taken for a project). Same rules as the sheet panel SidebarProjets.html.
    * -> { rows: [{ article, error, project, remove, projectError, source: 'colonne' | 'champ' | '', line, count,
-   *      conflict: [project names] }], blank, header (true when a header line was skipped), lines, merged }
+   *      conflict: [project names] }], blank, header (true when a header line was skipped), lines, merged, noRef }
    */
   function parsePaste(text, defaultProject) {
     var def = normProjectName(defaultProject);
-    var out = { rows: [], blank: 0, header: false, lines: 0, merged: 0 };
+    var out = { rows: [], blank: 0, header: false, lines: 0, merged: 0, noRef: 0 };
     var byCode = {};
     var first = true;
     var colRef = 0, colProj = 1, byHeader = false;
@@ -1043,8 +1052,12 @@
           return;
         }
       }
+      if (!cleanSpaces(cols[colRef])) {
+        out.noRef++;
+        return;
+      }
       out.lines++;
-      var a = normArticle(cols[colRef]);
+      var a = normArticle(cols[colRef], cols.length > 1);
       var extra = !byHeader && cols.filter(function (c) { return cleanSpaces(c); }).length > 2;
       if (!a.error && extra) {
         a.error = 'Plus de deux colonnes : collez seulement Référence et Projet, ou copiez aussi la ligne de titres (Référence, Projet)';
@@ -1376,7 +1389,8 @@
     function renderStats() {
       var c = counts();
       R.stats.innerHTML = stat('Projets', num(c.projects), f.plural((draft ? draft.projects : []).filter(function (p) { return p.blocks.length; }).length, 'projet avec des zones', 'projets avec des zones')) +
-        stat('Références suivies', num(c.tracked), 'produits finis (passent par EXP2) · ' + f.plural(c.refs, 'référence', 'références') + ' au total') +
+        stat('Références suivies', num(c.tracked), 'produits finis (passent par EXP2)' +
+          (c.refs > c.tracked ? ' · + ' + f.plural(c.refs - c.tracked, 'référence', 'références') + ' jamais vue' + (c.refs - c.tracked > 1 ? 's' : '') + ' dans les données' : '')) +
         stat('Sans projet', num(c.none), c.none ? 'à affecter (section 4)' : 'toutes les références suivies ont un projet', c.none ? 'warn' : '') +
         stat('Blocs sans projet', num(c.freeBlocks) + ' <small>/ ' + num(c.blocks) + '</small>', c.freeBlocks ? 'reçoivent les références sans projet' : 'chaque bloc a un projet');
       R.toc.innerHTML = [['pj-paste', '1 Coller'], ['pj-zones', '2 Zones'], ['pj-list', '3 Projets'], ['pj-none', '4 Sans projet (' + c.none + ')'],
@@ -1397,12 +1411,19 @@
     }
 
     // ---- 1. paste -----------------------------------------------------------------------------------------------
-    function pasteStatus(row, map) {
+    // newNames: { folded name: spelling } of the new projects of the paste, the first spelling wins (the server keeps
+    // the first one it writes): « zephyr » in the field and « ZEPHYR » in a cell make one project, not two.
+    function pasteStatus(row, map, newNames) {
       if (row.error) return { kind: 'invalid', text: 'Invalide', why: row.error };
       if (row.projectError) return { kind: 'invalid', text: 'Invalide', why: row.projectError };
       if (!row.source) return { kind: 'invalid', text: 'Invalide', why: 'Projet manquant : saisissez-le dans « Projet » ou en deuxième colonne' };
       var ref = map[row.article];
       var target = row.remove ? '' : canonical(row.project);
+      if (target && newNames && !isKnownProject(target)) {
+        var key = App.fold(target);
+        if (!newNames[key]) newNames[key] = target;
+        target = newNames[key];
+      }
       var cur = ref ? ref.project || '' : '';
       if (!ref || !ref.inArticles) {
         if (!target) return { kind: 'same', text: 'Inchangée', why: 'déjà sans projet', target: target };
@@ -1421,9 +1442,9 @@
       }
       var map = refs();
       var tally = { 'new': 0, change: 0, same: 0, invalid: 0 };
-      var fresh = [];
+      var fresh = [], newNames = {};
       var rows = pasted.rows.map(function (r) {
-        var st = pasteStatus(r, map);
+        var st = pasteStatus(r, map, newNames);
         tally[st.kind]++;
         if ((st.kind === 'new' || st.kind === 'change') && st.target && !isKnownProject(st.target) && fresh.indexOf(st.target) < 0) fresh.push(st.target);
         return { row: r, st: st, ref: map[r.article] };
@@ -1432,6 +1453,7 @@
       var notes = [];
       if (pasted.header) notes.push('ligne d’en-tête ignorée');
       if (pasted.blank) notes.push(f.plural(pasted.blank, 'ligne vide ignorée', 'lignes vides ignorées'));
+      if (pasted.noRef) notes.push(f.plural(pasted.noRef, 'ligne sans référence ignorée', 'lignes sans référence ignorées'));
       if (pasted.merged) notes.push(f.plural(pasted.merged, 'doublon fusionné', 'doublons fusionnés'));
       var order = { invalid: 0, change: 1, 'new': 2, same: 3 };
       rows.sort(function (a, b) { return (order[a.st.kind] - order[b.st.kind]) || (a.row.line - b.row.line); });
@@ -1490,7 +1512,7 @@
         pasteResult = { kind: res.invalid.length ? 'alert-box' : 'info-box', html: '<b>Enregistré</b> : ' + esc(resultText(res)) + invalidHtml(res.invalid) };
         pasted = null;
         R.pasteText.value = '';
-        App.toast('Projets enregistrés : ' + resultText(res), 'ok');
+        App.toast('Références enregistrées : ' + resultText(res), res.invalid.length ? 'warn' : 'ok');
         renderPreview();
         afterWrite();
       }, function (err) {
@@ -1640,7 +1662,8 @@
           return '<label class="pc"><input type="color" value="' + esc(colors[p.project] || '#cccccc') + '" data-color="' + esc(p.project) + '" aria-label="Couleur du projet ' + esc(p.project) + '">' +
             '<span>' + esc(p.project) + (sameColor[p.project] ? ' <b class="warn-t small">même couleur que ' + esc(sameColor[p.project]) + '</b>' : '') + '</span>' +
             '<span class="small muted">' + (p.blocks.length ? esc(p.blocks.join(', ')) : 'aucun bloc') + '</span>' +
-            (p.color ? '<button type="button" class="btn sm" data-auto="' + esc(p.project) + '" title="Couleur automatique">auto</button>' : '<span class="small muted">auto</span>') + '</label>';
+            (p.color ? '<button type="button" class="btn sm" data-auto="' + esc(p.project) + '" title="Revenir à la couleur automatique de la palette">couleur auto</button>' :
+              '<span class="small muted" title="Couleur choisie automatiquement : cliquez sur le carré pour la changer">automatique</span>') + '</label>';
         }).join('') : '<p class="small muted">Aucun projet : collez des références avec un projet (1) ou saisissez un nom sur un bloc.</p>') + '</div></div></div>';
       var layout = (state() && state().layout) || App.CFG.DEFAULT_LAYOUT;
       var titles = {}, byBlock = {};
@@ -2589,6 +2612,15 @@
         (total ? Math.round(done / total * 100) : 0) + '%"></i></div><div class="small">' + text + '</div>';
     }
 
+    // The 6 h alert right after the import: « 86 palettes en PRD2 depuis plus de 6 h (la plus ancienne : 44 h 02) ».
+    function prd2Box(sum) {
+      if (!sum || !(Number(sum.pendingCrit) > 0)) return '';
+      var h = isNum(sum.pendingHoursCrit) ? App.hText(sum.pendingHoursCrit) : '6';
+      return '<div class="alert-box" data-r="prd2"><b>' + f.plural(sum.pendingCrit, 'palette', 'palettes') + ' en PRD2 depuis plus de ' + esc(h) + ' h</b>' +
+        (isNum(sum.oldestPendingHours) ? ' (la plus ancienne : ' + esc(f.hm(sum.oldestPendingHours)) + ')' : '') +
+        ' : déclarées en production, pas encore transférées en EXP2. Détail par étiquette : page <b>En attente</b>.</div>';
+    }
+
     function send() {
       if (!batch || sending) return;
       var chunks = [];
@@ -2661,11 +2693,13 @@
           (untracked && untracked.lines ? num(untracked.lines) + ' lignes hors produits finis non importées. ' : '') +
           (ms < 1000 ? 'Enregistré en moins d’une seconde.' : 'Enregistré en ' + esc(f.duration(ms)) + '.') + '</p>' +
           (res && res.warning ? '<div class="alert-box">' + esc(res.warning) + '</div>' : '') +
+          prd2Box(res && res.summary) +
           '<div class="stats">' +
           stat('Nouvelles lignes', num(t.added), 'ajoutées à la base') +
           stat('Déjà connues', num(t.duplicates), 'ignorées (doublons)') +
           stat('Rejetées par le serveur', num(t.rejected), 'contrôle serveur') +
-          stat('État recalculé', res && res.summary ? num(res.summary.exp2Pallets) + ' <small>pal EXP2</small>' : '—', res && res.summary ? 'au ' + f.date(res.summary.asOf) : '') +
+          stat('État recalculé', res && res.summary ? num(res.summary.exp2Pallets) + ' <small>pal EXP2</small>' : '—',
+            res && res.summary ? 'au ' + esc(res.summary.asOfTs ? f.stamp(res.summary.asOfTs) : f.date(res.summary.asOf)) : '') +
           '</div><p class="small">' + esc((res && res.message) || '') + '</p>' +
           '<div class="actions"><button type="button" class="btn" data-go="pending">En attente</button><button type="button" class="btn" data-go="projects">Projets</button>' +
           '<button type="button" class="btn" data-go="lookup">Recherche article</button><button type="button" class="btn" data-go="plan">Plan 2D</button><button type="button" class="btn" data-new>Nouvel import</button></div></div>';
@@ -2913,7 +2947,7 @@
       var k = s.kpi || {}, thr = App.thresholds(s), fr = App.freshness(s);
       var alerts = s.alerts || [];
       var debug = !!(App.location && App.location.parameter && App.location.parameter.debug === '1');   // ?debug=1: versions, timing
-      var waits = isNum(k.oldestPendingHours) ? 'plus ancienne ' + f.hm(k.oldestPendingHours) + (Number(k.pendingCrit) > 0 ? ' · ' + num(k.pendingCrit) + ' pal depuis plus de ' + App.hText(thr.pendingHoursCrit) + ' h' : '')
+      var waits = isNum(k.oldestPendingHours) ? 'plus ancienne ' + f.hm(App.oldestWaitHours(s)) + (Number(k.pendingCrit) > 0 ? ' · ' + num(k.pendingCrit) + ' pal depuis plus de ' + App.hText(thr.pendingHoursCrit) + ' h' : '')
         : 'plus ancienne ' + f.days(k.oldestPendingDays);
       R.status.innerHTML = '<div class="row2"><div class="panel"><h2>État actuel</h2><dl class="kv">' +
         '<dt>Source</dt><dd>' + (App.isEmpty(s) ? 'Aucune donnée' : s.source === 'SIMULATION' ? '<span class="tag sim">DONNÉES SIMULÉES</span>' : 'SAP (imports MB51)') + '</dd>' +

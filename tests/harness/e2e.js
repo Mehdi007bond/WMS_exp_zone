@@ -10,7 +10,8 @@
  * v2 scenarios (docs/SPEC_V2.md 7 and 8): pc-projects (paste, preview, save, zones, rename, the plan shows the project),
  * pc-pending-hours (red from pendingHoursCrit), tv-prd2-alert (ticker and tile), pc-import-real (the user's anonymised
  * MB51 export through the import page on an empty base: format line, filter counts, 86 labels over 6 h, TV layout of
- * SAP data), pc-simulation-mb51 (simulated MB51 file written in the browser, then imported).
+ * SAP data), pc-simulation-mb51 (simulated MB51 file written in the browser, then imported), sheet-sidebars (the two
+ * panels of the Google Sheet, SidebarProjets.html and Sidebar.html, at 300 px on the same in-memory server).
  *
  * A scenario fails on any console error, uncaught page error or failed request, or on a failed check.
  * Screenshots: tests/harness/out/shots/ (PC pages 1440 x 900, TV 1920 x 1080); report: out/shots/e2e-report.json.
@@ -133,8 +134,8 @@ async function scenario(name, fn) {
       await page.waitForFunction(() => window.App && window.App.store && window.App.store.status !== 'loading', null, { timeout: 30000 });
       return page;
     },
-    async shot(page, file) {
-      await page.screenshot({ path: path.join(SHOTS, file) });
+    async shot(page, file, opts) {
+      await page.screenshot(Object.assign({ path: path.join(SHOTS, file) }, opts || {}));
       shots.push(file);
     }
   };
@@ -623,8 +624,10 @@ async function run() {
     const numeric = s.articles.filter((a) => a.p && /^\d+$/.test(a.a)).map((a) => a.a)[0];
     check(noProj.length >= 3 && numeric, 'projets : simulation sans références sans projet ' + JSON.stringify(noProj));
     await t.shot(page, 'pc-projects.png');
-    const text = ['Référence\tProjet', '  ' + noProj[0] + '  ', noProj[1].toLowerCase(), '', '00' + numeric + '\tZEPHYR', noProj[0], 'AB CD',
-      'NEWREF99'].join('\n');
+    // The new project typed « ZEPHYR » in the field and « zephyr » in a cell is one project (first spelling); an Excel
+    // row without its reference is skipped.
+    const text = ['Référence\tProjet', '  ' + noProj[0] + '  ', noProj[1].toLowerCase(), '', '00' + numeric + '\tzephyr', noProj[0], 'AB CD',
+      'NEWREF99', '\tORPHELIN'].join('\n');
     await page.fill('[data-r="pasteText"]', text);
     await page.fill('[data-r="pasteProject"]', 'ZEPHYR');
     // Keyboard: Ctrl+Entrée in the paste box shows the preview.
@@ -644,7 +647,8 @@ async function run() {
     check(/collée 2 fois/.test(by[noProj[0]].text), 'aperçu : doublon non fusionné');
     check(by.NEWREF99 && by.NEWREF99.st === 'new' && /jamais vue/.test(by.NEWREF99.text), 'aperçu : référence nouvelle ' + JSON.stringify(by.NEWREF99));
     check(prev.rows.filter((r) => r.st === 'invalid').length === 1, 'aperçu : une ligne invalide attendue');
-    check(/en-tête ignorée/.test(prev.sum) && /1 ligne vide ignorée/.test(prev.sum) && /1 doublon fusionné/.test(prev.sum) && /nouveau projet : ZEPHYR/.test(prev.sum),
+    check(/en-tête ignorée/.test(prev.sum) && /1 ligne vide ignorée/.test(prev.sum) && /1 doublon fusionné/.test(prev.sum) && /nouveau projet : ZEPHYR/.test(prev.sum) && !/nouveaux projets/.test(prev.sum) &&
+      /1 ligne sans référence ignorée/.test(prev.sum) && !/ORPHELIN/.test(prev.rows.map((r) => r.text).join(' ')),
       'aperçu : résumé « ' + prev.sum.replace(/\s+/g, ' ') + ' »');
     check(prev.save.trim() === 'Enregistrer (4)', 'aperçu : bouton « ' + prev.save + ' »');
     await noHorizontalScroll(page, 'projets');
@@ -727,7 +731,107 @@ async function run() {
     await page.waitForTimeout(300);
     await noHorizontalScroll(page, 'projets 1920 px');
     await t.shot(page, 'pc-projects-1920.png');
-    t.note('4 références enregistrées, B5 = ETNA / ZEPHYR NORD, renommage, affectation, changement');
+    // The other screens of the same sheet: TV (3D labels, saturation bars, legend), isometric view, PC twin.
+    const tv = await t.open('out/tv.html', TV);
+    await tv.waitForSelector('.tv-blocks .tv-brow');
+    await tv.waitForTimeout(1500);
+    const onTv = await tv.evaluate(() => ({
+      bars: Array.from(document.querySelectorAll('.tv-blocks .tv-brow .n')).map((e) => e.textContent + ' | ' + e.title),
+      legend: document.querySelector('[data-r="legend"]').textContent,
+      labels: Array.from(document.querySelectorAll('.t3d-label.t3d-block')).map((e) => e.textContent),
+      kind: document.querySelector('.tv-twin-stage .t3d-canvas') ? '3d' : 'iso'
+    }));
+    const barOf = (id) => onTv.bars.filter((x) => x.indexOf(id + ' ') === 0)[0] || '';
+    // Saturation bars: « B5 ETNA +1 » (two projects), every name in the tooltip.
+    check(/^B5 ETNA \+1 \| Bloc B5 · ETNA \/ ZEPHYR NORD$/.test(barOf('B5')) && /^B6 FJORD \+1 \| Bloc B6 · FJORD \/ ZEPHYR NORD$/.test(barOf('B6')),
+      'TV : barres B5 / B6 « ' + barOf('B5') + ' » « ' + barOf('B6') + ' »');
+    check(/ZEPHYR NORD/.test(onTv.legend) && /BOREAL/.test(onTv.legend), 'TV : légende « ' + onTv.legend + ' »');
+    if (onTv.kind === '3d') check(onTv.labels.some((x) => /ZEPHYR NORD/.test(x) && /B5/.test(x)), 'TV 3D : étiquettes ' + JSON.stringify(onTv.labels));
+    await t.shot(tv, 'tv-projects.png');
+    const iso = await t.open('out/tv.html?no3d=1', TV);
+    await iso.waitForSelector('.tv-twin-stage .iso-canvas');
+    check(/ZEPHYR NORD/.test(await iso.textContent('[data-r="legend"]')), 'TV isométrique : légende sans ZEPHYR NORD');
+    await iso.waitForTimeout(800);
+    await t.shot(iso, 'tv-projects-iso.png');
+    const twin = await t.open('out/pc-twin.html', PC);
+    await twin.waitForSelector('[data-r="side"] .legend span');
+    const twinLegend = await twin.$$eval('[data-r="side"] .legend span', (e) => e.map((x) => x.textContent.trim()));
+    check(twinLegend.includes('ZEPHYR NORD'), 'jumeau PC : légende ' + JSON.stringify(twinLegend));
+    t.note('4 références enregistrées, B5 = ETNA / ZEPHYR NORD, renommage, affectation, changement, TV ' + onTv.kind + ' et isométrique à jour');
+  });
+
+  // Sheet sidebars (not in the web app): SidebarProjets.html and Sidebar.html at the 300 px of Google Sheets, their
+  // google.script.run on the real sidebar_* functions of Main.gs (same in-memory store as the web pages). Paste with
+  // the rules of the web page (header, blank line, spaces, duplicate, invalid code, one project whatever the case),
+  // preview, save, blocks of the new project, then the 2D plan shows it; the control panel agrees with the screens.
+  await scenario('sheet-sidebars', async (t) => {
+    const SIDE = { width: 300, height: 1000 };
+    const sp = await t.ctx.newPage();
+    await sp.setViewportSize(SIDE);
+    await sp.goto(base + 'out/sidebar-projets.html');
+    await sp.waitForSelector('#projects .proj', { timeout: 30000 });
+    await noHorizontalScroll(sp, 'panneau Projets');
+    // The label of the project field is one line of text (not « 2 / e / colonne » stacked by the flex label).
+    const label = await sp.evaluate(() => Math.round(document.querySelector('label span').getBoundingClientRect().height));
+    check(label <= 22, 'panneau Projets : libellé du champ projet sur ' + label + ' px de haut');
+    await t.shot(sp, 'sidebar-projets.png', { fullPage: true });
+    const arts = await sp.evaluate(() => window.__harness.Repo.loadState().articles);
+    const noProj = arts.filter((a) => !a.p).map((a) => a.a);
+    const numeric = arts.filter((a) => a.p && /^\d+$/.test(a.a)).map((a) => a.a)[0];
+    check(noProj.length >= 2 && numeric, 'panneau Projets : références de test ' + JSON.stringify(noProj));
+    await sp.fill('#paste', ['Référence\tProjet', '  ' + noProj[0] + '  ', noProj[1].toLowerCase(), '', '00' + numeric + '\tzephyr', noProj[0], 'AB CD',
+      'NEWREF98'].join('\n'));
+    await sp.fill('#project', 'ZEPHYR');
+    await sp.click('#btnPreview');
+    await sp.waitForSelector('#preview .ref');
+    const prev = await sp.evaluate(() => ({ counts: document.querySelector('#preview .counts').textContent, notes: document.querySelector('#preview .notes').textContent,
+      rows: Array.from(document.querySelectorAll('#preview .ref')).map((e) => e.textContent), save: document.getElementById('btnSave').textContent }));
+    check(prev.rows.length === 5 && /1 invalide/.test(prev.counts) && /AB CD/.test(prev.rows[0]) && /Espace dans la référence/.test(prev.rows[0]),
+      'panneau Projets : aperçu ' + JSON.stringify(prev));
+    check(/ligne d’en-tête ignorée/.test(prev.notes) && /1 ligne vide ignorée/.test(prev.notes) && /1 doublon fusionné/.test(prev.notes) &&
+      /nouveau projet : ZEPHYR$/.test(prev.notes), 'panneau Projets : notes « ' + prev.notes + ' » (un seul nouveau projet attendu)');
+    check(prev.save === 'Enregistrer (4)', 'panneau Projets : bouton « ' + prev.save + ' »');
+    await t.shot(sp, 'sidebar-projets-preview.png', { fullPage: true });
+    await sp.click('#btnSave');
+    await sp.waitForFunction(() => /^Références enregistrées/.test(document.getElementById('msg').textContent), null, { timeout: 20000 });
+    const saved = await sp.evaluate(() => ({ arts: window.__harness.Repo.readArticles().map((a) => [a.article, a.project]), toasts: window.__sheet.toasts }));
+    const proj = {};
+    saved.arts.forEach(([a, p]) => { proj[a] = p; });
+    check([noProj[0], noProj[1], numeric, 'NEWREF98'].every((a) => proj[a] === 'ZEPHYR'),
+      'panneau Projets : projets enregistrés ' + JSON.stringify([noProj[0], noProj[1], numeric, 'NEWREF98'].map((a) => proj[a])));
+    check(saved.toasts.some((x) => /^Références enregistrées/.test(x)), 'panneau Projets : pas de message dans le classeur');
+    // Blocks of the new project: B5, then « Enregistrer les zones ».
+    const i = await sp.evaluate(() => Array.from(document.querySelectorAll('#projects .proj b')).map((b) => b.textContent).indexOf('ZEPHYR'));
+    check(i >= 0, 'panneau Projets : ZEPHYR absent de la liste des projets');
+    await sp.click('#projects .chip[data-p="' + i + '"][data-b="B5"]');
+    await sp.click('#btnZones');
+    await sp.waitForFunction(() => /^Projets enregistrés/.test(document.getElementById('msgZones').textContent), null, { timeout: 20000 });
+    const z = await sp.evaluate(() => window.__harness.Repo.readProjects().filter((p) => p.project === 'ZEPHYR')[0]);
+    check(z && z.blocks.join(',') === 'B5', 'panneau Projets : zones de ZEPHYR ' + JSON.stringify(z));
+    await noHorizontalScroll(sp, 'panneau Projets après enregistrement');
+    await t.shot(sp, 'sidebar-projets-saved.png', { fullPage: true });
+    // The web page shows the project of the sidebar on its block.
+    const plan = await t.open('out/pc-plan.html', PC);
+    await plan.waitForSelector('svg [data-title="B5"]');
+    const tag = await plan.$$eval('svg [data-title="B5"]', (e) => e.map((x) => x.textContent).join(' / '));
+    check(/ZEPHYR/.test(tag), 'plan 2D après le panneau : bloc B5 « ' + tag + ' »');
+    const want = await plan.evaluate(() => ({ crit: App.store.state.kpi.pendingCrit, oldest: App.fmt.hm(App.oldestWaitHours(App.store.state)) }));
+    // Control panel: the PRD2 figures are those of the screens.
+    const cp = await t.ctx.newPage();
+    await cp.setViewportSize(SIDE);
+    await cp.goto(base + 'out/sidebar.html');
+    await cp.waitForSelector('#status dl', { timeout: 30000 });
+    const rows = await cp.evaluate(() => {
+      const out = {};
+      const dts = document.querySelectorAll('#status dt');
+      dts.forEach((dt) => { out[dt.textContent] = dt.nextElementSibling.textContent; });
+      return out;
+    });
+    check(rows['PRD2 > 6 h'] === want.crit + ' pal', 'panneau de contrôle : PRD2 > 6 h « ' + rows['PRD2 > 6 h'] + ' » au lieu de ' + want.crit + ' pal');
+    check((rows['En attente PRD2'] || '').indexOf('(' + want.oldest + ')') >= 0, 'panneau de contrôle : attente « ' + rows['En attente PRD2'] + ' » au lieu de ' + want.oldest);
+    await noHorizontalScroll(cp, 'panneau de contrôle');
+    await t.shot(cp, 'sidebar.png', { fullPage: true });
+    t.note('4 références ZEPHYR, bloc B5, plan à jour, panneau de contrôle : ' + rows['PRD2 > 6 h'] + ' > 6 h, ' + want.oldest);
   });
 
   // Simulation page: « Télécharger un MB51 simulé (.xlsx) » writes the real 22-column format in the browser; the file
@@ -787,6 +891,52 @@ async function run() {
     check(rt.source === 'SAP' && rt.asOf === end && rt.pendingCrit === rt.over6h, 'aller-retour MB51 simulé : état ' + JSON.stringify(rt));
     await t.shot(imp, 'pc-import-simulated-mb51-result.png');
     t.note(name + ' : ' + rows + ' lignes, ' + r.filter.trim() + ', ' + rt.stored + ' enregistrées à l’identique');
+  });
+
+  // Simulation page « Générer » (confirmation, admin key), then « +1 jour »: after each, the TV, the pending page and
+  // the alert text give the same PRD2 figures (pallets over 6 h, oldest wait to the minute).
+  await scenario('pc-simulation-generate', async (t) => {
+    const pc = await t.open('out/pc-simulation.html', PC);
+    await pc.waitForSelector('.kv');
+    const keys = await keysOf(pc);
+    await pc.fill('[data-r="days"]', '3');
+    await pc.fill('[data-r="ppd"]', '150');
+    check((await pc.textContent('[data-act="simulate"]')).trim() === 'Générer 3 jours', 'simulation : bouton « ' + await pc.textContent('[data-act="simulate"]') + ' »');
+    const v0 = await pc.evaluate(() => App.store.versions.data);
+    await pc.click('[data-act="simulate"]');
+    await pc.waitForSelector('.modal .btn.p');
+    check(/Remplacer la simulation/.test(await pc.textContent('.modal')), 'simulation : pas de confirmation avant de remplacer');
+    await pc.click('.modal .btn.p');
+    await typeKey(pc, keys.admin);
+    await pc.waitForFunction((v) => App.store.versions.data > v && App.store.state && App.store.state.stats, v0, { timeout: 60000 });
+    async function same(label) {
+      const s = await stateOf(pc);
+      const crit = s.alerts.filter((a) => a.code === 'PRD2_CRIT')[0];
+      const tv = await t.open('out/tv.html', TV);
+      await tv.waitForSelector('.scene-overview .tv-kpi');
+      const onTv = await tv.evaluate(() => ({ s: document.querySelector('[data-r="pendingCrit"]') ? document.querySelector('[data-r="pendingCrit"]').parentNode.querySelector('.s').textContent : '',
+        tile: (document.querySelector('[data-r="pendingCrit"]') || {}).textContent || '', asOf: App.store.state.asOf }));
+      const pend = await t.open('out/pc-pending.html', PC);
+      await pend.waitForSelector('.pend-sum');
+      const onPc = await pend.evaluate(() => ({ crit: document.querySelector('[data-r="critCount"]').textContent, oldest: document.querySelector('[data-r="oldest"]').textContent.trim(),
+        first: (document.querySelector('tr[data-article] .chipd') || {}).textContent }));
+      check(onTv.asOf === s.asOf, label + ' : TV au ' + onTv.asOf + ' au lieu du ' + s.asOf);
+      check(onTv.tile.replace(/\s+/g, ' ') === 'dont > 6 h : ' + frNum(s.kpi.pendingCrit), label + ' : tuile TV « ' + onTv.tile + ' »');
+      check(onTv.s === 'plus ancienne : ' + onPc.oldest && onPc.first.trim() === onPc.oldest, label + ' : attente TV « ' + onTv.s + ' », page « ' + onPc.oldest + ' », 1re ligne « ' + onPc.first + ' »');
+      if (crit) check(crit.text.indexOf('depuis ' + onPc.oldest + ' ') > 0, label + ' : alerte « ' + crit.text + ' » au lieu de ' + onPc.oldest);
+      check(Number(digits(onPc.crit)) === s.pending.filter((p) => p.label && p.level === 'crit').length, label + ' : ' + onPc.crit + ' étiquettes > 6 h');
+      await tv.close();
+      await pend.close();
+      return s.asOf + ' · ' + s.kpi.pendingCrit + ' > 6 h · ' + onPc.oldest;
+    }
+    const a = await same('simulation générée');
+    await t.shot(pc, 'pc-simulation-generated.png');
+    const v1 = await pc.evaluate(() => App.store.versions.data);
+    await pc.click('[data-act="next"]');
+    await pc.waitForFunction((v) => App.store.versions.data > v, v1, { timeout: 30000 });
+    check(!(await pc.$('.modal .key-input')), '+1 jour : clé demandée deux fois');
+    const b = await same('+1 jour');
+    t.note('3 jours : ' + a + ' ; +1 jour : ' + b);
   });
 
   // En attente: one row per label, red from pendingHoursCrit, amber from pendingHoursWarn, project filter.
@@ -894,6 +1044,9 @@ async function run() {
     await page.waitForFunction(() => App.store.state && App.store.state.stats && App.store.state.stats.movements > 0, null, { timeout: 15000 });
     const s = await stateOf(page);
     check(s.asOfTs === REAL_EXPECTED.engine.asOfTs, 'import : heure des données ' + s.asOfTs);
+    // The 6 h alert in the result, before the figures.
+    const box = await page.textContent('[data-r="result"] [data-r="prd2"]');
+    check(box.indexOf(REAL_EXPECTED.engine.pending.crit + ' palettes en PRD2 depuis plus de 6 h (la plus ancienne : 44 h 02)') === 0, 'import : encadré PRD2 « ' + box + ' »');
     await t.shot(page, 'pc-import-real-result.png');
     await page.click('[data-r="result"] [data-go="pending"]');
     await page.waitForSelector('[data-r="critCount"]');
@@ -902,6 +1055,15 @@ async function run() {
     check(digits(head.crit) === String(REAL_EXPECTED.engine.pending.crit), 'attente : ' + head.crit + ' étiquettes > 6 h au lieu de ' + REAL_EXPECTED.engine.pending.crit);
     check(head.oldest.trim() === '44 h 02' && /05\/10 22:09/.test(head.sum), 'attente : « ' + head.sum.replace(/\s+/g, ' ') + ' »');
     check(head.red >= REAL_EXPECTED.engine.pending.crit, 'attente : ' + head.red + ' lignes rouges');
+    // Labels: 86 red, 11 amber, the oldest first, every wait written « 44 h 02 ».
+    const lines = await page.evaluate(() => Array.from(document.querySelectorAll('tr[data-article]')).map((tr) => ({ lvl: tr.getAttribute('data-level'),
+      h: tr.getAttribute('data-hours'), label: !/sans étiquette/.test(tr.children[0].textContent), wait: tr.querySelector('.chipd').textContent.trim() })));
+    const labeled = lines.filter((x) => x.label);
+    check(labeled.filter((x) => x.lvl === 'crit').length === REAL_EXPECTED.engine.pending.crit && labeled.filter((x) => x.lvl === 'warn').length === REAL_EXPECTED.engine.pending.warn,
+      'attente : ' + labeled.filter((x) => x.lvl === 'crit').length + ' rouges / ' + labeled.filter((x) => x.lvl === 'warn').length + ' orange');
+    const hours = labeled.map((x) => Number(x.h));
+    check(hours.every((h, i) => i === 0 || h <= hours[i - 1]), 'attente : étiquettes pas triées de la plus ancienne à la plus récente');
+    check(labeled.every((x) => /^\d+ h \d{2}$/.test(x.wait)), 'attente : durée mal écrite ' + JSON.stringify(labeled.filter((x) => !/^\d+ h \d{2}$/.test(x.wait)).slice(0, 3)));
     await noHorizontalScroll(page, 'attente (données réelles)');
     await t.shot(page, 'pc-pending-real.png');
     // The oldest label opens its article: quantity per pallet learned from the labels, the label waiting 44 h 02 in red.
@@ -959,7 +1121,8 @@ async function main() {
   browser = await chromium.launch({
     executablePath: chromiumPath(),
     headless: !process.env.E2E_HEADED,
-    args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
+    // --lang: native controls (input type=date) follow the browser language, not the context locale.
+    args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--lang=fr-FR']
   });
   const t0 = Date.now();
   try {

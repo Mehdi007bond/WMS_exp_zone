@@ -5,8 +5,11 @@
  * Builds tests/harness/out/: every screen of the web app as a static page that runs without Google.
  *   tv.html             doGet({ mode: 'tv' })
  *   pc-<page>.html      doGet({ page }) for every page of WEB_PAGES_ (Main.gs)
+ *   sidebar.html        Sidebar.html, the control panel of the sheet (300 px wide in Google Sheets)
+ *   sidebar-projets.html SidebarProjets.html, the panel « Projets & références » of the sheet
  *   index.html          links to the pages and the harness query flags
- *   backend/*.js        Config, Normalize, Engine, Simulation, Api (copies of the .gs files), repo-memory.js, shim.js
+ *   backend/*.js        Config, Normalize, Engine, Simulation, Api, Main (copies of the .gs files), repo-memory.js,
+ *                       sheet-stub.js (sidebars only), shim.js
  *
  * The pages are rendered the way Apps Script renders them: the .gs files are loaded in one Node vm context
  * (one global scope, like Apps Script) with a stand-in HtmlService, and the real doGet() is called. Its
@@ -18,8 +21,13 @@
  *     the server modules plus tests/harness/shim.js (google.script.run on an in-memory Repo, seeded with a
  *     simulation on first load). See shim.js for the query flags (?empty=1, ?poll=2, ?no3d=1, ...).
  *
+ * The sidebars are HtmlService.createHtmlOutputFromFile pages of the sheet (no scriptlet): their google.script.run
+ * calls the real sidebar_* functions of Main.gs on the same in-browser server (sheet-stub.js stands in for
+ * SpreadsheetApp, ScriptApp, HtmlService, Session and Utilities).
+ *
  * Open the pages over HTTP from tests/harness/ (e2e.js does) or directly as files.
- * Module use: require('./build.js').build({ out }) -> { out, pages: [{ file, mode, page, title }], warnings }.
+ * Module use: require('./build.js').build({ out }) -> { out, pages: [{ file, mode, page, title }], sidebars: [{ file,
+ * name }], warnings }.
  */
 'use strict';
 
@@ -42,6 +50,17 @@ const BACKEND = [
   ['repo-memory.js', path.join(HARNESS, 'repo-memory.js')],
   ['Api.js', path.join(SRC, 'Api.gs')],
   ['shim.js', path.join(HARNESS, 'shim.js')]
+];
+
+// Sheet sidebars: the same server plus Main.gs (sidebar_* functions) and the sheet stand-ins, before the shim.
+const SIDEBAR_BACKEND = BACKEND.slice(0, -1).concat([
+  ['Main.js', path.join(SRC, 'Main.gs')],
+  ['sheet-stub.js', path.join(HARNESS, 'sheet-stub.js')],
+  BACKEND[BACKEND.length - 1]
+]);
+const SIDEBARS = [
+  { file: 'sidebar.html', name: 'Sidebar', title: 'EXP2 · Panneau de contrôle' },
+  { file: 'sidebar-projets.html', name: 'SidebarProjets', title: 'EXP2 · Projets & références' }
 ];
 
 // CDN libraries -> local copies (tests/harness/vendor, next to out/).
@@ -142,14 +161,26 @@ function makeServer() {
 // ---------------------------------------------------------------------------------------------------------------
 // Pages
 // ---------------------------------------------------------------------------------------------------------------
-function harnessHead(output, fileName) {
+function harnessHead(output, fileName, backend) {
   const lines = [];
   if (output.title) lines.push('<title>' + escHtml(output.title) + '</title>');
   output.metas.forEach((m) => lines.push('<meta name="' + escHtml(m.name) + '" content="' + escHtml(m.content) + '">'));
   lines.push('<!-- Local harness page (tests/harness/build.js): in-browser server = backend/*.js + backend/shim.js. -->');
   lines.push('<script>window.EXP2_HARNESS = { file: ' + JSON.stringify(fileName) + ' };</script>');
-  BACKEND.forEach(([name]) => lines.push('<script src="backend/' + name + '"></script>'));
+  (backend || BACKEND).forEach(([name]) => lines.push('<script src="backend/' + name + '"></script>'));
   return lines.map((l) => '  ' + l).join('\n');
+}
+
+// A sheet sidebar as Google Sheets shows it (createHtmlOutputFromFile: the file as is), with the in-browser server.
+function renderSidebar(spec) {
+  let html = htmlFile(spec.name);
+  if (/<\?/.test(html)) throw new Error(spec.name + '.html : scriptlet inattendu (createHtmlOutputFromFile).');
+  const charset = /<meta charset="utf-8">/i.exec(html);
+  if (!charset) throw new Error(spec.name + '.html : <meta charset="utf-8"> introuvable.');
+  const head = harnessHead({ title: spec.title, metas: [] }, spec.file, SIDEBAR_BACKEND);
+  html = html.slice(0, charset.index + charset[0].length) + '\n' + head + html.slice(charset.index + charset[0].length);
+  checkScripts(html, spec.file);
+  return html;
 }
 
 function checkScripts(html, fileName) {
@@ -193,9 +224,11 @@ function renderPage(server, parameter, fileName) {
   return { html, title: output.title, xframe: output.xframe, scripts, mode: body ? body[1] : '', page: body ? body[2] : '' };
 }
 
-function indexPage(pages) {
+function indexPage(pages, sidebars) {
   const rows = pages.map((p) => '<li><a href="' + p.file + '">' + escHtml(p.file) + '</a> · ' + escHtml(p.mode === 'tv' ? 'TV' : 'PC ' + p.page) +
-    (p.mode === 'tv' ? ' · <a href="' + p.file + '?rotate=1">rotation</a> · <a href="' + p.file + '?scene=docks">quais</a>' : '') + '</li>').join('\n');
+    (p.mode === 'tv' ? ' · <a href="' + p.file + '?rotate=1">rotation</a> · <a href="' + p.file + '?scene=docks">quais</a>' : '') + '</li>').join('\n') +
+    (sidebars || []).map((p) => '\n<li><a href="' + p.file + '">' + escHtml(p.file) + '</a> · panneau du classeur ' + escHtml(p.name) +
+      '.html (300 px de large dans Google Sheets)</li>').join('');
   return '<!DOCTYPE html>\n<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<title>EXP2 · harness local</title><style>body{font:15px/1.5 system-ui,sans-serif;margin:24px;max-width:860px;color:#17212b}' +
     'code{background:#eef1f4;padding:1px 4px;border-radius:4px}li{margin:4px 0}</style></head><body>' +
@@ -237,7 +270,7 @@ function build(opts) {
   fs.readdirSync(out).forEach((f) => { if (/\.html$/.test(f)) fs.unlinkSync(path.join(out, f)); });
   fs.rmSync(path.join(out, 'backend'), { recursive: true, force: true });
   fs.mkdirSync(path.join(out, 'backend'), { recursive: true });
-  BACKEND.forEach(([name, from]) => {
+  SIDEBAR_BACKEND.forEach(([name, from]) => {
     if (!fs.existsSync(from)) throw new Error('Fichier absent : ' + path.relative(ROOT, from));
     fs.copyFileSync(from, path.join(out, 'backend', name));
   });
@@ -253,8 +286,13 @@ function build(opts) {
     fs.writeFileSync(path.join(out, s.file), r.html);
     return { file: s.file, mode: r.mode, page: r.page, title: r.title, xframe: r.xframe, scripts: r.scripts, bytes: Buffer.byteLength(r.html) };
   });
-  fs.writeFileSync(path.join(out, 'index.html'), indexPage(pages));
-  return { out, pages, webPages, warnings };
+  const sidebars = SIDEBARS.map((s) => {
+    const html = renderSidebar(s);
+    fs.writeFileSync(path.join(out, s.file), html);
+    return { file: s.file, name: s.name, title: s.title, bytes: Buffer.byteLength(html) };
+  });
+  fs.writeFileSync(path.join(out, 'index.html'), indexPage(pages, sidebars));
+  return { out, pages, sidebars, webPages, warnings };
 }
 
 module.exports = { build, compileTemplate, makeServer, OUT: DEFAULT_OUT, VENDOR };
@@ -264,8 +302,10 @@ if (require.main === module) {
     const r = build({ out: process.argv[2] });
     r.pages.forEach((p) => console.log('  ' + p.file.padEnd(20) + (p.mode === 'tv' ? 'TV' : 'PC ' + p.page).padEnd(16) +
       Math.round(p.bytes / 1024) + ' Ko'));
+    r.sidebars.forEach((p) => console.log('  ' + p.file.padEnd(22) + ('classeur ' + p.name).padEnd(24) + Math.round(p.bytes / 1024) + ' Ko'));
     r.warnings.forEach((w) => console.warn('  attention : ' + w));
-    console.log('Harness : ' + r.pages.length + ' pages dans ' + path.relative(process.cwd(), r.out) + '/ (ouvrir index.html).');
+    console.log('Harness : ' + r.pages.length + ' pages et ' + r.sidebars.length + ' panneaux du classeur dans ' + path.relative(process.cwd(), r.out) +
+      '/ (ouvrir index.html).');
   } catch (e) {
     console.error('Harness : échec de la construction : ' + (e && e.stack || e));
     process.exit(1);

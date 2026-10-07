@@ -6,6 +6,8 @@ The illustrated version of this plan (warehouse sketch to scale, TV and PC mocku
 
 Status: for discussion. Every number below comes from the simulated database in `sample-data/`, not from SAP.
 
+**v2 status (October 2026).** The app is built and now runs on the real export format (contract: [ARCHITECTURE.md](ARCHITECTURE.md), v2 details: [SPEC_V2.md](SPEC_V2.md)). A real MB51 export (04–05.10.2026, anonymised extract in `sample-data/mb51-reel/`) answered part of this plan: declarations are MvT **131**; `Date de saisie` and `Heure de saisie` are there, so ages and waits are in hours (Finding 3); each pallet carries a **label** (container number) in the texts, so pallets are counted per label (Finding 1, question 8); there is no `Poste`. Still missing: the **exits 601** (Finding 2, question 2: EXP2 only fills up) and the **opening stock** (question 14). Placement and colors now follow **projects** (reference → project → blocks), set by the user in the « Projets » page, instead of product families; a pallet in PRD2 for more than 6 hours raises the main alert. The rest of this page is unchanged.
+
 ## 1. The idea
 
 - There is no live link between SAP and Google. Someone exports the SAP lists and uploads them on the PC page; only files cross that boundary.

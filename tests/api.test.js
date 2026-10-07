@@ -2151,13 +2151,16 @@ test('projects panel (SidebarProjets.html) on the in-memory server: paste, previ
   assert.match(pv, /LF23857<\/span><span class="st st-same">Inchangée/);
   assert.match(pv, /LD31553<\/span><span class="st st-new">Nouvelle.*<b>Delta<\/b>/);
   assert.match(pv, /bad code!<\/span><span class="st st-bad">Invalide<\/span><\/div><span class="des">Référence invalide/);
-  // One reference per line (or separated by spaces): the project field; never-seen references flagged.
-  el('paste').value = 'ZZ00001 ZZ00002\nLB73297';
+  // One reference per line: the project field; never-seen references flagged. Two codes on one line are refused with
+  // the reason, as on the web page « Projets » (« LF23855 ATLAS » must never create a reference named ATLAS).
+  el('paste').value = 'ZZ00001\nZZ00002 ZZ00003\nLB73297';
   el('project').value = 'Delta';
   page.click('btnPreview');
   pv = el('preview').innerHTML;
-  assert.match(pv, /3 nouvelles/);
+  assert.match(pv, /2 nouvelles<\/b> · 0 changement · 0 inchangée · .*1 invalide/);
   assert.match(pv, /ZZ00001<\/span><span class="st st-new">Nouvelle<\/span><\/div><span class="des">jamais vue dans les données/);
+  assert.match(pv, /ZZ00002 ZZ00003<\/span><span class="st st-bad">Invalide<\/span><\/div><span class="des">Espace dans la référence/);
+  assert.doesNotMatch(pv, /ZZ00003<\/span><span class="st st-new"/, 'no reference made of the second word');
   el('paste').value = 'Référence\tProjet\nlf23855\tatlas\n0073871645\tBOREAL\nLF23857\tATLAS\nbad code!\tX\nLD31553\t';
   page.click('btnPreview');
   assert.equal(el('btnSave').disabled, false);

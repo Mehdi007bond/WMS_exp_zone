@@ -28,7 +28,10 @@
 
   var FLAG_NAMES = ['empty', 'none', 'poll', 'lat', 'fresh', 'no3d', 'offline', 'seed', 'days', 'ppd'];
   var READ_ONLY = { api_getVersion: true, api_getState: true, api_lookup: true, api_searchArticles: true, api_checkKey: true,
-    api_getProjects: true };
+    api_getProjects: true, sidebar_status: true, sidebar_getProjects: true, sidebar_links: true };
+  // Sheet sidebars (out/sidebar*.html also load Main.gs and sheet-stub.js): the sidebar_* functions and the menu
+  // functions their buttons call.
+  var SHEET_FUNCTIONS = ['ouvrirPanneau', 'ouvrirProjets', 'ouvrirJumeau'];
 
   function parseQuery(search) {
     var out = {};
@@ -177,7 +180,7 @@
       } catch (e) {
         return false;
       }
-      return /^api_/.test(k) && typeof fn === 'function';
+      return (/^(api|sidebar)_/.test(k) || SHEET_FUNCTIONS.indexOf(k) >= 0) && typeof fn === 'function';
     }).sort();
   }
 

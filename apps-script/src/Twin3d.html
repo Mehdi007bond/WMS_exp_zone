@@ -88,7 +88,7 @@ function Twin3dModule_() {
     '.t3d-label.t3d-zone{background:rgba(12,18,26,.8);color:#ffd84a;text-transform:none;letter-spacing:0;font-size:.9em}',
     '.t3d-label.t3d-pending{background:rgba(22,74,118,.9);font-size:.88em}',
     '.t3d-label.t3d-pending .t3d-crit{color:#ffb4b4}',
-    '.t3d-label.t3d-block .t3d-title{display:block;font-weight:700;max-width:12em;overflow:hidden;text-overflow:ellipsis}'
+    '.t3d-label.t3d-block .t3d-title{display:block;font-weight:700;max-width:16em;overflow:hidden;text-overflow:ellipsis}'
   ].join('');
 
   var supportCache = null;
@@ -732,7 +732,10 @@ function Twin3dModule_() {
         var sat = sb ? sb.saturation : null;
         // Title (project names) above 'B1 · 63 %'; without a title: 'B1' above '63 %' (v1 labels).
         var title = blockTitle_(b);
-        lab.titleEl.textContent = title;
+        // One line (a taller tag would cover the pending label under it): two project names in full ('ETNA / ZEPHYR
+        // NORD' fits the 16em), beyond two: the first two and '+ n'.
+        var names = title ? title.split(' / ') : [];
+        lab.titleEl.textContent = names.length > 2 ? names.slice(0, 2).join(' / ') + ' + ' + (names.length - 2) : title;
         lab.titleEl.style.display = title ? '' : 'none';
         lab.idEl.style.display = title ? 'none' : '';
         lab.pctEl.textContent = title ? b.id + ' · ' + pct_(sat) : pct_(sat);

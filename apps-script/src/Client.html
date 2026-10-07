@@ -742,6 +742,8 @@
     var t = App.h('div', { 'class': 'toast ' + (kind || 'info') }, [App.h('span', { text: text })]);
     var x = App.h('button', { type: 'button', 'class': 'toast-x', 'aria-label': 'Fermer', html: '&times;' });
     t.appendChild(x);
+    // At most three notices at a time (a pile of them would hide the page): the oldest leaves first.
+    while (toastBox.children.length >= 3) toastBox.removeChild(toastBox.firstChild);
     toastBox.appendChild(t);
     function remove() {
       if (t.parentNode) t.parentNode.removeChild(t);
@@ -1070,7 +1072,9 @@
     if (!busy) {
       return '<svg class="truck" viewBox="0 0 150 40" aria-hidden="true"><rect x="2" y="6" width="146" height="24" rx="4" fill="none" stroke="' +
         (dark ? '#3a4552' : '#b8c3ce') + '" stroke-dasharray="5 4"/>' +
-        '<text x="75" y="22" text-anchor="middle" font-size="11" fill="' + (dark ? '#a8b4c0' : '#5d6873') + '" font-family="IBM Plex Sans, sans-serif">quai libre</text></svg>';
+        // TV (dark): larger text, read from 5 m in the small dock tiles of the overview.
+        '<text x="75" y="' + (dark ? 24 : 22) + '" text-anchor="middle" font-size="' + (dark ? 17 : 11) + '" fill="' + (dark ? '#a8b4c0' : '#5d6873') +
+        '" font-family="IBM Plex Sans, sans-serif">quai libre</text></svg>';
     }
     var loaded = Math.max(0, Number(d.loaded) || 0);
     var fw = Math.round(98 * Math.min(1, loaded / cap));
@@ -1116,6 +1120,61 @@
     return String(Number(v)).replace('.', ',');
   };
 
+  // SAP wall-clock time 'yyyy-mm-dd hh:mm:ss' -> seconds on a continuous scale (read as UTC: only differences are
+  // used, as the engine does); null when not a time stamp.
+  function stampSec(ts) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(String(ts || ''));
+    if (!m) return null;
+    return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] || 0)) / 1000;
+  }
+
+  /**
+   * Hours between two SAP times (from -> to), to the second; null when one is unknown. The rounded hours of the
+   * state (2 decimals, 36 s) can show one minute less than the alert texts, which the engine writes from the seconds
+   * ('7 h 07' on the screens for '7 h 08' in the alert): the screens use the times themselves when they have them.
+   */
+  App.hoursBetween = function (from, to) {
+    var a = stampSec(from), b = stampSec(to);
+    return a === null || b === null || b < a ? null : (b - a) / 3600;
+  };
+
+  /**
+   * Waiting time in hours of a pending or EXP2 row at the time of the data (state.asOfTs - row.ts), exact when both
+   * times are known, else the row's rounded hours (field, default 'hours'); null when unknown.
+   */
+  App.waitHours = function (row, state, field) {
+    var h = row ? App.hoursBetween(row.ts, state && state.asOfTs) : null;
+    if (h !== null) return h;
+    var v = row ? row[field || 'hours'] : null;
+    return isNum(v) ? Number(v) : null;
+  };
+
+  /** Waiting time of a row as the screens write it: '7 h 08' (same minutes as the alert texts). */
+  App.waitText = function (row, state, field) {
+    return fmt.hm(App.waitHours(row, state, field));
+  };
+
+  /**
+   * Oldest wait in PRD2 of a state (kpi.oldestPendingHours, the row the PRD2 alert names), to the minute of the
+   * alert text when that row is in state.pending (labels first); null when unknown.
+   */
+  App.oldestWaitHours = function (state) {
+    var k = (state && state.kpi) || {};
+    if (!isNum(k.oldestPendingHours)) return null;
+    var best = null, bestLabel = false;
+    ((state && state.pending) || []).forEach(function (p) {
+      if (!p || !p.ts || !isNum(p.hours) || Number(p.hours) !== Number(k.oldestPendingHours)) return;
+      var h = App.waitHours(p, state);
+      if (h === null) return;
+      var lab = !!p.label;
+      if (best === null || (lab && !bestLabel) || (lab === bestLabel && h > best)) {
+        best = h;
+        bestLabel = lab;
+      }
+    });
+    return best !== null ? best : Number(k.oldestPendingHours);
+  };
+
   /**
    * Pending labels by waiting time (rows with a label and hours): < 1 h, 1-2 h, 2 h-warn, warn-crit, crit-2 x crit,
    * > 2 x crit. -> [{ label, lo, hi, value (labels), level: '' | 'warn' | 'crit', color }]; the bars from the thresholds
@@ -1137,6 +1196,12 @@
     (rows || []).forEach(function (p) {
       if (!isNum(p.hours) || !p.label) return;
       var h = Number(p.hours);
+      // The engine judges the level to the second, the hours are rounded (5.999 h -> 6.00): the bar follows the
+      // level of the row, so the red bars count exactly the red rows.
+      if (p.level === 'crit' && h < crit) h = crit;
+      else if (p.level === 'warn' && h < warn) h = warn;
+      else if (p.level === 'warn' && h >= crit) h = crit - 1e-6;
+      else if (p.level === '' && h >= warn) h = warn - 1e-6;
       for (var j = 0; j < out.length; j++) {
         if (h >= out[j].lo && h < out[j].hi) {
           out[j].value++;
@@ -1208,7 +1273,7 @@
    * Mounts the three.js twin (window.Twin3D) when supported, else the isometric canvas (window.IsoView).
    * A lost WebGL context switches to the isometric view for good.
    * opts: { autoRotate, mode: 'project'|'age'|'saturation' ('family' = 'project'), theme: 'dark'|'light', boost, labelPx,
-   *         dockLabels, onPick(info), onSwitch(kind) }
+   *         isoLabelPx (tag font of the isometric view), dockLabels, onPick(info), onSwitch(kind) }
    * -> { kind: '3d'|'iso', update(state), resize(), setMode(mode), legend(state), highlight(article), destroy() }
    */
   App.mountTwin = function (container, state, opts) {
@@ -1276,7 +1341,7 @@
       function draw() {
         if (!window.IsoView || !current) return;
         try {
-          window.IsoView.draw(canvas, layoutOf(current), current, { mode: mode, boost: opts.boost || 1.5 });
+          window.IsoView.draw(canvas, layoutOf(current), current, { mode: mode, boost: opts.boost || 1.5, labelPx: opts.isoLabelPx });
         } catch (e) {
           if (window.console) console.error(e);
         }

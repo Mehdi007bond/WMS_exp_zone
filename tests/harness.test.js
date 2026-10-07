@@ -59,6 +59,18 @@ test('build: one page per doGet mode, scriptlets resolved like Apps Script, CDN 
     assert.ok(fs.existsSync(path.join(tmp, 'backend', f)), 'backend/' + f);
   }
   assert.ok(fs.existsSync(path.join(tmp, 'index.html')));
+  // The two panels of the sheet: the file as HtmlService serves it, with the server and Main.gs (sidebar_*) before
+  // the shim; the web app pages do not load Main.gs.
+  assert.deepEqual(r.sidebars.map((p) => p.file), ['sidebar.html', 'sidebar-projets.html']);
+  for (const p of r.sidebars) {
+    const html = fs.readFileSync(path.join(tmp, p.file), 'utf8');
+    const at = (f) => html.indexOf('src="backend/' + f + '"');
+    assert.ok(at('Api.js') > 0 && at('Api.js') < at('Main.js') && at('Main.js') < at('sheet-stub.js') && at('sheet-stub.js') < at('shim.js'),
+      p.file + ': server, Main.gs, sheet stand-ins, then the shim');
+    assert.ok(at('shim.js') < html.indexOf('<script>\n'), p.file + ': server before the panel script');
+    assert.ok(html.includes(fs.readFileSync(path.join(SRC, p.name + '.html'), 'utf8').split('<meta charset="utf-8">')[1]), p.file + ': panel unchanged');
+  }
+  assert.ok(!fs.readFileSync(path.join(tmp, 'pc-projects.html'), 'utf8').includes('backend/Main.js'), 'web pages without Main.gs');
 });
 
 test('CDN scripts carry Subresource Integrity; the three.js hash matches r128', () => {
