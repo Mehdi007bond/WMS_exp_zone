@@ -171,6 +171,27 @@ var Repo = (function RepoMemoryModule_() {
     });
   }
 
+  // PARAM_SEUILS rows: key -> [French label, unit, comment] (Repo.gs SETTING_LABELS).
+  var SETTING_LABELS = {
+    satWarn: ['Seuil saturation - alerte', 'fraction', '0,85 = 85 % (blocs et entrepôt)'],
+    satCrit: ['Seuil saturation - critique', 'fraction', '0,95 = 95 %'],
+    pendingDaysWarn: ['Seuil attente PRD2 en jours - alerte', 'jours',
+      'Lignes sans heure de saisie : déclaré mais pas encore transféré vers EXP2'],
+    dockStagingWarn: ['Seuil zone quai - alerte', 'fraction', 'Palettes en zone quai / capacité de la zone'],
+    freshWarnH: ['Fraîcheur des données - alerte', 'heures', 'Badge orange sur la TV après ce délai sans import'],
+    freshCritH: ['Fraîcheur des données - critique', 'heures', 'Badge rouge sur la TV'],
+    tvRefreshS: ['Rafraîchissement écran TV', 's', 'Période de vérification de la version des données'],
+    tvSceneS: ['Durée d\'une scène TV', 's', 'Rotation des scènes (vue, saturation, attente, quais)'],
+    pendingHoursWarn: ['Seuil attente PRD2 - pré-alerte', 'heures',
+      'Étiquette déclarée en PRD2 et pas encore transférée vers EXP2 depuis ce délai (heure de saisie SAP)'],
+    pendingHoursCrit: ['Seuil attente PRD2 - alerte', 'heures',
+      'Une référence en PRD2 depuis plus de 6 h est un vrai problème'],
+    labelIsPallet: ['1 étiquette = 1 palette', '1/0', '1 = chaque numéro d\'étiquette (contenant) compte pour une palette'],
+    importTrackedOnly: ['Import : produits finis seulement', '1/0',
+      '1 = l\'import ignore les articles absents de ARTICLES qui ne passent pas par EXP2'],
+    trackAll: ['Calcul : tous les articles', '1/0', '0 = produits finis seulement (ARTICLES ou passés par EXP2)']
+  };
+
   function defaultSettings_() {
     var th = cfg_().THRESHOLDS || {};
     var rows = [
@@ -178,7 +199,8 @@ var Repo = (function RepoMemoryModule_() {
       { label: 'Date de référence', key: 'asOf', value: '', unit: 'date', comment: 'Vide = date du dernier mouvement (recommandé)' }
     ];
     Object.keys(th).forEach(function (k) {
-      rows.push({ label: k, key: k, value: th[k], unit: '', comment: '' });
+      var l = SETTING_LABELS[k] || [k, '', ''];
+      rows.push({ label: l[0], key: k, value: th[k], unit: l[1], comment: l[2] });
     });
     return rows;
   }
@@ -199,11 +221,16 @@ var Repo = (function RepoMemoryModule_() {
     if (!force && db.props.SCHEMA_VERSION === '2' && Array.isArray(db.projects)) {
       return { version: 2, changed: [], settings: [] };
     }
-    if (!Array.isArray(db.projects)) db.projects = [];
+    var changed = [];
+    if (!Array.isArray(db.projects) || !db.tabs[cfg_().TABS.PROJECTS]) {
+      if (!Array.isArray(db.projects)) db.projects = [];
+      db.tabs[cfg_().TABS.PROJECTS] = true;
+      changed.push(cfg_().TABS.PROJECTS);
+    }
     var settings = addMissingSettings_();
-    if (!db.tabs[cfg_().TABS.PROJECTS]) db.tabs[cfg_().TABS.PROJECTS] = true;
+    if (settings.length) changed.push(cfg_().TABS.SETTINGS);
     db.props.SCHEMA_VERSION = JSON.stringify(2);
-    return { version: 2, changed: settings.length ? [cfg_().TABS.SETTINGS] : [], settings: settings };
+    return { version: 2, changed: changed, settings: settings };
   }
 
   function defaultDocks_() {
@@ -324,11 +351,26 @@ var Repo = (function RepoMemoryModule_() {
     return clone_(readSettings_());
   }
 
+  // Same rule as Repo.gs: a v1 placeholder rule (FAMILLE F1 to F5, 'provisoire') whose family no article carries is
+  // left out of the engine input (the migration never deletes a row).
+  function activeRules_(rules, articles) {
+    var fold = function (v) { return String(v === null || v === undefined ? '' : v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim(); };
+    var families = {};
+    articles.forEach(function (a) {
+      if (a.family) families[fold(a.family)] = true;
+    });
+    return rules.filter(function (r) {
+      var placeholder = r.criterion === 'FAMILLE' && /^F[1-5]$/i.test(String(r.value || '')) && fold(r.comment) === 'provisoire';
+      return !placeholder || families[fold(r.value)];
+    });
+  }
+
   function readInput() {
     migrate();
     var settings = readSettings_();
     var plant = settings.plant || cfg_().PLANT;
     var layout = readLayout();
+    var articles = readArticles();
     var ids = {};
     layout.blocks.forEach(function (b) { ids[String(b.id).toUpperCase()] = b.id; });
     return clone_({
@@ -341,7 +383,7 @@ var Repo = (function RepoMemoryModule_() {
           reference: m.reference || '', client: m.client || '', salesOrder: m.salesOrder || '' };
       }),
       opening: db.opening.filter(function (o) { return !o.division || !plant || o.division === plant; }),
-      articles: readArticles(),
+      articles: articles,
       projects: readProjects().map(function (p) {
         p.blocks = p.blocks.map(function (b) { return ids[String(b).toUpperCase()] || b; });
         return p;
@@ -350,7 +392,7 @@ var Repo = (function RepoMemoryModule_() {
         return { id: b.id, label: b.label, x: b.x, y: b.y, w: b.w, h: b.h, cols: b.cols, rows: b.rows, levels: b.levels,
           color: b.color, capacity: b.capacity };
       }),
-      rules: db.rules.filter(function (r) { return r.criterion && r.value && r.blocks; }),
+      rules: activeRules_(db.rules.filter(function (r) { return r.criterion && r.value && r.blocks; }), articles),
       mvtKinds: readMvtKinds_(),
       docks: readDocks(),
       thresholds: settings.thresholds,
@@ -424,6 +466,7 @@ var Repo = (function RepoMemoryModule_() {
 
   function appendMovements(lines, meta) {
     meta = meta || {};
+    migrate();
     var source = str_(meta.source).toUpperCase() || 'IMPORT';
     var now = nowIso_();
     (lines || []).forEach(function (l) {
@@ -560,11 +603,24 @@ var Repo = (function RepoMemoryModule_() {
       out.opening = data.opening.length;
     }
     if (Array.isArray(data.articles)) {
-      var ids = data.articles.map(function (a) { return code_(a.article, true); }).filter(function (a) { return a; });
-      var drop = {};
-      (getProp('SIM_ARTICLES') || []).concat(ids).forEach(function (a) { drop[a] = true; });
-      db.articles = db.articles.filter(function (a) { return !drop[a.article]; }).concat(data.articles.map(article_));
-      setProp('SIM_ARTICLES', ids);
+      // Like Repo.gs: rows of the previous simulation replaced, rows the user owns kept (also for a generated code).
+      var prev = {};
+      (getProp('SIM_ARTICLES') || []).forEach(function (a) { prev[String(a).toUpperCase()] = true; });
+      db.articles = db.articles.filter(function (a) { return !prev[code_(a.article, true).toUpperCase()]; });
+      var mine = {};
+      db.articles.forEach(function (a) {
+        var k = code_(a.article, true).toUpperCase();
+        if (k) mine[k] = true;
+      });
+      var ids = [];
+      data.articles.forEach(function (a) {
+        var id = code_(a && a.article, true);
+        if (!id || mine[id.toUpperCase()]) return;
+        mine[id.toUpperCase()] = true;
+        ids.push(id);
+        db.articles.push(article_(a));
+      });
+      setProp('SIM_ARTICLES', ids.length ? ids : null);
       out.articles = ids.length;
     }
     if (Array.isArray(data.projects)) {
@@ -610,9 +666,9 @@ var Repo = (function RepoMemoryModule_() {
     var simArticles = getProp('SIM_ARTICLES') || [];
     if (simArticles.length) {
       var drop = {};
-      simArticles.forEach(function (a) { drop[a] = true; });
+      simArticles.forEach(function (a) { drop[String(a).toUpperCase()] = true; });
       var n = db.articles.length;
-      db.articles = db.articles.filter(function (a) { return !drop[a.article]; });
+      db.articles = db.articles.filter(function (a) { return !drop[code_(a.article, true).toUpperCase()]; });
       out.articles = n - db.articles.length;
       setProp('SIM_ARTICLES', null);
     }

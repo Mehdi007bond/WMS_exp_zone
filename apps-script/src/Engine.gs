@@ -450,10 +450,26 @@ function EngineModule_() {
     var names = [];
     projects.forEach(function (p) { names.push(p.name); });
     names.sort(nameCmp_);
+    // A project without a color takes the palette color of its rank in name order, or the next one not already used
+    // (by a PROJETS color or an earlier project), so a new project never copies the color of another one.
+    var taken = {};
+    projects.forEach(function (p) {
+      if (p.color) taken[p.color.toLowerCase()] = true;
+    });
     var out = {};
     names.forEach(function (name, i) {
       var p = projects.get(name.toLowerCase());
-      p.color = p.color || palette[i % palette.length];
+      if (!p.color) {
+        p.color = palette[i % palette.length];
+        for (var k = 0; k < palette.length; k++) {
+          var c = palette[(i + k) % palette.length];
+          if (!taken[c.toLowerCase()]) {
+            p.color = c;
+            break;
+          }
+        }
+        taken[p.color.toLowerCase()] = true;
+      }
       out[name] = p.color;
     });
     out[NO_PROJECT] = C.noProject || NO_PROJECT_COLOR;
@@ -923,7 +939,7 @@ function EngineModule_() {
       }
       if (l.qty > 0) {
         pushLayer_(b, { date: l.date, doc: l.doc, qty: l.qty, origin: pm || (l.kind === 'DECL' ? 'PRD2' : 'MvT ' + l.mvt),
-          mvt: l.mvt, seq: seq++, label: l.label, ts: l.ts, tsSec: l.tsSec, user: l.user });
+          mvt: l.mvt, seq: seq++, label: l.label, ts: l.ts, tsSec: l.tsSec, user: l.user, decl: l.kind === 'DECL' });
         if (l.mag === 'EXP2' && !l.rev) day.entries += pal;
       } else {
         var taken = l.label ? consumeLabel_(b, l, abs) : consume_(b, l, abs);
@@ -1017,7 +1033,12 @@ function EngineModule_() {
           row.days = days;
           row.hours = hours_(ageSec);
           row.ageSec = ageSec;
-          if (ageSec !== null) row.level = ageSec >= critS ? 'crit' : (ageSec >= warnS ? 'warn' : '');
+          // Declared containers (a label, or a declaration) with an entry time are judged in hours: the 6 h alert is
+          // about pallets declared and not yet transferred to EXP2 (docs/SPEC_V2.md 1 and 4.10). Unlabeled stock moved
+          // into PRD2 (returns from EMRT, legs from a storage location outside the export, opening) and rows without an
+          // entry time keep the day rule.
+          row.timed = ageSec !== null && (!!L.label || !!L.decl);
+          if (row.timed) row.level = ageSec >= critS ? 'crit' : (ageSec >= warnS ? 'warn' : '');
           else row.level = days >= thr.pendingDaysCrit ? 'crit' : (days >= thr.pendingDaysWarn ? 'warn' : '');
           row.user = userKind_(L.user);
           pending.push(row);
@@ -1046,8 +1067,8 @@ function EngineModule_() {
     var last = daily.length && daily[daily.length - 1].date === asOf ? daily[daily.length - 1] : null;
     var staged = docks.reduce(function (s, d) { return s + d.staged; }, 0);
     var dockCap = docks.reduce(function (s, d) { return s + d.capacity; }, 0);
-    // Rows with an entry time are judged in hours (PRD2_CRIT / PRD2_WARN), the others in days (PENDING_STUCK).
-    var stuck = pending.filter(function (x) { return x.hours === null && x.days >= thr.pendingDaysWarn; });
+    // Rows judged in hours raise PRD2_CRIT / PRD2_WARN, the others are judged in days (PENDING_STUCK).
+    var stuck = pending.filter(function (x) { return !x.timed && x.days >= thr.pendingDaysWarn; });
     var refDate = addDays_(asOf, -7), ref = null;
     daily.forEach(function (d) {
       if (d.date === refDate) ref = d.stockEnd;
@@ -1057,7 +1078,7 @@ function EngineModule_() {
     var pendingByLevel = { warn: 0, crit: 0 }, oldestPendingSec = null, projectKeys = {};
     pending.forEach(function (x) {
       if (x.level) pendingByLevel[x.level] += x.pallets || 0;
-      if (x.ageSec !== null && (oldestPendingSec === null || x.ageSec > oldestPendingSec)) oldestPendingSec = x.ageSec;
+      if (x.timed && (oldestPendingSec === null || x.ageSec > oldestPendingSec)) oldestPendingSec = x.ageSec;
     });
     stock.forEach(function (s) {
       if (s.projectKey) projectKeys[s.projectKey] = true;
@@ -1347,10 +1368,10 @@ function EngineModule_() {
     }
     var k = result.kpi;
 
-    // Labels waiting in PRD2 (entry time known), the user's first concern: first in the list and the ticker.
+    // Declared pallets waiting in PRD2 (entry time known), the user's first concern: first in the list and the ticker.
     var timed = { crit: 0, warn: 0 }, oldest = null;
     result.pending.forEach(function (x) {
-      if (x.ageSec === null) return;
+      if (!x.timed) return;
       if (x.level) timed[x.level] += x.pallets || 0;
       if (!oldest || x.ageSec > oldest.ageSec) oldest = x;
     });

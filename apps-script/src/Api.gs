@@ -961,7 +961,7 @@ function summary_(state) {
   var sat = k.saturation === null || k.saturation === undefined ? '' : ' (' + frPct_(k.saturation) + ')';
   var hCrit = pendingHoursCrit_(state);
   var over = Number(k.pendingCrit) || 0;
-  var asOfTs = state.asOfTs || k.asOfTs || '';
+  var asOfTs = dataTs_(state);
   return {
     version: state.version,
     asOf: state.asOf,
@@ -977,11 +977,24 @@ function summary_(state) {
     oldestPendingHours: k.oldestPendingHours === undefined ? null : k.oldestPendingHours,
     alerts: (state.alerts || []).length,
     critical: crit,
-    text: 'Au ' + frDate_(state.asOf) + (asOfTs ? ' ' + String(asOfTs).slice(11, 16) : '') + ' : ' +
+    text: 'Au ' + dataTimeText_(state) + ' : ' +
       frNum_(k.exp2Pallets || 0, 0) + ' palettes en EXP2' + sat + ', ' + frNum_(k.pendingPallets || 0, 0) + ' en attente PRD2' +
       (over > 0 ? ' dont ' + frNum_(over, 0) + ' depuis plus de ' + frNum_(hCrit, 1).replace(/,0$/, '') + ' h' : '') + ', ' +
       plural_((state.alerts || []).length, 'alerte', 'alertes') + '.'
   };
+}
+
+// Time of the data: the latest entry time ('yyyy-mm-dd hh:mm:ss', '' for data without entry times).
+function dataTs_(state) {
+  var ts = String((state && (state.asOfTs || (state.kpi && state.kpi.asOfTs))) || '');
+  return validTs_(ts) ? ts : '';
+}
+
+// 'dd.mm.yyyy hh:mm' of the latest entry time, else the date of the data. The date comes from the entry time itself:
+// an entry between 00:00 and 01:59 is posted on the previous day, so asOfTs may fall on the day after asOf.
+function dataTimeText_(state) {
+  var ts = dataTs_(state);
+  return ts ? frDate_(ts.slice(0, 10)) + ' ' + ts.slice(11, 16) : frDate_(state ? state.asOf : '');
 }
 
 // PRD2 alert threshold in hours (state thresholds, else CFG, else 6).
@@ -1253,7 +1266,7 @@ function simParams_(params) {
     days: days,
     startDate: startDate,
     endDate: endDate,
-    palletsPerDay: int(params.palletsPerDay, undefined, lim.palletsPerDay[0], lim.palletsPerDay[1], 'Palettes par jour'),
+    palletsPerDay: int(params.palletsPerDay, undefined, lim.palletsPerDay[0], lim.palletsPerDay[1], 'Étiquettes par jour'),
     edgeCases: params.edgeCases !== false
   };
 }

@@ -281,15 +281,16 @@
       // Paste -> preview
       // ---------------------------------------------------------------------------------------------------------
       // One reference per line (or several separated by spaces, commas, semicolons), or two columns from Excel
-      // (reference TAB project). A first line of headers (Référence / Article) is skipped.
+      // (reference TAB project). A first line of headers (Référence / Article) is skipped, and so is an Excel row
+      // whose reference cell is empty (its project is not a reference).
       function parse(text, fieldProject) {
         var rows = [];
         var header = /^(r[ée]f[ée]rences?|articles?|codes?)$/i;
         String(text || '').replace(/\r\n?/g, '\n').split('\n').forEach(function (line, i) {
           if (!line.trim()) return;
           var cells = line.split('\t');
-          if (cells.length >= 2 && cells[0].trim()) {
-            if (i === 0 && header.test(cells[0].trim())) return;
+          if (cells.length >= 2) {
+            if (!cells[0].trim() || (i === 0 && header.test(cells[0].trim()))) return;
             var p = cells[1].trim();
             rows.push({ raw: cells[0].trim(), project: p !== '' ? p : fieldProject });
             return;

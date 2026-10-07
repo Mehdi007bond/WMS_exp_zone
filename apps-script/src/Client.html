@@ -905,7 +905,7 @@
   function fold(s) {
     s = String(s === null || s === undefined ? '' : s);
     if (s.normalize) s = s.normalize('NFD');
-    return s.replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+    return s.replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
   }
   App.fold = fold;
 
@@ -986,6 +986,21 @@
     return ((state && state.projectsList) || []).some(function (p) { return p && p.project && p.project !== NO_PROJECT; });
   };
 
+  /** True when pallets of the state carry a family (v1 data, placed by family). */
+  App.hasFamilies = function (state) {
+    var bc = (state && state.blockContents) || {};
+    return Object.keys(bc).some(function (id) {
+      return (bc[id] || []).some(function (e) { return e && e.family; });
+    });
+  };
+
+  /** How the blocks are filled, for the notes of the views: by project, by family (v1), or no project set yet. */
+  App.placementText = function (state, tv) {
+    if (App.hasProjects(state)) return 'placement par projet';
+    if (App.hasFamilies(state)) return 'placement par famille';
+    return 'aucun projet : page ' + (tv ? 'PC ' : '') + 'Projets';
+  };
+
   /**
    * Legend entries of the project colors: projects with references or blocks, then 'Sans projet' when pallets
    * have no project. -> [{ label, color, exp2, pending }] ([] for a v1 state).
@@ -1020,6 +1035,7 @@
     var rows = ((state && state.pending) || []).slice();
     var out = { rows: rows, labels: 0, unlabeled: 0, crit: 0, warn: 0, critRows: 0, warnRows: 0, critUnlabeled: 0, oldest: null,
       timed: false, truncated: false, total: rows.length, thr: thr };
+    var oldestLabel = null, oldestOther = null;
     rows.forEach(function (p) {
       var lvl = App.pendingLevel(p, thr);
       if (p.label) out.labels++;
@@ -1033,11 +1049,14 @@
         if (p.label) out.warn++;
       }
       if (isNum(p.hours)) out.timed = true;
-      var o = out.oldest;
+      var o = p.label ? oldestLabel : oldestOther;
       if (!o || (isNum(p.hours) ? !isNum(o.hours) || Number(p.hours) > Number(o.hours) : !isNum(o.hours) && Number(p.days) > Number(o.days))) {
-        out.oldest = p;
+        if (p.label) oldestLabel = p;
+        else oldestOther = p;
       }
     });
+    // The oldest label (the one the 6 h alert names), else the oldest unlabeled row.
+    out.oldest = oldestLabel || oldestOther;
     var total = state && isNum(state.pendingTotal) ? Number(state.pendingTotal) : rows.length;
     out.total = Math.max(total, rows.length);
     out.truncated = out.total > rows.length;
@@ -1098,9 +1117,9 @@
   };
 
   /**
-   * Pending labels by waiting time (rows with hours): < 1 h, 1-2 h, 2 h-warn, warn-crit, crit-2 x crit, > 2 x crit.
-   * -> [{ label, lo, hi, value (rows), level: '' | 'warn' | 'crit', color }]; the bars from the thresholds are amber
-   * and red.
+   * Pending labels by waiting time (rows with a label and hours): < 1 h, 1-2 h, 2 h-warn, warn-crit, crit-2 x crit,
+   * > 2 x crit. -> [{ label, lo, hi, value (labels), level: '' | 'warn' | 'crit', color }]; the bars from the thresholds
+   * are amber and red. Unlabeled rows are left out: the engine judges unlabeled stock moved into PRD2 in days.
    */
   App.pendingBuckets = function (rows, thr) {
     thr = thr || THR;
@@ -1116,7 +1135,7 @@
         label: i === 0 ? '< ' + App.hText(hi) + ' h' : hi === Infinity ? '> ' + App.hText(lo) + ' h' : App.hText(lo) + '–' + App.hText(hi) + ' h' });
     }
     (rows || []).forEach(function (p) {
-      if (!isNum(p.hours)) return;
+      if (!isNum(p.hours) || !p.label) return;
       var h = Number(p.hours);
       for (var j = 0; j < out.length; j++) {
         if (h >= out[j].lo && h < out[j].hi) {

@@ -255,7 +255,9 @@
           var oldest = st.oldestPendingHours !== null && st.oldestPendingHours !== undefined ? frHours(st.oldestPendingHours)
             : (st.oldestPendingDays ? st.oldestPendingDays + ' j' : '');
           var rows = [
-            ['Données au', frDate(st.asOf) + (st.asOfTs ? ' <span class="muted">' + esc(String(st.asOfTs).slice(11, 16)) + '</span>' : '')],
+            // Date and time of the latest SAP entry (a night entry is posted on the day before: date from asOfTs).
+            ['Données au', st.asOfTs ? frDate(String(st.asOfTs).slice(0, 10)) + ' <span class="muted">' + esc(String(st.asOfTs).slice(11, 16)) + '</span>'
+              : frDate(st.asOf)],
             ['Palettes EXP2', frNum(st.exp2Pallets) + ' <span class="muted">/ ' + frNum(st.capacity) + '</span>'],
             ['Saturation EXP2', frPct(st.saturation)],
             ['En attente PRD2', frNum(st.pendingPallets) + ' pal' + (oldest ? ' <span class="muted">(' + esc(oldest) + ')</span>' : '')],

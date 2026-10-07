@@ -515,7 +515,7 @@ test('API flow on the in-memory repo (fixture simulation = sample database)', { 
     const start = plain(ctx.simParams_({ startDate: '2026-09-01', days: 5 }));
     assert.deepEqual([start.startDate, start.endDate], ['2026-09-01', '2026-09-05']);
     assert.throws(() => ctx.simParams_({ startDate: '2026-09-10', endDate: '2026-09-01' }), /précéder/);
-    assert.throws(() => ctx.simParams_({ palletsPerDay: 10 }), /Palettes par jour invalide \(20 à 1\u00a0500\)/);
+    assert.throws(() => ctx.simParams_({ palletsPerDay: 10 }), /Étiquettes par jour invalide \(20 à 1\u00a0500\)/);
     assert.equal(plain(ctx.simParams_({ palletsPerDay: '1500' })).palletsPerDay, 1500);
   });
 });
@@ -570,6 +570,11 @@ test('API flow with the real Simulation.gs', { skip: CORE_READY && has('Simulati
   assert.ok(ctx.api_getVersion().data > v0, 'data version changed');
   const after = plain(ctx.api_getState());
   assert.equal(after.asOf, '2026-10-04');
+  // Time of the data = the latest entry: after midnight it is on the next calendar day (posted on the day before).
+  assert.match(after.asOfTs, /^2026-10-0[45] /);
+  assert.ok(plain(ctx.summary_(after)).text.startsWith('Au ' + ctx.frDate_(after.asOfTs.slice(0, 10)) + ' ' + after.asOfTs.slice(11, 16) + ' : '));
+  assert.match(plain(ctx.summary_({ asOf: '2026-10-04', asOfTs: '2026-10-05 01:53:10', kpi: {}, alerts: [] })).text, /^Au 05\.10\.2026 01:53 : /);
+  assert.match(plain(ctx.summary_({ asOf: '2026-10-04', asOfTs: '', kpi: {}, alerts: [] })).text, /^Au 04\.10\.2026 : 0 palettes/);
   // The lines of +1 jour continue the labels of the data (no label reused).
   const labels = ctx.Repo.dump().movements.filter((m) => m.mvt === '131').map((m) => m.label);
   assert.equal(new Set(labels).size, labels.length, 'one declaration per label');
@@ -1006,6 +1011,10 @@ test('Repo.gs and Main.gs on fake Google services', { skip: SHEETS_READY ? false
     assert.deepEqual(setting('labelIsPallet').slice(0, 4), ['1 étiquette = 1 palette', 'labelIsPallet', 1, '1/0']);
     assert.deepEqual(setting('importTrackedOnly').slice(0, 4), ['Import : produits finis seulement', 'importTrackedOnly', 1, '1/0']);
     assert.equal(new Set(settings.map((r) => r[0])).size, settings.length, 'French labels unique');
+    const mem = makeContext({ sim: 'none', repo: 'memory' });
+    mem.Repo.setup();
+    assert.deepEqual(plain(mem.Repo.dump().settings).map((s) => [s.label, s.key, s.value, s.unit, s.comment]), settings,
+      'the in-memory repo writes the same PARAM_SEUILS rows');
     const docks = sheetTable(g.ss.getSheetByName(T.DOCKS)).rows;
     assert.equal(docks.length, 8);
     assert.ok(docks.every((r) => r[1] === 'Libre' && r[10] === 12));
@@ -1403,14 +1412,20 @@ test('v2 import of the real MB51 fixture through api_importLines', { skip: FIXTU
     assert.equal(k.pendingLabels, e.pending.labeled);
     assert.equal(k.exp2Pallets, e.exp2.pallets);
     assert.ok(state.pending.length === state.pendingTotal && state.pendingTotal < 500, 'every pending row in the state');
-    // expected.json counts labels (crit 86, warn 11); the KPI counts the pallets of every pending row by level.
+    // expected.json counts the declared labels by level (crit 86, warn 11); the KPI counts the pallets of the pending
+    // rows by level, and the unlabeled stock moved into PRD2 (judged in days, posted on asOf) has no level.
     assert.equal(state.pending.filter((x) => x.label && x.level === 'crit').length, e.pending.crit);
     assert.equal(state.pending.filter((x) => x.label && x.level === 'warn').length, e.pending.warn);
     const pallets = (level) => state.pending.filter((x) => x.level === level).reduce((s, x) => s + (Number(x.pallets) || 0), 0);
     assert.equal(k.pendingCrit, pallets('crit'));
     assert.equal(k.pendingWarn, pallets('warn'));
-    assert.ok(k.pendingCrit >= e.pending.crit);
+    assert.equal(k.pendingCrit, 86);
+    assert.equal(k.pendingWarn, 11);
+    assert.equal(k.pendingCrit, e.pending.crit);
+    assert.equal(k.pendingWarn, e.pending.warn);
     assert.equal(k.oldestPendingHours, e.pending.oldestHours);
+    assert.equal(state.alerts[0].text, '86 palettes en PRD2 depuis plus de 6 h · la plus ancienne : ' + e.pending.oldest.article +
+      ' depuis 44 h 02 (étiquette ' + e.pending.oldest.label + ')');
     assert.equal(state.alerts[0].code, 'PRD2_CRIT', 'critical PRD2 alert first');
     assert.match(state.alerts[0].text, new RegExp(e.pending.oldest.article + ' .*\\(étiquette ' + e.pending.oldest.label + '\\)'));
     assert.equal(state.thresholds.importTrackedOnly, 1, 'import filter setting for the import page');
@@ -1418,7 +1433,7 @@ test('v2 import of the real MB51 fixture through api_importLines', { skip: FIXTU
     assertNoUserNames(state, 'state');
     const sum = plain(ctx.summary_(state));
     assert.equal(sum.pendingCrit, k.pendingCrit);
-    assert.match(sum.text, /^Au 05\.10\.2026 22:09 : 1 023 palettes en EXP2 .* dont \d+ depuis plus de 6 h, \d+ alertes\.$/);
+    assert.match(sum.text, /^Au 05\.10\.2026 22:09 : 1 023 palettes en EXP2 .* dont 86 depuis plus de 6 h, \d+ alertes\.$/);
   });
 
   await t.test('article page: project, labels and times', () => {
@@ -1671,6 +1686,48 @@ test('v2 projects APIs: references, projects, rename, ownership, keys', { skip: 
     assert.deepEqual(ctx.Repo.dump().projects.map((p) => p.project), ['Atlas Nord', 'DELTA SUD']);
     assert.equal(ctx.Repo.dump().articles.find((x) => x.article === 'ZZ99999').project, 'DELTA SUD');
   });
+
+  await t.test('the recalculation after a save moves the pallets of the references into the blocks of their project', () => {
+    const contents = (st, id) => (st.blockContents[id] || []).map((x) => [x.article, x.project]);
+    let st = plain(ctx.api_getState());
+    // The hand-written PROJET rule renamed above (priority 1, B3) wins over the PROJETS blocks (priority 5): every
+    // Atlas Nord reference is placed in B3 only (SPEC_V2 4.7, first matching rule).
+    assert.deepEqual(st.projectsList.find((p) => p.project === 'Atlas Nord').blocks, ['B3', 'B1', 'B7', 'B2', 'B8']);
+    assert.ok(contents(st, 'B3').some(([a, p]) => a === 'LF23855' && p === 'Atlas Nord'));
+    assert.ok(['B1', 'B7', 'B2', 'B8'].every((id) => !contents(st, id).length));
+    // The rule removed by hand, then « Recalculer »: the PROJETS blocks apply.
+    const snap = JSON.parse(ctx.Repo.snapshot());
+    snap.rules = [];
+    ctx.Repo.restore(snap);
+    ctx.api_recompute(keys.admin);
+    st = plain(ctx.api_getState());
+    const atlas = st.projectsList.find((p) => p.project === 'Atlas Nord').blocks;
+    assert.deepEqual(atlas, ['B1', 'B7', 'B2', 'B8']);
+    assert.ok(atlas.some((id) => contents(st, id).some(([a, p]) => a === 'LF23855' && p === 'Atlas Nord')), 'Atlas Nord references in its blocks');
+    assert.ok(atlas.every((id) => contents(st, id).every(([, p]) => p === 'Atlas Nord')), 'its blocks hold Atlas Nord only');
+    assert.equal(st.blocks.find((b) => b.id === 'B3').title, 'Libre');
+    // A project without blocks: its references share the free blocks (or À PLACER when they are full).
+    const r = plain(ctx.api_saveReferences(keys.admin, [{ article: 'lf23857', project: 'delta sud' }]));
+    assert.deepEqual([r.created, r.newProjects], [1, []]);
+    st = plain(ctx.api_getState());
+    assert.deepEqual(st.blocks.filter((b) => !b.projects.length).map((b) => b.id), ['B3', 'B4', 'B5', 'B6']);
+    assert.ok(!atlas.some((id) => contents(st, id).some(([a]) => a === 'LF23857')), 'never in the blocks of another project');
+    // Blocks given to that project: the block title and its contents follow.
+    const rows = plain(ctx.api_getProjects()).projects.map((p) => (p.project === 'DELTA SUD' ? Object.assign(p, { blocks: ['B4'] }) : p));
+    ctx.api_saveProjects(keys.admin, rows);
+    st = plain(ctx.api_getState());
+    assert.equal(st.blocks.find((b) => b.id === 'B4').title, 'DELTA SUD');
+    assert.ok(contents(st, 'B4').length > 0 && contents(st, 'B4').every(([, p]) => p === 'DELTA SUD'), 'B4 holds DELTA SUD only');
+    assert.ok(contents(st, 'B4').some(([a]) => a === 'LF23857'));
+    assert.equal(st.projectsList.find((p) => p.project === 'DELTA SUD').blocks.join(), 'B4');
+    // A block may belong to several projects (SPEC_V2 5.2): both names on it.
+    const shared = plain(ctx.api_getProjects()).projects.map((p) => (p.project === 'Atlas Nord' ? Object.assign(p, { blocks: p.blocks.concat(['B4']) }) : p));
+    assert.equal(plain(ctx.api_saveProjects(keys.admin, shared)).saved, 2);
+    st = plain(ctx.api_getState());
+    const b4 = st.blocks.find((b) => b.id === 'B4');
+    assert.deepEqual(b4.projects.slice().sort(), ['Atlas Nord', 'DELTA SUD']);
+    assert.equal(b4.title, b4.projects.join(' / '));
+  });
 });
 
 test('v2 in-memory repo: a v1 store (old harness snapshot) is migrated like the sheet', { skip: CORE_READY ? false : 'core modules absent' }, () => {
@@ -1681,6 +1738,7 @@ test('v2 in-memory repo: a v1 store (old harness snapshot) is migrated like the 
   // v1 shape: no projects, no v2 settings, no schema version, movements and articles without the v2 fields.
   const v1 = JSON.parse(ctx.Repo.snapshot());
   delete v1.projects;
+  delete v1.tabs.PROJETS;
   v1.settings = v1.settings.filter((x) => !['pendingHoursWarn', 'pendingHoursCrit', 'labelIsPallet', 'importTrackedOnly', 'trackAll'].includes(x.key));
   delete v1.props.SCHEMA_VERSION;
   v1.movements.forEach((m) => { ['ts', 'label', 'headerText', 'itemText', 'reference', 'client', 'salesOrder'].forEach((k) => delete m[k]); });
@@ -1689,6 +1747,7 @@ test('v2 in-memory repo: a v1 store (old harness snapshot) is migrated like the 
   const before = plain(ctx.api_getState());
   const m = plain(ctx.Repo.migrate());
   assert.deepEqual(m.settings, ['pendingHoursWarn', 'pendingHoursCrit', 'labelIsPallet', 'importTrackedOnly', 'trackAll']);
+  assert.deepEqual(m.changed, ['PROJETS', 'PARAM_SEUILS']);
   assert.deepEqual(plain(ctx.Repo.migrate()), { version: 2, changed: [], settings: [] }, 'idempotent');
   const input = plain(ctx.Repo.readInput());
   assert.deepEqual(input.projects, []);
@@ -1700,11 +1759,66 @@ test('v2 in-memory repo: a v1 store (old harness snapshot) is migrated like the 
   assert.ok(plain(ctx.api_saveReferences(keys.admin, [{ article: '1000914295', project: 'Atlas' }])).ok);
 });
 
+// The 5 rows a v1 setup wrote in REGLES_PLACEMENT (the migration never deletes them).
+const V1_PLACEHOLDER_RULES = [['F1', 'B1, B7'], ['F2', 'B2, B8'], ['F3', 'B3, B5'], ['F4', 'B4'], ['F5', 'B6']]
+  .map(([value, blocks]) => ({ priority: 10, criterion: 'FAMILLE', value, blocks, comment: 'provisoire' }));
+
+test('v2: the v1 placeholder rules (F1-F5, provisoire) kept by the migration do not hold the blocks of real data', { skip: CORE_READY && FIXTURE_READY ? false : 'core modules or fixture absent' }, async (t) => {
+  const ctx = makeContext({ sim: 'none', repo: 'memory' });
+  ctx.Repo.setup();
+  const keys = plain(ctx.Repo.getKeys());
+  importBatches(ctx, keys.admin, fixtureBatch(ctx).lines, { importId: 'IMP-V1R', fileName: 'MB51.xlsx' });
+  const clean = plain(ctx.api_getState());
+  assert.equal(clean.kpi.toPlacePallets, 0, 'no rule: the articles spread over the free blocks');
+
+  await t.test('no article of family F1-F5: the placeholders are left out, the rows stay in the sheet', () => {
+    const db = JSON.parse(ctx.Repo.snapshot());
+    db.rules = JSON.parse(JSON.stringify(V1_PLACEHOLDER_RULES));
+    ctx.Repo.restore(db);
+    ctx.api_recompute(keys.admin);
+    const s = plain(ctx.api_getState());
+    assert.deepEqual(s.blocks.map((b) => [b.id, b.title, b.pallets]), clean.blocks.map((b) => [b.id, b.title, b.pallets]));
+    assert.ok(s.blocks.every((b) => b.title === 'Libre'), 'no « Famille F1 » title');
+    assert.equal(s.kpi.toPlacePallets, 0);
+    assert.equal(ctx.Repo.dump().rules.length, 5, 'rows kept');
+    assert.deepEqual(plain(ctx.Repo.readInput()).rules, []);
+  });
+
+  await t.test('an article of family F1 keeps the F1 placeholder; a user FAMILLE rule always counts', () => {
+    const db = JSON.parse(ctx.Repo.snapshot());
+    const art = db.articles.length ? db.articles[0] : null;
+    assert.equal(art, null, 'the import wrote no ARTICLES row');
+    db.articles = [{ article: 'LB73297', designation: '', uqs: '', qpp: null, palletType: '', heightCm: null, levels: null, family: 'f1', project: '' }];
+    db.rules = JSON.parse(JSON.stringify(V1_PLACEHOLDER_RULES)).concat([{ priority: 1, criterion: 'FAMILLE', value: 'F4', blocks: 'B4', comment: '' }]);
+    ctx.Repo.restore(db);
+    const rules = plain(ctx.Repo.readInput()).rules;
+    assert.deepEqual(rules.map((r) => r.value + ':' + (r.comment || '')), ['F1:provisoire', 'F4:']);
+    ctx.api_recompute(keys.admin);
+    const s = plain(ctx.api_getState());
+    assert.equal(s.blocks.find((b) => b.id === 'B1').title, 'Famille F1');
+    assert.equal(s.blocks.find((b) => b.id === 'B4').title, 'Famille F4');
+    assert.equal(s.blocks.find((b) => b.id === 'B3').title, 'Libre');
+  });
+
+  await t.test('same rule on the Google Sheet (Repo.gs)', () => {
+    const g = makeGoogle();
+    const sheet = makeContext({ sim: 'none', repo: 'sheets', globals: g.globals });
+    sheet.Repo.setup();
+    const T = plain(sheet.CFG.TABS);
+    const rows = V1_PLACEHOLDER_RULES.map((r) => [r.priority, r.criterion, r.value, r.blocks, r.comment]);
+    g.ss.getSheetByName(T.RULES).getRange(2, 1, rows.length, 5).setValues(rows);
+    assert.deepEqual(plain(sheet.Repo.readInput()).rules, []);
+    g.ss.getSheetByName(T.RULES).getRange(3, 5, 1, 1).setValues([['mes familles']]);
+    assert.deepEqual(plain(sheet.Repo.readInput()).rules.map((r) => r.value), ['F2'], 'a row the user re-labelled counts');
+  });
+});
+
 test('v2 simulation ownership of ARTICLES and PROJETS', { skip: CORE_READY && has('Simulation') ? false : 'Simulation.gs absent' }, async (t) => {
   const ctx = makeContext({ sim: 'real', repo: 'memory' });
   ctx.Repo.setup();
   const keys = plain(ctx.Repo.getKeys());
   const params = { days: 2, endDate: '2026-10-03', seed: 7, palletsPerDay: 60 };
+  let simArticle = null;
 
   await t.test('the user rows written before a simulation survive it and its clearing', () => {
     ctx.api_saveProjects(keys.admin, [{ project: 'REEL A', blocks: ['B3'] }]);
@@ -1724,7 +1838,7 @@ test('v2 simulation ownership of ARTICLES and PROJETS', { skip: CORE_READY && ha
   await t.test('simulation, then a save from the projects panel, then clearing keeps the user-owned rows and PROJETS', () => {
     ctx.api_simulate(keys.admin, params);
     let db = ctx.Repo.dump();
-    const simArticle = db.articles.find((a) => a.project === 'ATLAS').article;
+    simArticle = db.articles.find((a) => a.project === 'ATLAS').article;
     const other = db.articles.find((a) => a.project === 'BOREAL').article;
     assert.equal(ctx.Repo.getProp('PROJECTS_SOURCE'), 'SIMULATION');
     const r = plain(ctx.api_saveReferences(keys.admin, [{ article: simArticle.toLowerCase(), project: 'Mon projet' }]));
@@ -1739,13 +1853,20 @@ test('v2 simulation ownership of ARTICLES and PROJETS', { skip: CORE_READY && ha
     assert.equal(db.movements.length, 0);
   });
 
-  await t.test('a new simulation replaces its own projects, not the user ones', () => {
+  await t.test('a new simulation replaces its own projects and articles, not the user ones', () => {
     ctx.api_simulate(keys.admin, params);
     const names = ctx.Repo.dump().projects.map((p) => p.project);
     assert.equal(names.length, 8, 'same names replaced in place, no duplicate');
     assert.equal(new Set(names.map((n) => n.toLowerCase())).size, names.length);
+    // Same seed: the simulator generates the article the user moved to « Mon projet » again; the user's row wins.
+    let rows = ctx.Repo.dump().articles.filter((a) => a.article === simArticle);
+    assert.deepEqual(rows.map((a) => a.project), ['Mon projet'], 'one row, the user one');
+    assert.ok(!ctx.Repo.getProp('SIM_ARTICLES').includes(simArticle), 'still owned by the user');
+    assert.ok(plain(ctx.api_getState()).articles.some((a) => a.a === simArticle && a.p === 'Mon projet'));
     ctx.runClearSimulation_();
     assert.deepEqual(ctx.Repo.dump().projects.map((p) => p.project), ['REEL A', 'Mon projet']);
+    rows = ctx.Repo.dump().articles.filter((a) => a.article === simArticle);
+    assert.deepEqual(rows.map((a) => a.project), ['Mon projet'], 'kept by the clearing');
   });
 });
 
@@ -1933,6 +2054,26 @@ test('v2 on fake Google services: migration of a v1 sheet, label-aware writes, r
     assert.ok(s2.data.colors.Panneau, 'automatic color from the state');
     assert.throws(() => sheet.sidebar_saveProjects([{ project: 'Panneau', blocks: ['B42'] }]), /bloc inconnu/);
   });
+
+  await t.test('a simulated article moved to a project stays the user one on the sheet (new simulation, clearing)', () => {
+    const g3 = makeGoogle();
+    const c = makeContext({ sim: 'fixture', repo: 'sheets', main: true, globals: g3.globals });
+    c.Repo.setup();
+    const k3 = plain(c.Repo.getKeys());
+    c.api_simulate(k3.admin, { days: 14, seed: 2026 });
+    const pc = H.ARTICLES.indexOf('Projet');
+    const art0 = plain(sheetTable(g3.ss.getSheetByName(T.ARTICLES)));
+    const code = art0.rows[2][0];
+    c.api_saveReferences(k3.admin, [{ article: code, project: 'Mon projet' }]);
+    c.api_simulate(k3.admin, { days: 14, seed: 2026 });
+    let rows = plain(sheetTable(g3.ss.getSheetByName(T.ARTICLES)).rows);
+    assert.equal(rows.length, art0.rows.length, 'no second row for the generated code');
+    assert.deepEqual(rows.filter((r) => r[0] === code).map((r) => r[pc]), ['Mon projet']);
+    assert.ok(!JSON.parse(g3.propsStore.get('P_SIM_ARTICLES')).includes(code), 'not given back to the simulation');
+    c.runClearSimulation_();
+    rows = plain(sheetTable(g3.ss.getSheetByName(T.ARTICLES)).rows);
+    assert.deepEqual(rows.map((r) => [r[0], r[pc]]), [[code, 'Mon projet']], 'kept by the clearing, the simulated rows removed');
+  });
 });
 
 // The sheet panel SidebarProjets.html run against the in-memory server: a tiny DOM (ids, values, innerHTML text,
@@ -1995,13 +2136,15 @@ test('projects panel (SidebarProjets.html) on the in-memory server: paste, previ
   assert.match(el('projects').innerHTML, /data-b="B1" aria-pressed="false"/);
   assert.match(el('link').textContent, /Application Web non déployée|Déployer/);
 
-  // Two columns from Excel (header line skipped), then one reference per line with the project field.
-  el('paste').value = 'Référence\tProjet\nlf23855\tatlas\n0073871645\tBOREAL\nLF23857\tATLAS\nbad code!\tX\nLD31553\t';
+  // Two columns from Excel (header line skipped, a row without reference ignored), then one reference per line with
+  // the project field.
+  el('paste').value = 'Référence\tProjet\nlf23855\tatlas\n0073871645\tBOREAL\n\tORPHAN\nLF23857\tATLAS\nbad code!\tX\nLD31553\t';
   el('project').value = 'Delta';
   page.click('btnPreview');
   let pv = el('preview').innerHTML;
   const des = (a) => plain(ctx.api_getState()).articles.find((x) => x.a === a).d;
   assert.match(pv, /3 nouvelles<\/b> · 0 changement · 1 inchangée · .*1 invalide/);
+  assert.doesNotMatch(pv, /ORPHAN/, 'the project of a row without reference is not a reference');
   assert.ok(pv.includes('LF23855</span><span class="st st-new">Nouvelle</span></div><span class="des">' + des('LF23855') + '</span><div><b>ATLAS</b>'),
     'designation from the state, spelling of the existing project');
   assert.match(pv, /73871645<\/span><span class="st st-new">Nouvelle/);

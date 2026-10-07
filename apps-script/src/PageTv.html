@@ -121,21 +121,6 @@
       var s = store.state;
       var fr = App.freshness(s);
       var conn = App.connection();
-      if (s && store.status !== 'empty') {
-        // 'Données SAP jusqu’au 05/10/2026 22:09 · importées à 07:42' (time of the latest SAP entry when known). The
-        // time of the data is never cut: when the line is too long, the import time goes first (the badge shows its
-        // age), then the year.
-        var full = esc(fr.lead) + ' <b>' + esc(fr.asOfLabel) + '</b>';
-        var variants = [full + (fr.imported ? ' · ' + esc(fr.verb) + ' <b>' + esc(fr.imported) + '</b>' : ''), full];
-        if (fr.asOfStamp) variants.push(esc(fr.lead) + ' <b>' + esc(f.stampShort(s.asOfTs)) + '</b>');
-        for (var i = 0; i < variants.length; i++) {
-          R.fresh.innerHTML = variants[i];
-          if (!R.fresh.clientWidth || R.fresh.scrollWidth <= R.fresh.clientWidth + 1) break;
-        }
-        R.fresh.title = fr.text;
-      } else {
-        R.fresh.innerHTML = 'Données SAP du <b>—</b>';
-      }
       var badge = R.badge, cls = 'tv-badge', text, stale = false;
       if (conn && s) {
         cls += ' off';
@@ -163,6 +148,22 @@
       R.alerts.className = 'tv-pill ' + (!alerts.length ? 'ok' : crit ? 'crit' : '');
       R.alerts.lastChild.textContent = alerts.length ? f.plural(alerts.length, 'alerte', 'alertes') + (crit ? ' · ' + crit + ' critique' + (crit > 1 ? 's' : '') : '') : 'Aucune alerte';
       R.sim.hidden = !(s && s.source === 'SIMULATION');
+      // Last, once the badge and the alerts pill have their final width (the line takes the room they leave).
+      // 'Données SAP jusqu’au 05/10/2026 22:09 · importées à 07:42' (time of the latest SAP entry when known). The
+      // time of the data is never cut: when the line is too long, the import time goes first (the badge shows its
+      // age), then the year.
+      if (s && store.status !== 'empty') {
+        var full = esc(fr.lead) + ' <b>' + esc(fr.asOfLabel) + '</b>';
+        var variants = [full + (fr.imported ? ' · ' + esc(fr.verb) + ' <b>' + esc(fr.imported) + '</b>' : ''), full];
+        if (fr.asOfStamp) variants.push(esc(fr.lead) + ' <b>' + esc(f.stampShort(s.asOfTs)) + '</b>');
+        for (var i = 0; i < variants.length; i++) {
+          R.fresh.innerHTML = variants[i];
+          if (!R.fresh.clientWidth || R.fresh.scrollWidth <= R.fresh.clientWidth + 1) break;
+        }
+        R.fresh.title = fr.text;
+      } else {
+        R.fresh.innerHTML = 'Données SAP du <b>—</b>';
+      }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -266,7 +267,7 @@
       }).join('') +
         '<span><i class="ghost"></i>en attente PRD2</span>' +
         (Number(k.pendingCrit) > 0 ? '<span><i class="ghost crit"></i>&gt; ' + esc(hText(thr.pendingHoursCrit)) + ' h</span>' : '');
-      R.note.textContent = App.hasProjects(s) ? 'Positions théoriques · placement par projet' : 'Positions théoriques · placement par famille';
+      R.note.textContent = 'Positions théoriques · ' + App.placementText(s, true);
     }
 
     // Alerts grouped into short items readable from 5 m (one per kind, or per block / dock); full texts on the PC.
@@ -319,6 +320,10 @@
           var nw = isNum(k.pendingWarn) && Number(k.pendingWarn) > 0 ? Number(k.pendingWarn) : leadingCount(g.list[0].text);
           add(g.level, '<b>' + f.plural(nw || 0, 'palette', 'palettes') + '</b> en PRD2 depuis ' + esc(hText(thr.pendingHoursWarn)) + ' à ' +
             esc(hText(thr.pendingHoursCrit)) + ' h', code);
+        } else if (code === 'NEGATIVE_STOCK' && g.level !== 'crit') {
+          // Without opening stock (no MB52 imported) the engine gives one calm hint instead of one line per issue.
+          var ns = leadingCount(g.list[0].text);
+          add(g.level, (ns ? '<b>' + f.plural(ns, 'sortie', 'sorties') + '</b> sans stock connu' : 'Sorties sans stock connu') + ' (stock initial à importer)', code);
         } else if (code === 'NO_PROJECT') {
           var np = Number(k.noProjectArticles) || leadingCount(g.list[0].text) || g.list.length;
           add(g.level, '<b>' + f.plural(np, 'référence', 'références') + '</b> sans projet (page PC Projets)', code);
@@ -421,7 +426,7 @@
       var projects = App.projectLegend(s);
       R.planRamp.innerHTML = window.Plan2D.legendHtml(thr) + (projects.length ? window.Plan2D.projectLegendHtml(projects) : '') +
         '<div class="note">Libellés d’allée à confirmer (relevé terrain)</div>';
-      R.planSub.textContent = App.hasProjects(s) ? 'blocs nommés par projet · placement théorique' : 'placement théorique par famille';
+      R.planSub.textContent = App.hasProjects(s) ? 'blocs nommés par projet · placement théorique' : 'placement théorique · ' + App.placementText(s, true);
       R.blist.innerHTML = (s.blocks || []).map(function (b) {
         var v = Number(b.saturation) || 0;
         var info = [];
@@ -642,7 +647,10 @@
     onState(App.store);
     showScene(scene);
     armRotation();
+    // The header line is fitted to the room it has: again once the web fonts are there and after a resize.
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { header(App.store); });
     var onResize = App.debounce(function () {
+      header(App.store);
       if (twin) twin.resize();
       if (shown) {
         ticker(shown);

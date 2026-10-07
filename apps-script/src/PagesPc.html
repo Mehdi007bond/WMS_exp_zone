@@ -5,6 +5,7 @@
  *   PagesPc.mount(root, page, params)   app bar + the page; in-app navigation through App.go / App.onRoute
  *   PagesPc.has(page)
  *   PagesPc.parsePaste(text, project)    references pasted in the Projets page (also used by the tests)
+ *   PagesPc.autoColors(projects)         project colors, same rule as the engine (also used by the tests)
  *
  * Pages (?page=...): twin (Jumeau 3D), plan (Plan 2D), lookup (Recherche article), pending (En attente),
  * projects (Projets: references -> projects, blocks per project), docks (Quais & camions), import (Import SAP MB51),
@@ -275,7 +276,7 @@
       var projects = App.hasProjects(s);
       var waits = isNum(k.oldestPendingHours) ? 'max ' + f.hm(k.oldestPendingHours) + (Number(k.pendingCrit) > 0 ? ' · <b class="bad-t">' + num(k.pendingCrit) + ' &gt; ' + esc(App.hText(thr.pendingHoursCrit)) + ' h</b>' : '')
         : f.days(k.oldestPendingDays);
-      t.innerHTML = '<div class="panel"><h2>Légende<small>' + esc({ project: projects ? 'couleur du projet' : 'famille de produit', age: 'âge de la palette la plus ancienne', saturation: 'saturation du bloc' }[mode]) + '</small></h2>' + legendHtml(s) + '</div>' +
+      t.innerHTML = '<div class="panel"><h2>Légende<small>' + esc({ project: projects ? 'couleur du projet' : App.hasFamilies(s) ? 'famille de produit' : 'aucun projet : page Projets', age: 'âge de la palette la plus ancienne', saturation: 'saturation du bloc' }[mode]) + '</small></h2>' + legendHtml(s) + '</div>' +
         '<div class="panel" data-r="pick"><h2>Sélection</h2>' + pickHtml() + '</div>' +
         '<div class="panel"><h2>Chiffres clés</h2><dl class="kv">' +
         '<dt>Stock EXP2</dt><dd>' + num(k.exp2Pallets) + ' / ' + num(k.capacity) + ' pal</dd>' +
@@ -376,7 +377,7 @@
       var sat = {};
       blocks.forEach(function (b) { sat[b.id] = b.saturation; });
       body.innerHTML = '<div class="plan-grid"><div class="panel plan-panel"><h2>Plan 2D · saturation par bloc<small>' +
-        (projects ? 'blocs nommés par projet · placement théorique' : 'placement théorique par famille') + '</small></h2>' +
+        (projects ? 'blocs nommés par projet · placement théorique' : 'placement théorique · ' + App.placementText(s)) + '</small></h2>' +
         '<svg data-r="svg" aria-label="Plan 2D de l’entrepôt EXP2, blocs colorés selon leur saturation et nommés par projet"></svg>' +
         '<div class="actions">' + window.Plan2D.legendHtml(thr) + window.Plan2D.projectLegendHtml(App.projectLegend(s)) + '</div>' +
         '<div class="panel-note">Seuils réglables dans le classeur. Projets et zones : page <a href="#" data-go="projects">Projets</a>. Libellés d’allée à confirmer (relevé terrain).</div></div>' +
@@ -661,14 +662,16 @@
       var place = function () {
         return blocksTxt ? '<span class="tag tbd">' + esc(blocksTxt) + ' · théorique</span>' : toPlace ? '<span class="tag warn">à placer</span>' : '—';
       };
+      // 1 label = 1 pallet: the note on pallets counted per article only concerns the rows without a label.
+      var fifoUnl = fifo.some(function (r) { return !r.label; }), pendUnl = pend.some(function (r) { return !r.label; });
       if (labeled) {
         html += '<div class="panel"><h2>Stock EXP2 par étiquette<small>FIFO · ' + f.plural(fifo.length, 'ligne', 'lignes') + ' · âge à l’heure des données</small></h2>' +
-          (fifo.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Étiquette</th><th>Entrée le</th><th>Origine</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Âge</th><th>Emplacement</th></tr></thead><tbody>' +
+          (fifo.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Étiquette</th><th>Entrée le</th><th>Origine</th><th class="num">Qté</th><th class="num">Pal' + (fifoUnl ? '*' : '') + '</th><th class="num">Âge</th><th>Emplacement</th></tr></thead><tbody>' +
             fifo.map(function (r) {
               return '<tr><td class="mono">' + (r.label ? esc(r.label) : '<span class="muted">sans étiquette</span>') + '<span class="sub">' + esc(r.doc || '') + '</span></td>' +
                 '<td>' + esc(when(r.ts, r.date)) + '</td><td>' + esc(r.origin || '') + '</td><td class="num">' + num(r.qty, undefined) + '</td><td class="num">' + pal(r.pallets) + '</td>' +
                 '<td class="num">' + (isNum(r.ageHours) ? esc(f.hm(r.ageHours)) : f.days(r.age)) + '</td><td>' + place() + '</td></tr>';
-            }).join('') + '</tbody></table></div>' + PAL_NOTE : '<div class="empty-note">Aucun stock de cet article en EXP2.</div>') + '</div>';
+            }).join('') + '</tbody></table></div>' + (fifoUnl ? PAL_NOTE : '') : '<div class="empty-note">Aucun stock de cet article en EXP2.</div>') + '</div>';
       } else {
         html += '<div class="panel"><h2>Stock EXP2 par date d’entrée<small>FIFO · ' + f.plural(fifo.length, 'ligne', 'lignes') + '</small></h2>' +
           (fifo.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date entrée</th><th>Doc.article</th><th>Origine</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Âge (j)</th><th>Emplacement</th></tr></thead><tbody>' +
@@ -679,13 +682,13 @@
       }
       if (pend.length) {
         html += '<div class="panel"><h2>En attente en PRD2<small>déclaré, pas encore transféré en EXP2 · rouge au-delà de ' + esc(App.hText(thr.pendingHoursCrit)) + ' h</small></h2><div class="tbl-wrap"><table class="tbl"><thead><tr>' +
-          (labeled ? '<th>Étiquette</th>' : '') + '<th>Déclarée le</th><th>Doc.article</th><th class="num">Qté</th><th class="num">Pal*</th><th class="num">Attente</th></tr></thead><tbody>' +
+          (labeled ? '<th>Étiquette</th>' : '') + '<th>Déclarée le</th><th>Doc.article</th><th class="num">Qté</th><th class="num">Pal' + (pendUnl ? '*' : '') + '</th><th class="num">Attente</th></tr></thead><tbody>' +
           pend.map(function (p) {
             var lvl = App.pendingLevel(p, thr);
             return '<tr class="' + (lvl ? 'lv-' + lvl : '') + '">' + (labeled ? '<td class="mono">' + (p.label ? esc(p.label) : '<span class="muted">sans étiquette</span>') + '</td>' : '') +
               '<td>' + esc(when(p.ts, p.date)) + '</td><td class="mono">' + esc(p.doc || '') + '</td><td class="num">' + num(p.qty, undefined) + '</td><td class="num">' + pal(p.pallets) +
               '</td><td class="num"><span class="chipd ' + levelChip(lvl) + '">' + (isNum(p.hours) ? esc(f.hm(p.hours)) : f.days(p.days)) + '</span></td></tr>';
-          }).join('') + '</tbody></table></div>' + PAL_NOTE + '</div>';
+          }).join('') + '</tbody></table></div>' + (pendUnl ? PAL_NOTE : '') + '</div>';
       }
       html += '<div class="panel"><h2>Sorties d’EXP2<small>entrée → sortie · ' + f.plural(exits.length, 'ligne', 'lignes') + '</small></h2>' +
         (exits.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' + (labeled ? '<th>Étiquette</th>' : '') + '<th>Entrée</th><th>Sortie</th><th class="num">Qté</th><th class="num">Pal (équiv.)</th><th>Destination</th><th class="num">Séjour</th><th>Doc.article</th></tr></thead><tbody>' +
@@ -949,8 +952,10 @@
   // Projets: references -> projects, blocks (zones) per project (docs/SPEC_V2.md 5 and 7)
   // ---------------------------------------------------------------------------------------------------------------
   var ARTICLE_RE = /^[0-9A-Za-z._\/-]{1,40}$/;
-  // First pasted line taken as a header (Excel column titles), compared without accents or case.
-  var HEADER_RE = /^(articles?|references?|ref\.?|code( article)?|code produit|n[o°]\.? ?(d')?article|numero( d'article)?|materiel|material|part ?number|pn)$/;
+  // First pasted line taken as a header (Excel column titles), compared without accents or case: the reference column
+  // and the project column are found by their titles (other columns, e.g. Désignation, are ignored).
+  var HEADER_RE = /^(articles?|references?( articles?)?|ref\.?( article)?|code( article)?|code produit|n[o°]\.? ?(d')?article|numero( d'article)?|materiel|material|part ?number|pn)$/;
+  var PROJECT_HEADER_RE = /^(projets?|projects?|nom (du )?projet)$/;
   var MAX_PROJECT_LEN = 40;
 
   // Spaces of every kind (no-break, thin, figure, BOM) -> one plain space, trimmed.
@@ -1001,7 +1006,9 @@
    * References pasted in the Projets page. One reference per line, or two columns copied from Excel
    * (Référence ⇥ Projet; « ; » separates too). Blank lines, surrounding spaces and a header line are ignored; a
    * reference given twice is merged (its last project wins, conflicts are listed); numeric codes lose their leading
-   * zeros like on the server. A line without its own project takes defaultProject.
+   * zeros like on the server. A line without its own project takes defaultProject. With a header line, the columns
+   * are found by their titles (Article / Référence, Projet), so more columns can be pasted; without one, a line of
+   * more than two columns is refused (a designation must never be taken for a project).
    * -> { rows: [{ article, error, project, remove, projectError, source: 'colonne' | 'champ' | '', line, count,
    *      conflict: [project names] }], blank, header (true when a header line was skipped), lines, merged }
    */
@@ -1010,7 +1017,9 @@
     var out = { rows: [], blank: 0, header: false, lines: 0, merged: 0 };
     var byCode = {};
     var first = true;
-    String(text || '').split(/\r\n|\r|\n/).forEach(function (line, i) {
+    var colRef = 0, colProj = 1, byHeader = false;
+    // A copy from Excel ends with a line break: not a blank line of the user's.
+    String(text || '').replace(/(\r\n|\r|\n)$/, '').split(/\r\n|\r|\n/).forEach(function (line, i) {
       var t = String(line).replace(/\ufeff/g, '');
       if (!cleanSpaces(t)) {
         out.blank++;
@@ -1020,16 +1029,27 @@
       while (cols.length > 1 && !cleanSpaces(cols[cols.length - 1])) cols.pop();
       if (first) {
         first = false;
-        var c0 = App.fold(cleanSpaces(cols[0])).replace(/[’`]/g, '\'');
-        var c1 = cols.length > 1 ? App.fold(cleanSpaces(cols[1])) : '';
-        if (HEADER_RE.test(c0) || /^(projets?|projects?)$/.test(c1)) {
+        var refAt = -1, projAt = -1;
+        cols.forEach(function (c, k) {
+          var n = App.fold(cleanSpaces(c)).replace(/[’`]/g, '\'');
+          if (refAt < 0 && HEADER_RE.test(n)) refAt = k;
+          else if (projAt < 0 && PROJECT_HEADER_RE.test(n)) projAt = k;
+        });
+        if (refAt >= 0 || projAt >= 0) {
           out.header = true;
+          byHeader = true;
+          colRef = refAt >= 0 ? refAt : 0;
+          colProj = projAt;
           return;
         }
       }
       out.lines++;
-      var a = normArticle(cols[0]);
-      var p = cols.length > 1 ? normProjectName(cols[1]) : { name: '', given: false, remove: false, error: '' };
+      var a = normArticle(cols[colRef]);
+      var extra = !byHeader && cols.filter(function (c) { return cleanSpaces(c); }).length > 2;
+      if (!a.error && extra) {
+        a.error = 'Plus de deux colonnes : collez seulement Référence et Projet, ou copiez aussi la ligne de titres (Référence, Projet)';
+      }
+      var p = colProj >= 0 && cols.length > colProj ? normProjectName(cols[colProj]) : { name: '', given: false, remove: false, error: '' };
       var use = p.given ? p : def;
       var row = { article: a.code, error: a.error, project: use.name, remove: !!use.remove, projectError: use.error || '',
         source: p.given ? 'colonne' : def.given ? 'champ' : '', line: i + 1, count: 1, conflict: [] };
@@ -1065,10 +1085,28 @@
       var x = a.toLowerCase(), y = b.toLowerCase();
       return x < y ? -1 : x > y ? 1 : a < b ? -1 : a > b ? 1 : 0;
     });
+    // Same rule as the engine: the palette color of the rank in name order, or the next one not used yet.
+    var isColor = function (c) { return /^#[0-9a-fA-F]{6}$/.test(c || ''); };
+    var taken = {};
+    projects.forEach(function (p) {
+      if (isColor(p.color)) taken[p.color.toLowerCase()] = true;
+    });
     var out = {};
     names.forEach(function (n, i) {
       var p = projects.filter(function (x) { return x.project === n; })[0];
-      out[n] = /^#[0-9a-fA-F]{6}$/.test(p.color || '') ? p.color.toLowerCase() : palette[i % palette.length];
+      if (isColor(p.color)) {
+        out[n] = p.color.toLowerCase();
+        return;
+      }
+      var c = palette[i % palette.length];
+      for (var k = 0; k < palette.length; k++) {
+        if (!taken[palette[(i + k) % palette.length].toLowerCase()]) {
+          c = palette[(i + k) % palette.length];
+          break;
+        }
+      }
+      taken[c.toLowerCase()] = true;
+      out[n] = c;
     });
     return out;
   }
@@ -1083,6 +1121,8 @@
     var pasted = null;        // parsePaste() result shown in the preview
     var pasteResult = null;   // { kind, html } message of the last save from the paste box
     var selectedNone = {};    // section 4: checked articles
+    var noneTarget = '';      // section 4: « Affecter à » being typed
+    var zoneTyped = {};       // section 2: block id -> project name typed in its « + projet » field, not added yet
     var edits = {};           // section 5: article -> new project ('' = none)
     var allFilter = { q: params.article || '', project: '' };
     var busy = false;
@@ -1096,7 +1136,7 @@
       '<section class="panel" id="pj-paste" aria-labelledby="pj-paste-h"><h2 id="pj-paste-h"><span class="step">1</span>Coller des références<small>une par ligne, ou deux colonnes copiées d’Excel : Référence ⇥ Projet</small></h2>' +
       '<div class="pj-paste"><div class="form">' +
       '<label class="field"><span>Références</span><textarea data-r="pasteText" rows="9" spellcheck="false" autocomplete="off" ' +
-      'placeholder="LF23855&#10;LF23857&#10;73871645&#9;ATLAS"></textarea></label>' +
+      'placeholder="AB12345&#10;AB12346&#10;12345678&#9;ATLAS"></textarea></label>' +
       '<label class="field"><span>Projet (pour les lignes sans projet)</span><input data-r="pasteProject" list="pj-names" maxlength="40" autocomplete="off" placeholder="ex. ATLAS"></label>' +
       '<p class="small">Un nouveau nom crée le projet. « Sans projet » retire le projet. Lignes vides, espaces et doublons ignorés. Ctrl+Entrée : aperçu.</p>' +
       '<div class="actions"><button type="button" class="btn p" data-act="preview">Aperçu</button><button type="button" class="btn" data-act="clearPaste">Effacer</button></div></div>' +
@@ -1149,7 +1189,16 @@
         }).filter(function (p) { return p.project; });
         data.references = data.references || [];
         data.blocks = (data.blocks && data.blocks.length) ? data.blocks : dataFromState(state()).blocks;
+        // Zones being edited survive a reload (after another section saved): the saved zones become the new base.
+        // Projects created meanwhile (new names of a references save) join the zones being edited.
+        var editing = draftDirty() ? draft.projects : null;
         resetDraft();
+        if (editing) {
+          draft.projects.forEach(function (p) {
+            if (!editing.some(function (x) { return sameName(x.project, p.project); })) editing.push(p);
+          });
+          draft.projects = editing;
+        }
         renderAll();
       }, function (err) {
         if (my !== loadSeq) return;
@@ -1224,8 +1273,16 @@
     }
 
     // ---- writes ---------------------------------------------------------------------------------------------
+    // Copy read from the state (the server did not answer api_getProjects): nothing can be saved from it.
+    function readOnlyError() {
+      return data && data.fromState ? new Error('Projets en lecture seule (' + (dataError || 'serveur indisponible') + ') : rien n’a été enregistré. ' +
+        '« Réessayer » en haut de la page.') : null;
+    }
+
     // Saves [{ article, project }] by batches of REF_CHUNK with the admin key; resolves to the summed answer.
     function saveRefs(rows) {
+      var ro = readOnlyError();
+      if (ro) return Promise.reject(ro);
       var chunks = [];
       for (var i = 0; i < rows.length; i += REF_CHUNK) chunks.push(rows.slice(i, i + REF_CHUNK));
       return App.withKey('admin', function (key) {
@@ -1509,15 +1566,59 @@
       if (p) p.blocks = p.blocks.filter(function (b) { return b !== id; });
     }
 
+    // Blocks whose « + projet » field holds a name not added yet (kept across redraws, added by the save button).
+    function typedBlocks() {
+      return Object.keys(zoneTyped).filter(function (id) { return cleanSpaces(zoneTyped[id]); });
+    }
+
+    // Adds the names typed and not added yet; '' when done, else the first problem.
+    function commitTyped() {
+      var ids = typedBlocks();
+      for (var i = 0; i < ids.length; i++) {
+        var problem = addToBlock(ids[i], zoneTyped[ids[i]]);
+        if (problem) return 'Bloc ' + ids[i] + ' : ' + problem;
+        delete zoneTyped[ids[i]];
+      }
+      return '';
+    }
+
+    // Save / cancel buttons and status of the zones, without redrawing the table (the field being typed in stays).
+    function syncZoneButtons() {
+      var dirty = draftDirty(), typed = typedBlocks().length > 0;
+      var save = App.$('[data-save="zones"]', R.zones), cancel = App.$('[data-act="zonesCancel"]', R.zones), st = App.$('[data-r="zoneState"]', R.zones);
+      if (save) save.disabled = !(dirty || typed) || busy;
+      if (cancel) cancel.disabled = !(dirty || typed);
+      if (st) {
+        st.className = 'small ' + (dirty || typed ? 'warn-t' : 'muted');
+        st.textContent = typed ? 'Projet saisi pas encore ajouté : Entrée pour l’ajouter (ou « Enregistrer les zones »)' :
+          dirty ? 'Modifications non enregistrées' : 'Zones enregistrées dans l’onglet PROJETS';
+      }
+    }
+
     function renderZones(focusBlock) {
       if (!data || !draft) {
         R.zones.innerHTML = '<div class="empty-note">' + (loading ? 'Chargement…' : 'Zones indisponibles.') + '</div>';
         return;
       }
+      // A redraw (new state, another section saved) keeps the field being typed in and its cursor.
+      var active = document.activeElement;
+      var keep = active && R.zones.contains(active) && active.hasAttribute('data-add') ? { id: active.getAttribute('data-add'), at: active.selectionStart } : null;
+      if (!focusBlock && keep) focusBlock = keep.id;
       var colors = draftColors();
       var dirty = draftDirty();
       var blocks = data.blocks || [];
       var list = draft.projects.slice().sort(function (a, b) { return a.project.localeCompare(b.project, 'fr', { sensitivity: 'base' }); });
+      // Two projects with the same color cannot be told apart on the plan and in 3D: say which one to change.
+      var sameColor = {};
+      list.forEach(function (p, i) {
+        var c = String(colors[p.project] || '').toLowerCase();
+        for (var j = 0; j < i; j++) {
+          if (c && String(colors[list[j].project] || '').toLowerCase() === c) {
+            sameColor[p.project] = list[j].project;
+            break;
+          }
+        }
+      });
       R.zones.innerHTML = '<div class="pj-zones"><div><table class="tbl zones"><thead><tr><th>Bloc</th><th>Libellé (sketch)</th><th class="num">Capacité</th><th>Projets</th></tr></thead><tbody>' +
         blocks.map(function (b) {
           var projs = blockProjects(b.id);
@@ -1526,17 +1627,19 @@
               return '<span class="chip" style="--c:' + esc(colors[p.project] || App.NO_PROJECT_COLOR) + '"><i></i>' + esc(p.project) +
                 '<button type="button" data-remove="' + esc(p.project) + '" aria-label="Retirer ' + esc(p.project) + ' du bloc ' + esc(b.id) + '">×</button></span>';
             }).join('') + (projs.length ? '' : '<span class="muted small">libre</span>') +
-            '<input class="chip-in" list="pj-names" maxlength="40" autocomplete="off" placeholder="+ projet" aria-label="Ajouter un projet au bloc ' + esc(b.id) + '" data-add="' + esc(b.id) + '"></div></td></tr>';
+            '<input class="chip-in" list="pj-names" maxlength="40" autocomplete="off" placeholder="+ projet" aria-label="Ajouter un projet au bloc ' + esc(b.id) + '" data-add="' + esc(b.id) + '"' +
+            (zoneTyped[b.id] ? ' value="' + esc(zoneTyped[b.id]) + '"' : '') + '></div></td></tr>';
         }).join('') + '</tbody></table>' +
         '<div class="small zone-err" data-r="zoneErr" role="alert"></div>' +
-        '<div class="actions"><button type="button" class="btn p" data-save="zones"' + (dirty && !busy ? '' : ' disabled') + '>Enregistrer les zones</button>' +
-        '<button type="button" class="btn" data-act="zonesCancel"' + (dirty ? '' : ' disabled') + '>Annuler les changements</button>' +
-        '<span class="small ' + (dirty ? 'warn-t' : 'muted') + '">' + (dirty ? 'Modifications non enregistrées' : 'Zones enregistrées dans l’onglet PROJETS') + '</span></div>' +
+        '<div class="actions"><button type="button" class="btn p" data-save="zones" disabled>Enregistrer les zones</button>' +
+        '<button type="button" class="btn" data-act="zonesCancel" disabled>Annuler les changements</button>' +
+        '<span class="small muted" data-r="zoneState" aria-live="polite"></span></div>' +
         '<p class="small">Entrée ajoute le projet saisi · Retour arrière dans un champ vide retire le dernier projet du bloc. Un bloc sans projet reçoit les références sans projet.</p></div>' +
         '<div class="pj-plan"><svg data-r="zonePlan" role="img" aria-label="Aperçu du plan : noms des projets sur les blocs"></svg>' +
         '<div class="pj-colors"><h3>Couleurs des projets</h3>' + (list.length ? list.map(function (p) {
           return '<label class="pc"><input type="color" value="' + esc(colors[p.project] || '#cccccc') + '" data-color="' + esc(p.project) + '" aria-label="Couleur du projet ' + esc(p.project) + '">' +
-            '<span>' + esc(p.project) + '</span><span class="small muted">' + (p.blocks.length ? esc(p.blocks.join(', ')) : 'aucun bloc') + '</span>' +
+            '<span>' + esc(p.project) + (sameColor[p.project] ? ' <b class="warn-t small">même couleur que ' + esc(sameColor[p.project]) + '</b>' : '') + '</span>' +
+            '<span class="small muted">' + (p.blocks.length ? esc(p.blocks.join(', ')) : 'aucun bloc') + '</span>' +
             (p.color ? '<button type="button" class="btn sm" data-auto="' + esc(p.project) + '" title="Couleur automatique">auto</button>' : '<span class="small muted">auto</span>') + '</label>';
         }).join('') : '<p class="small muted">Aucun projet : collez des références avec un projet (1) ou saisissez un nom sur un bloc.</p>') + '</div></div></div>';
       var layout = (state() && state().layout) || App.CFG.DEFAULT_LAYOUT;
@@ -1557,6 +1660,7 @@
             err.textContent = 'Bloc ' + id + ' : ' + problem;
             return;
           }
+          delete zoneTyped[id];
           renderZones(id);
           renderStats();
         }
@@ -1573,9 +1677,14 @@
             }
           }
         });
-        // A pick in the list of existing projects adds it at once.
-        inp.addEventListener('change', function () {
-          if (projectNames().some(function (n) { return n === inp.value.trim(); })) commit();
+        // A pick in the list of existing projects adds it at once (typing the same name letter by letter does not: the
+        // table is not redrawn under the cursor, nor under a click on « Enregistrer les zones »).
+        inp.addEventListener('input', function (ev) {
+          zoneTyped[id] = inp.value;
+          err.textContent = '';
+          var picked = !ev.inputType || ev.inputType === 'insertReplacementText';
+          if (picked && projectNames().some(function (n) { return n === inp.value.trim(); })) commit();
+          else syncZoneButtons();
         });
       });
       App.$$('[data-remove]', R.zones).forEach(function (b) {
@@ -1602,18 +1711,38 @@
       });
       App.$('[data-save="zones"]', R.zones).addEventListener('click', saveZones);
       App.$('[data-act="zonesCancel"]', R.zones).addEventListener('click', function () {
+        zoneTyped = {};
         resetDraft();
         renderZones();
         renderStats();
       });
+      syncZoneButtons();
       if (focusBlock) {
         var again = App.$('[data-add="' + focusBlock + '"]', R.zones);
-        if (again) again.focus();
+        if (again) {
+          again.focus();
+          if (keep && keep.id === focusBlock && keep.at !== null && again.setSelectionRange) again.setSelectionRange(keep.at, keep.at);
+        }
       }
     }
 
     function saveZones() {
-      if (busy || !draftDirty()) return;
+      if (busy) return;
+      var problem = commitTyped();
+      if (problem) {
+        var e0 = App.$('[data-r="zoneErr"]', R.zones);
+        if (e0) e0.textContent = problem;
+        return;
+      }
+      renderZones();
+      renderStats();
+      if (!draftDirty()) return;
+      var ro = readOnlyError();
+      if (ro) {
+        var e1 = App.$('[data-r="zoneErr"]', R.zones);
+        if (e1) e1.textContent = ro.message;
+        return;
+      }
       var rows = draft.projects.map(function (p) { return { project: p.project, blocks: p.blocks.slice(), color: p.color || '', comment: p.comment || '' }; });
       setBusy(true);
       App.withKey('admin', function (key) { return App.call('api_saveProjects', key, rows); }).then(function (res) {
@@ -1710,6 +1839,11 @@
         }
         var t = target();
         if (t.name === from) return true;
+        var ro = readOnlyError();
+        if (ro) {
+          m.setError(ro.message);
+          return false;
+        }
         return App.withKey('admin', function (key) { return App.call('api_renameProject', key, from, t.name); }).then(function (res) {
           App.toast((res && res.message) || ('Projet renommé : ' + from + ' → ' + t.name), 'ok');
           afterWrite();
@@ -1739,6 +1873,7 @@
     // ---- 4. references without a project --------------------------------------------------------------------------
     function renderNone() {
       var map = refs();
+      var hadFocus = document.activeElement && document.activeElement.getAttribute('data-r') === 'noneProject';
       var list = Object.keys(map).map(function (k) { return map[k]; }).filter(function (r) { return r.tracked && !r.project; });
       list.sort(function (a, b) { return ((Number(b.e) || 0) + (Number(b.w) || 0)) - ((Number(a.e) || 0) + (Number(a.w) || 0)) || (a.article < b.article ? -1 : 1); });
       Object.keys(selectedNone).forEach(function (k) { if (!map[k] || map[k].project) delete selectedNone[k]; });
@@ -1755,7 +1890,8 @@
             '<td class="mono">' + esc(r.article) + '</td><td>' + esc(r.designation || '') + '</td><td class="num">' + pal(r.e) + '</td><td class="num">' + pal(r.w) + '</td>' +
             '<td>' + esc(/\d{2}:\d{2}/.test(r.t) ? f.stamp(r.t) : f.date(r.t)) + '</td></tr>';
         }).join('') + '</tbody></table></div>' +
-        '<div class="actions"><label class="field inline"><span>Affecter à</span><input data-r="noneProject" list="pj-names" maxlength="40" autocomplete="off" placeholder="projet"></label>' +
+        '<div class="actions"><label class="field inline"><span>Affecter à</span><input data-r="noneProject" list="pj-names" maxlength="40" autocomplete="off" placeholder="projet" value="' +
+        esc(noneTarget) + '"></label>' +
         '<button type="button" class="btn p" data-save="none"' + (n && !busy ? '' : ' disabled') + '>Affecter (' + n + ')</button><span class="small" data-r="noneErr" role="alert"></span></div>';
       var all = App.$('[data-all]', R.none);
       all.addEventListener('change', function () {
@@ -1780,6 +1916,8 @@
         });
       });
       var inp = App.$('[data-r="noneProject"]', R.none);
+      inp.addEventListener('input', function () { noneTarget = inp.value; });
+      if (hadFocus) inp.focus();
       function assign() {
         var codes = Object.keys(selectedNone);
         var errEl = App.$('[data-r="noneErr"]', R.none);
@@ -1795,6 +1933,7 @@
         saveRefs(codes.map(function (c) { return { article: c, project: name }; })).then(function (res) {
           setBusy(false);
           selectedNone = {};
+          noneTarget = '';
           App.toast('Références affectées à ' + name + ' : ' + resultText(res), res.invalid.length ? 'warn' : 'ok');
           afterWrite();
         }, function (err) {
@@ -2258,7 +2397,9 @@
         else if (r) {
           var sm = r.summary || {};
           var per = sm.dateMin ? (sm.dateMin === sm.dateMax ? f.date(sm.dateMin) : f.date(sm.dateMin) + ' → ' + f.date(sm.dateMax)) : '';
-          info = '<span class="ok-t">✓ ' + esc(formatLine(sm.format)) + '</span>' +
+          // Short format in the card; the full format line is shown above the analysis.
+          var fm = sm.format || {};
+          info = '<span class="ok-t">✓ MB51 reconnu' + (fm.columns ? ' · ' + f.plural(fm.columns, 'colonne', 'colonnes') : '') + '</span>' +
             '<span>en-tête ligne ' + (r.headerRow + 1) + (x.sheet ? ' · feuille « ' + esc(x.sheet) + ' »' : '') + '</span>' +
             '<span>' + f.plural(sm.read || 0, 'ligne lue', 'lignes lues') + ' · ' + f.plural(sm.valid, 'valide', 'valides') +
             (sm.untracked ? ' · ' + num(sm.untracked) + ' hors produits finis' : '') +
@@ -2802,6 +2943,7 @@
     };
   };
 
-  window.PagesPc = { mount: mount, has: has, PAGES: PAGES, pages: P, parsePaste: parsePaste, normArticle: normArticle, normProjectName: normProjectName };
+  window.PagesPc = { mount: mount, has: has, PAGES: PAGES, pages: P, parsePaste: parsePaste, normArticle: normArticle, normProjectName: normProjectName,
+    autoColors: autoColors };
 })();
 </script>

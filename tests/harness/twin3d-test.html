@@ -9,8 +9,10 @@
   Local test bench of apps-script/src/Twin3d.html, without Google.
   Serve the repository root over HTTP (e.g. `npx http-server -p 8080 .`) and open
   http://localhost:8080/tests/harness/twin3d-test.html
-  Query parameters: mode=family|age|saturation · theme=dark|light · autoRotate=1 · full=1 (every block at capacity)
-  · state=<json url> (default sample-state.json, built by the real Engine from sample-data/csv).
+  Query parameters: mode=project|age|saturation · theme=dark|light · autoRotate=1 · full=1 (every block at capacity)
+  · state=<json url> (default sample-state.json: a v2 state built by the real Engine from a small simulation in the real
+  MB51 format, 3 days of 150 labels, seed 2026: projects on the blocks, labels waiting in PRD2, 4 of them over 6 h).
+  · v1=1 strips the projects (blocks colored by family when the pallets carry one, else neutral grey).
   Exposes for Playwright: window.__ready, window.__twin (handle), window.__state, window.__picks, window.__lost,
   window.__error.
 -->
@@ -37,7 +39,7 @@
 <body>
 <header>
   <h1>EXP2 · Vue 3D</h1>
-  <button type="button" data-mode="family">Familles</button>
+  <button type="button" data-mode="project">Projets</button>
   <button type="button" data-mode="age">Âge</button>
   <button type="button" data-mode="saturation">Saturation</button>
   <button type="button" id="reset">Recentrer</button>
@@ -94,6 +96,19 @@
     return s;
   }
 
+  // The same data as a state without projects (v1 screens, or SAP data before any project is set).
+  function withoutProjects(state) {
+    var s = JSON.parse(JSON.stringify(state));
+    s.projects = { 'Sans projet': (s.projects || {})['Sans projet'] || '#c9ced6' };
+    s.projectsList = [];
+    s.blocks.forEach(function (b) { b.projects = []; b.title = 'Libre'; });
+    s.layout.blocks.forEach(function (b) { b.projects = []; b.title = 'Libre'; });
+    Object.keys(s.blockContents).forEach(function (id) {
+      s.blockContents[id].forEach(function (e) { e.project = ''; });
+    });
+    return s;
+  }
+
   function renderLegend(mode, state) {
     var el = document.getElementById('legend');
     el.innerHTML = '';
@@ -121,7 +136,8 @@
     t.textContent = 'Bloc ' + b.id + ' · ' + b.pallets + ' / ' + b.capacity + ' palettes';
     el.appendChild(t);
     var d = document.createElement('div');
-    d.textContent = a ? a.article + ' · ' + a.designation + ' · ' + a.pallets + ' pal. · ' + (a.ageMax === null ? '–' : a.ageMax + ' j')
+    d.textContent = a ? a.article + ' · ' + a.designation + (a.project ? ' · ' + a.project : '') + ' · ' + a.pallets + ' pal. · ' +
+      (a.ageMax === null ? '–' : a.ageMax + ' j')
       : 'Aucun article à cet emplacement';
     el.appendChild(d);
   }
@@ -135,6 +151,7 @@
     addScript(res[0], 'Config.gs');
     addScript(inlineScripts(res[1]), 'Twin3d.html');
     var state = params.get('full') === '1' ? fullState(res[2]) : res[2];
+    if (params.get('v1') === '1') state = withoutProjects(state);
     window.__state = state;
     var status = document.getElementById('status');
     if (!Twin3D.supported()) {
@@ -142,7 +159,7 @@
       window.__error = 'unsupported';
       return;
     }
-    var mode = params.get('mode') || 'family';
+    var mode = params.get('mode') === 'family' ? 'project' : params.get('mode') || 'project';
     var autoRotate = params.get('autoRotate') === '1';
     var t0 = performance.now();
     var twin = Twin3D.mount(document.getElementById('view'), state.layout, state, {

@@ -226,6 +226,19 @@ function Twin3dModule_() {
     return ((state && state.projectsList) || []).some(function (p) { return p && p.project && p.project !== NO_PROJECT; });
   }
 
+  // Families of the pallets in the blocks ({ F1: true }); null when the state has no block contents.
+  function usedFamilies_(state) {
+    var bc = state && state.blockContents;
+    if (!bc) return null;
+    var out = {};
+    Object.keys(bc).forEach(function (id) {
+      (bc[id] || []).forEach(function (e) {
+        if (e && e.family) out[e.family] = true;
+      });
+    });
+    return out;
+  }
+
   function blockHex_(name) {
     if (!name) return null;
     if (rgb_(name)) return name;
@@ -374,10 +387,11 @@ function Twin3dModule_() {
         return { label: p.project, color: p.color || projectHex_(p.project, state) || noProjectHex_(state) };
       });
     }
-    var fam = {}, k;
+    // Families of the pallets only (the engine always lists F1-F5): SAP data without projects or families is grey.
+    var fam = {}, k, used = usedFamilies_(state);
     var sf = (state && state.families) || {};
-    for (k in sf) if (Object.prototype.hasOwnProperty.call(sf, k)) fam[k] = sf[k];
-    if (!Object.keys(fam).length && !(state && state.projects)) {
+    for (k in sf) if (Object.prototype.hasOwnProperty.call(sf, k) && (!used || used[k])) fam[k] = sf[k];
+    if (!Object.keys(fam).length && !(state && state.projects) && !used) {
       var base = colors_().families || {};
       for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) fam[k] = base[k];
     }
@@ -893,9 +907,11 @@ function Twin3dModule_() {
       return (sb && sb.projects) || b.projects || [];
     }
 
+    // 'Libre' (free block) only when the state has projects: before any project is set, every block would read 'Libre'.
     function blockTitle_(b) {
       var sb = stateBlocks[b.id];
-      return String((sb && sb.title) || b.title || '');
+      var t = String((sb && sb.title) || b.title || '');
+      return t === 'Libre' && !hasProjects_(state) ? '' : t;
     }
 
     function blockFamily_(b) {

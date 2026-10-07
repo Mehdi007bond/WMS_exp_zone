@@ -240,10 +240,13 @@
       return (p || []).filter(function (x) { return x; });
     }
 
+    // 'Libre' (free block) only when some block has a project: before any project is set, every block would read
+    // 'Libre' (the tag then shows 'B1 63 %' as in v1).
+    var anyProject = L.blocks.some(function (b) { return projectsOf(b).length > 0; });
     function titleOf(b) {
       if (!showTitles) return '';
       if (opts.titles && typeof opts.titles === 'object') return String(opts.titles[b.id] || '');
-      return b.title || '';
+      return b.title === 'Libre' && !anyProject ? '' : b.title || '';
     }
 
     function colorOf(name) {

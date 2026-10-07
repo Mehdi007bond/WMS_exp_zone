@@ -1,8 +1,9 @@
 {
  "version": 1,
- "asOf": "2026-10-03",
- "computedAt": "2026-10-03T18:00:00.000Z",
- "importedAt": "2026-10-03T17:55:00.000Z",
+ "asOf": "2026-10-05",
+ "asOfTs": "2026-10-06 01:52:27",
+ "computedAt": "2026-10-06T02:00:00.000Z",
+ "importedAt": "2026-10-06T01:59:30.000Z",
  "source": "SIMULATION",
  "layout": {
   "building": {
@@ -17,7 +18,7 @@
   "blocks": [
    {
     "id": "B1",
-    "label": "Allée 26 (?)",
+    "label": "Allée 26",
     "x": 19,
     "y": 2.9,
     "w": 10.4,
@@ -27,11 +28,15 @@
     "levels": 2,
     "color": "blanc",
     "capacity": 260,
-    "families": "F1"
+    "families": "",
+    "projects": [
+     "ATLAS"
+    ],
+    "title": "ATLAS"
    },
    {
     "id": "B2",
-    "label": "Allée 72 (?)",
+    "label": "Allée 72",
     "x": 32.9,
     "y": 3,
     "w": 4.1,
@@ -41,11 +46,15 @@
     "levels": 2,
     "color": "creme",
     "capacity": 96,
-    "families": "F2"
+    "families": "",
+    "projects": [
+     "BOREAL"
+    ],
+    "title": "BOREAL"
    },
    {
     "id": "B3",
-    "label": "Allée 24 (?)",
+    "label": "Allée 24",
     "x": 37.1,
     "y": 3,
     "w": 4,
@@ -55,11 +64,15 @@
     "levels": 2,
     "color": "cyan",
     "capacity": 96,
-    "families": "F3"
+    "families": "",
+    "projects": [
+     "CORSO"
+    ],
+    "title": "CORSO"
    },
    {
     "id": "B4",
-    "label": "Allée 36 / 72 (?)",
+    "label": "Allée 36 / 72",
     "x": 41.2,
     "y": 3,
     "w": 5,
@@ -69,11 +82,15 @@
     "levels": 2,
     "color": "rose",
     "capacity": 120,
-    "families": "F4"
+    "families": "",
+    "projects": [
+     "DELTA"
+    ],
+    "title": "DELTA"
    },
    {
     "id": "B5",
-    "label": "Allée 26 (?)",
+    "label": "Allée 26",
     "x": 3.9,
     "y": 17.3,
     "w": 9.5,
@@ -83,11 +100,15 @@
     "levels": 2,
     "color": "cyan",
     "capacity": 260,
-    "families": "F3"
+    "families": "",
+    "projects": [
+     "ETNA"
+    ],
+    "title": "ETNA"
    },
    {
     "id": "B6",
-    "label": "Allée 50 (?)",
+    "label": "Allée 50",
     "x": 16.5,
     "y": 16.6,
     "w": 3.9,
@@ -97,11 +118,15 @@
     "levels": 2,
     "color": "vert",
     "capacity": 80,
-    "families": "F5"
+    "families": "",
+    "projects": [
+     "FJORD"
+    ],
+    "title": "FJORD"
    },
    {
     "id": "B7",
-    "label": "(sans libellé)",
+    "label": "",
     "x": 20.7,
     "y": 14.8,
     "w": 9.7,
@@ -111,11 +136,15 @@
     "levels": 2,
     "color": "blanc",
     "capacity": 240,
-    "families": "F1"
+    "families": "",
+    "projects": [
+     "ATLAS"
+    ],
+    "title": "ATLAS"
    },
    {
     "id": "B8",
-    "label": "Allée 72 (?)",
+    "label": "Allée 72",
     "x": 32.9,
     "y": 14.8,
     "w": 13.3,
@@ -125,12 +154,16 @@
     "levels": 2,
     "color": "creme",
     "capacity": 312,
-    "families": "F2"
+    "families": "",
+    "projects": [
+     "BOREAL"
+    ],
+    "title": "BOREAL"
    }
   ],
   "truckZone": {
    "id": "ZC",
-   "label": "Zone Camion",
+   "label": "Zone camion",
    "x": 2.6,
    "y": 2,
    "w": 16.3,
@@ -215,7 +248,7 @@
   "zones": [
    {
     "id": "G1",
-    "label": "G1 (?)",
+    "label": "G1",
     "x": 2.3,
     "y": 14.4,
     "w": 2.1,
@@ -225,7 +258,7 @@
    },
    {
     "id": "G2",
-    "label": "G2 (?)",
+    "label": "G2",
     "x": 4.9,
     "y": 14.4,
     "w": 2.1,
@@ -235,7 +268,7 @@
    },
    {
     "id": "G3",
-    "label": "G3 (?)",
+    "label": "G3",
     "x": 7.3,
     "y": 14.4,
     "w": 2.1,
@@ -245,7 +278,7 @@
    },
    {
     "id": "G4",
-    "label": "G4 (?)",
+    "label": "G4",
     "x": 9.8,
     "y": 14.4,
     "w": 2.1,
@@ -255,32 +288,32 @@
    },
    {
     "id": "GH1",
-    "label": "G? (?)",
+    "label": "",
     "x": 31.3,
     "y": 1.1,
     "w": 2.6,
     "h": 1.6,
     "color": "vert",
-    "short": "G?"
+    "short": ""
    },
    {
     "id": "GH2",
-    "label": "G? (?)",
+    "label": "",
     "x": 35,
     "y": 1.1,
     "w": 2.6,
     "h": 1.6,
     "color": "vert",
-    "short": "G?"
+    "short": ""
    },
    {
     "id": "ZM",
-    "label": "Zone M (?)",
+    "label": "Zone M",
     "x": 2.6,
     "y": 27.8,
     "w": 2.6,
     "h": 2.2,
-    "short": "M ?"
+    "short": "M"
    },
    {
     "id": "CONV",
@@ -330,12 +363,12 @@
    },
    {
     "id": "CART",
-    "label": "Carton PF (?)",
+    "label": "Carton PF",
     "x": 29.8,
     "y": 28,
     "w": 2.6,
     "h": 2,
-    "short": "PF ?"
+    "short": "PF"
    },
    {
     "id": "BUR",
@@ -348,420 +381,459 @@
    },
    {
     "id": "ZX",
-    "label": "Zone (?)",
+    "label": "Zone",
     "x": 39.6,
     "y": 28,
     "w": 6.3,
     "h": 2,
-    "short": "Zone ?"
+    "short": "Zone"
    }
   ]
  },
  "kpi": {
-  "exp2Pallets": 994,
+  "exp2Pallets": 996,
   "capacity": 1464,
-  "saturation": 0.679,
-  "pendingPallets": 22,
-  "oldestPendingDays": 9,
-  "stuckPendingLines": 5,
-  "entriesToday": 73,
-  "exitsToday": 65,
-  "emrtPallets": 381,
-  "dockSaturation": 0.4375,
-  "docksOccupied": 5,
+  "saturation": 0.6803,
+  "pendingPallets": 13,
+  "oldestPendingDays": 0,
+  "stuckPendingLines": 0,
+  "entriesToday": 145,
+  "exitsToday": 143,
+  "emrtPallets": 4,
+  "dockSaturation": 0.1875,
+  "docksOccupied": 3,
   "docksTotal": 8,
-  "docksStaged": 42,
+  "docksStaged": 18,
   "docksCapacity": 96,
-  "oldestExp2Days": 13,
-  "unknownArticles": 1,
-  "toPlacePallets": 2,
-  "daysToSaturation": 49.8,
-  "netPerDay": 9.43
+  "oldestExp2Days": 3,
+  "unknownArticles": 0,
+  "toPlacePallets": 27,
+  "daysToSaturation": null,
+  "netPerDay": null,
+  "asOfTs": "2026-10-06 01:52:27",
+  "pendingTotal": 13,
+  "pendingLabels": 13,
+  "pendingWarn": 3,
+  "pendingCrit": 4,
+  "oldestPendingHours": 10.33,
+  "dwellMedianH": 0.63,
+  "dwellP90H": 1.81,
+  "dwellCount": 137,
+  "trackedArticles": 36,
+  "noProjectArticles": 3,
+  "projects": 6
  },
  "blocks": [
   {
    "id": "B1",
-   "label": "Allée 26 (?)",
-   "families": "F1",
+   "label": "Allée 26",
+   "families": "",
    "capacity": 260,
-   "pallets": 152,
-   "saturation": 0.5846
+   "pallets": 142,
+   "saturation": 0.5462,
+   "projects": [
+    "ATLAS"
+   ],
+   "title": "ATLAS"
   },
   {
    "id": "B2",
-   "label": "Allée 72 (?)",
-   "families": "F2",
+   "label": "Allée 72",
+   "families": "",
    "capacity": 96,
-   "pallets": 56,
-   "saturation": 0.5833
+   "pallets": 72,
+   "saturation": 0.75,
+   "projects": [
+    "BOREAL"
+   ],
+   "title": "BOREAL"
   },
   {
    "id": "B3",
-   "label": "Allée 24 (?)",
-   "families": "F3",
+   "label": "Allée 24",
+   "families": "",
    "capacity": 96,
-   "pallets": 78,
-   "saturation": 0.8125
+   "pallets": 64,
+   "saturation": 0.6667,
+   "projects": [
+    "CORSO"
+   ],
+   "title": "CORSO"
   },
   {
    "id": "B4",
-   "label": "Allée 36 / 72 (?)",
-   "families": "F4",
+   "label": "Allée 36 / 72",
+   "families": "",
    "capacity": 120,
-   "pallets": 91,
-   "saturation": 0.7583
+   "pallets": 90,
+   "saturation": 0.75,
+   "projects": [
+    "DELTA"
+   ],
+   "title": "DELTA"
   },
   {
    "id": "B5",
-   "label": "Allée 26 (?)",
-   "families": "F3",
+   "label": "Allée 26",
+   "families": "",
    "capacity": 260,
-   "pallets": 213,
-   "saturation": 0.8192
+   "pallets": 186,
+   "saturation": 0.7154,
+   "projects": [
+    "ETNA"
+   ],
+   "title": "ETNA"
   },
   {
    "id": "B6",
-   "label": "Allée 50 (?)",
-   "families": "F5",
+   "label": "Allée 50",
+   "families": "",
    "capacity": 80,
-   "pallets": 80,
-   "saturation": 1
+   "pallets": 51,
+   "saturation": 0.6375,
+   "projects": [
+    "FJORD"
+   ],
+   "title": "FJORD"
   },
   {
    "id": "B7",
-   "label": "(sans libellé)",
-   "families": "F1",
+   "label": "",
+   "families": "",
    "capacity": 240,
-   "pallets": 141,
-   "saturation": 0.5875
+   "pallets": 131,
+   "saturation": 0.5458,
+   "projects": [
+    "ATLAS"
+   ],
+   "title": "ATLAS"
   },
   {
    "id": "B8",
-   "label": "Allée 72 (?)",
-   "families": "F2",
+   "label": "Allée 72",
+   "families": "",
    "capacity": 312,
-   "pallets": 181,
-   "saturation": 0.5801
+   "pallets": 233,
+   "saturation": 0.7468,
+   "projects": [
+    "BOREAL"
+   ],
+   "title": "BOREAL"
   }
  ],
  "blockContents": {
   "B1": [
    {
-    "article": "1000401193",
-    "designation": "PF FAISCEAU CABLE 1M2 REF 05",
-    "family": "F1",
-    "pallets": 28,
-    "ageMax": 13
+    "article": "58162391",
+    "designation": "FEU ARRIERE ATLAS G",
+    "family": "",
+    "pallets": 16,
+    "ageMax": 2,
+    "project": "ATLAS"
    },
    {
-    "article": "1000516512",
-    "designation": "PF SUPPORT PARE-CHOC REF 19",
-    "family": "F1",
-    "pallets": 13,
-    "ageMax": 13
+    "article": "58217166",
+    "designation": "PROJECTEUR ATLAS ECO TI G",
+    "family": "",
+    "pallets": 18,
+    "ageMax": 2,
+    "project": "ATLAS"
    },
    {
-    "article": "1000541046",
-    "designation": "PF CLIP FIXATION X100 REF 30",
-    "family": "F1",
-    "pallets": 26,
-    "ageMax": 13
+    "article": "58431725",
+    "designation": "PROJECTEUR ATLAS ECO TD D",
+    "family": "",
+    "pallets": 12,
+    "ageMax": 2,
+    "project": "ATLAS"
    },
    {
-    "article": "1000614102",
-    "designation": "PF SUPPORT FIXATION ACIER REF 03",
-    "family": "F1",
-    "pallets": 25,
-    "ageMax": 10
+    "article": "58840341",
+    "designation": "PROJECTEUR ATLAS LED TD G",
+    "family": "",
+    "pallets": 29,
+    "ageMax": 3,
+    "project": "ATLAS"
    },
    {
-    "article": "1000614750",
-    "designation": "PF COQUE RETROVISEUR REF 32",
-    "family": "F1",
-    "pallets": 30,
-    "ageMax": 13
+    "article": "58871379",
+    "designation": "PROJECTEUR ATLAS LED TD D",
+    "family": "",
+    "pallets": 32,
+    "ageMax": 3,
+    "project": "ATLAS"
    },
    {
-    "article": "1000626925",
-    "designation": "PF BOITIER 12V REF 01",
-    "family": "F1",
-    "pallets": 19,
-    "ageMax": 13
-   },
-   {
-    "article": "1000700381",
-    "designation": "PF BOITIER FUSIBLES REF 11",
-    "family": "F1",
-    "pallets": 11,
-    "ageMax": 13
+    "article": "58927784",
+    "designation": "PROJECTEUR ATLAS ECO TI D",
+    "family": "",
+    "pallets": 35,
+    "ageMax": 3,
+    "project": "ATLAS"
    }
   ],
   "B2": [
    {
-    "article": "1000102657",
-    "designation": "PF BAC RANGEMENT REF 23",
-    "family": "F2",
-    "pallets": 35,
-    "ageMax": 13
+    "article": "58232351",
+    "designation": "PROJECTEUR BOREAL LED TI G",
+    "family": "",
+    "pallets": 13,
+    "ageMax": 2,
+    "project": "BOREAL"
    },
    {
-    "article": "1000202814",
-    "designation": "PF CARTER PROTECTION NOIR REF 06",
-    "family": "F2",
-    "pallets": 21,
-    "ageMax": 12
+    "article": "58500789",
+    "designation": "ANTIBROUILLARD BOREAL G",
+    "family": "",
+    "pallets": 25,
+    "ageMax": 3,
+    "project": "BOREAL"
+   },
+   {
+    "article": "58616532",
+    "designation": "PROJECTEUR BOREAL LED TI D",
+    "family": "",
+    "pallets": 34,
+    "ageMax": 3,
+    "project": "BOREAL"
    }
   ],
   "B3": [
    {
-    "article": "1000184644",
-    "designation": "PF RESERVOIR LAVE-GLACE REF 18",
-    "family": "F3",
+    "article": "58603689",
+    "designation": "TRINGLERIE ESSUIE-GLACE CORSO D",
+    "family": "",
     "pallets": 19,
-    "ageMax": 13
+    "ageMax": 3,
+    "project": "CORSO"
    },
    {
-    "article": "1000207622",
-    "designation": "PF GRANULE PE NOIR BIG BAG",
-    "family": "F3",
-    "pallets": 14,
-    "ageMax": 10
+    "article": "58918811",
+    "designation": "BRAS ESSUIE-GLACE CORSO",
+    "family": "",
+    "pallets": 28,
+    "ageMax": 3,
+    "project": "CORSO"
    },
    {
-    "article": "1000334130",
-    "designation": "PF PLATINE ELECTRONIQUE REF 12",
-    "family": "F3",
-    "pallets": 32,
-    "ageMax": 13
-   },
-   {
-    "article": "1000351589",
-    "designation": "PF BOITIER COMMANDE REF 31",
-    "family": "F3",
-    "pallets": 13,
-    "ageMax": 13
+    "article": "QB28589",
+    "designation": "TRINGLERIE ESSUIE-GLACE CORSO G",
+    "family": "",
+    "pallets": 17,
+    "ageMax": 3,
+    "project": "CORSO"
    }
   ],
   "B4": [
    {
-    "article": "1000812390",
-    "designation": "PF CACHE MOTEUR REF 20",
-    "family": "F4",
+    "article": "58383596",
+    "designation": "PROJECTEUR DELTA PREMIUM TD G",
+    "family": "",
     "pallets": 16,
-    "ageMax": 13
+    "ageMax": 2,
+    "project": "DELTA"
    },
    {
-    "article": "1000866025",
-    "designation": "PF GAINE ELECTRIQUE 25MM REF 25",
-    "family": "F4",
-    "pallets": 9,
-    "ageMax": 11
+    "article": "58637936",
+    "designation": "FEU DIURNE DELTA",
+    "family": "",
+    "pallets": 36,
+    "ageMax": 3,
+    "project": "DELTA"
    },
    {
-    "article": "1000887507",
-    "designation": "PF COMPOUND ABS VRAC OCTABIN",
-    "family": "F4",
-    "pallets": 45,
-    "ageMax": 13
-   },
-   {
-    "article": "1000914295",
-    "designation": "PF CONNECTEUR 4 VOIES REF 04",
-    "family": "F4",
-    "pallets": 21,
-    "ageMax": 12
+    "article": "QB82330",
+    "designation": "PROJECTEUR DELTA PREMIUM TD D",
+    "family": "",
+    "pallets": 38,
+    "ageMax": 3,
+    "project": "DELTA"
    }
   ],
   "B5": [
    {
-    "article": "1000351589",
-    "designation": "PF BOITIER COMMANDE REF 31",
-    "family": "F3",
-    "pallets": 36,
-    "ageMax": 10
-   },
-   {
-    "article": "1000562521",
-    "designation": "PF BRIDE SERRAGE INOX REF 16",
-    "family": "F3",
+    "article": "58258760",
+    "designation": "FEU ARRIERE ETNA G",
+    "family": "",
     "pallets": 16,
-    "ageMax": 13
+    "ageMax": 2,
+    "project": "ETNA"
    },
    {
-    "article": "1000674421",
-    "designation": "PF GRANULE PP SAC 25KG",
-    "family": "F3",
-    "pallets": 38,
-    "ageMax": 13
+    "article": "58881943",
+    "designation": "PROJECTEUR ETNA ECO TD D",
+    "family": "",
+    "pallets": 39,
+    "ageMax": 3,
+    "project": "ETNA"
    },
    {
-    "article": "1000910625",
-    "designation": "PF ECROU PLASTIQUE M8 REF 29",
-    "family": "F3",
-    "pallets": 50,
-    "ageMax": 11
+    "article": "KD30372",
+    "designation": "PROJECTEUR ETNA ECO TD G",
+    "family": "",
+    "pallets": 42,
+    "ageMax": 3,
+    "project": "ETNA"
    },
    {
-    "article": "1000954340",
-    "designation": "PF FILTRE HABITACLE REF 27",
-    "family": "F3",
-    "pallets": 37,
-    "ageMax": 8
+    "article": "KD94041",
+    "designation": "PROJECTEUR ETNA BASE TD D",
+    "family": "",
+    "pallets": 24,
+    "ageMax": 3,
+    "project": "ETNA"
    },
    {
-    "article": "1000983322",
-    "designation": "PF POIGNEE PORTE CHROME REF 09",
-    "family": "F3",
-    "pallets": 36,
-    "ageMax": 10
+    "article": "QE68359",
+    "designation": "MOTEUR ESSUIE-GLACE ETNA",
+    "family": "",
+    "pallets": 41,
+    "ageMax": 3,
+    "project": "ETNA"
+   },
+   {
+    "article": "QE86707",
+    "designation": "PROJECTEUR ETNA BASE TD G",
+    "family": "",
+    "pallets": 24,
+    "ageMax": 3,
+    "project": "ETNA"
    }
   ],
   "B6": [
    {
-    "article": "1000112046",
-    "designation": "PF ENJOLIVEUR LATERAL REF 14",
-    "family": "F5",
-    "pallets": 14,
-    "ageMax": 13
+    "article": "58118825",
+    "designation": "PROJECTEUR FJORD ECO TD G",
+    "family": "",
+    "pallets": 6,
+    "ageMax": 2,
+    "project": "FJORD"
    },
    {
-    "article": "1000435003",
-    "designation": "PF CAPTEUR TEMPERATURE REF 17",
-    "family": "F5",
-    "pallets": 20,
-    "ageMax": 10
+    "article": "58215676",
+    "designation": "PROJECTEUR FJORD OES TI D",
+    "family": "",
+    "pallets": 6,
+    "ageMax": 2,
+    "project": "FJORD"
    },
    {
-    "article": "1000715011",
-    "designation": "PF POUDRE EPOXY SAC 20KG",
-    "family": "F5",
-    "pallets": 17,
-    "ageMax": 13
+    "article": "KA62436",
+    "designation": "PROJECTEUR FJORD ECO TD D",
+    "family": "",
+    "pallets": 13,
+    "ageMax": 3,
+    "project": "FJORD"
    },
    {
-    "article": "1000956436",
-    "designation": "PF MELANGE MAITRE BLANC SAC",
-    "family": "F5",
-    "pallets": 29,
-    "ageMax": 13
+    "article": "KE99734",
+    "designation": "TRINGLERIE ESSUIE-GLACE FJORD",
+    "family": "",
+    "pallets": 26,
+    "ageMax": 3,
+    "project": "FJORD"
    }
   ],
   "B7": [
    {
-    "article": "1000700381",
-    "designation": "PF BOITIER FUSIBLES REF 11",
-    "family": "F1",
-    "pallets": 7,
-    "ageMax": 11
+    "article": "58949692",
+    "designation": "PROJECTEUR ATLAS ECO TD G",
+    "family": "",
+    "pallets": 43,
+    "ageMax": 3,
+    "project": "ATLAS"
    },
    {
-    "article": "1000730226",
-    "designation": "PF CAPOT MOTEUR GRIS REF 02",
-    "family": "F1",
-    "pallets": 25,
-    "ageMax": 11
+    "article": "QD50778",
+    "designation": "FEU ARRIERE ATLAS D",
+    "family": "",
+    "pallets": 59,
+    "ageMax": 3,
+    "project": "ATLAS"
    },
    {
-    "article": "1000744039",
-    "designation": "PF PATTE FIXATION REF 26",
-    "family": "F1",
-    "pallets": 33,
-    "ageMax": 13
-   },
-   {
-    "article": "1000751673",
-    "designation": "PF BOUCHON RESERVOIR REF 07",
-    "family": "F1",
-    "pallets": 13,
-    "ageMax": 13
-   },
-   {
-    "article": "1000905427",
-    "designation": "PF PANNEAU PORTE GAUCHE REF 21",
-    "family": "F1",
-    "pallets": 33,
-    "ageMax": 13
-   },
-   {
-    "article": "1000921426",
-    "designation": "PF CONDUIT AIR 80MM REF 15",
-    "family": "F1",
-    "pallets": 30,
-    "ageMax": 13
+    "article": "QE50681",
+    "designation": "PROJECTEUR ATLAS OES TD G",
+    "family": "",
+    "pallets": 29,
+    "ageMax": 3,
+    "project": "ATLAS"
    }
   ],
   "B8": [
    {
-    "article": "1000202814",
-    "designation": "PF CARTER PROTECTION NOIR REF 06",
-    "family": "F2",
-    "pallets": 13,
-    "ageMax": 9
+    "article": "58616532",
+    "designation": "PROJECTEUR BOREAL LED TI D",
+    "family": "",
+    "pallets": 9,
+    "ageMax": 1,
+    "project": "BOREAL"
    },
    {
-    "article": "1000216115",
-    "designation": "PF PLAQUE INSONORISANTE REF 33",
-    "family": "F2",
-    "pallets": 39,
-    "ageMax": 13
+    "article": "KB61845",
+    "designation": "PROJECTEUR BOREAL HALOGENE TD G",
+    "family": "",
+    "pallets": 31,
+    "ageMax": 3,
+    "project": "BOREAL"
    },
    {
-    "article": "1000224906",
-    "designation": "PF COUVERCLE BATTERIE REF 13",
-    "family": "F2",
-    "pallets": 14,
-    "ageMax": 13
+    "article": "KB98392",
+    "designation": "PROJECTEUR BOREAL LED TD D",
+    "family": "",
+    "pallets": 51,
+    "ageMax": 3,
+    "project": "BOREAL"
    },
    {
-    "article": "1000320436",
-    "designation": "PF JOINT ETANCHEITE 60MM REF 10",
-    "family": "F2",
-    "pallets": 15,
-    "ageMax": 7
+    "article": "KD82962",
+    "designation": "PROJECTEUR BOREAL LED TD G",
+    "family": "",
+    "pallets": 49,
+    "ageMax": 3,
+    "project": "BOREAL"
    },
    {
-    "article": "1000429497",
-    "designation": "PF PANNEAU PORTE DROIT REF 22",
-    "family": "F2",
-    "pallets": 29,
-    "ageMax": 12
+    "article": "KE76582",
+    "designation": "PROJECTEUR BOREAL HALOGENE TD D",
+    "family": "",
+    "pallets": 51,
+    "ageMax": 3,
+    "project": "BOREAL"
    },
    {
-    "article": "1000636685",
-    "designation": "PF TUYAU REFROIDISSEMENT REF 28",
-    "family": "F2",
-    "pallets": 8,
-    "ageMax": 13
-   },
-   {
-    "article": "1000683594",
-    "designation": "PF BOITIER SERIE SPECIALE REF 34",
-    "family": "F2",
-    "pallets": 1,
-    "ageMax": 2
-   },
-   {
-    "article": "1000778636",
-    "designation": "PF GRILLE AERATION BLANCHE REF 08",
-    "family": "F2",
-    "pallets": 41,
-    "ageMax": 12
-   },
-   {
-    "article": "1000818461",
-    "designation": "PF CONSOLE CENTRALE REF 24",
-    "family": "F2",
-    "pallets": 21,
-    "ageMax": 11
+    "article": "QD93939",
+    "designation": "ANTIBROUILLARD BOREAL D",
+    "family": "",
+    "pallets": 42,
+    "ageMax": 3,
+    "project": "BOREAL"
    }
   ],
   "À PLACER": [
    {
-    "article": "1000956436",
-    "designation": "PF MELANGE MAITRE BLANC SAC",
-    "family": "F5",
-    "pallets": 2,
-    "ageMax": 3
+    "article": "58335113",
+    "designation": "CACHE ANTIBROUILLARD UNIVERSEL",
+    "family": "",
+    "pallets": 5,
+    "ageMax": 2,
+    "project": ""
+   },
+   {
+    "article": "QA13427",
+    "designation": "PROJECTEUR ADAPTABLE ECO TD G",
+    "family": "",
+    "pallets": 12,
+    "ageMax": 3,
+    "project": ""
+   },
+   {
+    "article": "QA16695",
+    "designation": "KIT FIXATION PROJECTEUR UNIVERSEL",
+    "family": "",
+    "pallets": 10,
+    "ageMax": 3,
+    "project": ""
    }
   ]
  },
@@ -772,377 +844,763 @@
   "F4": "#f0c0d5",
   "F5": "#b8e2ab"
  },
+ "projects": {
+  "ATLAS": "#7fb3e0",
+  "BOREAL": "#8fd19e",
+  "CORSO": "#f2b27a",
+  "DELTA": "#e79ac0",
+  "ETNA": "#c3a6e8",
+  "FJORD": "#7fd1cf",
+  "Sans projet": "#c9ced6"
+ },
+ "projectsList": [
+  {
+   "project": "ATLAS",
+   "color": "#7fb3e0",
+   "blocks": [
+    "B1",
+    "B7"
+   ],
+   "articles": 9,
+   "exp2Pallets": 273,
+   "pendingPallets": 4,
+   "pendingCrit": 3
+  },
+  {
+   "project": "BOREAL",
+   "color": "#8fd19e",
+   "blocks": [
+    "B2",
+    "B8"
+   ],
+   "articles": 8,
+   "exp2Pallets": 305,
+   "pendingPallets": 4,
+   "pendingCrit": 0
+  },
+  {
+   "project": "CORSO",
+   "color": "#f2b27a",
+   "blocks": [
+    "B3"
+   ],
+   "articles": 3,
+   "exp2Pallets": 64,
+   "pendingPallets": 1,
+   "pendingCrit": 0
+  },
+  {
+   "project": "DELTA",
+   "color": "#e79ac0",
+   "blocks": [
+    "B4"
+   ],
+   "articles": 3,
+   "exp2Pallets": 90,
+   "pendingPallets": 0,
+   "pendingCrit": 0
+  },
+  {
+   "project": "ETNA",
+   "color": "#c3a6e8",
+   "blocks": [
+    "B5"
+   ],
+   "articles": 6,
+   "exp2Pallets": 186,
+   "pendingPallets": 4,
+   "pendingCrit": 1
+  },
+  {
+   "project": "FJORD",
+   "color": "#7fd1cf",
+   "blocks": [
+    "B6"
+   ],
+   "articles": 4,
+   "exp2Pallets": 51,
+   "pendingPallets": 0,
+   "pendingCrit": 0
+  },
+  {
+   "project": "Sans projet",
+   "color": "#c9ced6",
+   "blocks": [],
+   "articles": 3,
+   "exp2Pallets": 27,
+   "pendingPallets": 0,
+   "pendingCrit": 0
+  }
+ ],
  "daily": [
   {
-   "date": "2026-09-21",
-   "declared": 74,
-   "entries": 87,
-   "exits": 70,
-   "stockEnd": 916,
-   "saturation": 0.6257,
-   "pendingEnd": 10
-  },
-  {
-   "date": "2026-09-22",
-   "declared": 72,
-   "entries": 65,
-   "exits": 73,
-   "stockEnd": 911,
-   "saturation": 0.6223,
-   "pendingEnd": 21
-  },
-  {
-   "date": "2026-09-23",
-   "declared": 68,
-   "entries": 80,
-   "exits": 68,
-   "stockEnd": 925,
-   "saturation": 0.6318,
-   "pendingEnd": 17
-  },
-  {
-   "date": "2026-09-24",
-   "declared": 63,
-   "entries": 67,
-   "exits": 74,
-   "stockEnd": 924,
-   "saturation": 0.6311,
-   "pendingEnd": 19
-  },
-  {
-   "date": "2026-09-25",
-   "declared": 74,
-   "entries": 77,
-   "exits": 72,
-   "stockEnd": 932,
-   "saturation": 0.6366,
-   "pendingEnd": 21
-  },
-  {
-   "date": "2026-09-26",
-   "declared": 64,
-   "entries": 69,
-   "exits": 75,
-   "stockEnd": 928,
-   "saturation": 0.6339,
-   "pendingEnd": 24
-  },
-  {
-   "date": "2026-09-27",
-   "declared": 0,
-   "entries": 0,
-   "exits": 0,
-   "stockEnd": 928,
-   "saturation": 0.6339,
-   "pendingEnd": 24
-  },
-  {
-   "date": "2026-09-28",
-   "declared": 70,
-   "entries": 73,
-   "exits": 66,
-   "stockEnd": 938,
-   "saturation": 0.6407,
-   "pendingEnd": 25
-  },
-  {
-   "date": "2026-09-29",
-   "declared": 72,
-   "entries": 81,
-   "exits": 64,
-   "stockEnd": 957,
-   "saturation": 0.6537,
-   "pendingEnd": 24
-  },
-  {
-   "date": "2026-09-30",
-   "declared": 64,
-   "entries": 65,
-   "exits": 76,
-   "stockEnd": 948,
-   "saturation": 0.6475,
-   "pendingEnd": 29
-  },
-  {
-   "date": "2026-10-01",
-   "declared": 72,
-   "entries": 82,
-   "exits": 63,
-   "stockEnd": 967,
-   "saturation": 0.6605,
-   "pendingEnd": 26
-  },
-  {
-   "date": "2026-10-02",
-   "declared": 64,
-   "entries": 78,
-   "exits": 64,
-   "stockEnd": 984,
-   "saturation": 0.6721,
-   "pendingEnd": 20
-  },
-  {
    "date": "2026-10-03",
-   "declared": 70,
-   "entries": 73,
-   "exits": 65,
-   "stockEnd": 994,
-   "saturation": 0.679,
-   "pendingEnd": 22
+   "declared": 155,
+   "entries": 153,
+   "exits": 8,
+   "stockEnd": 940,
+   "saturation": 0.6421,
+   "pendingEnd": 5,
+   "dwellMedianH": 0.6,
+   "dwellP90H": 1.46
+  },
+  {
+   "date": "2026-10-04",
+   "declared": 149,
+   "entries": 152,
+   "exits": 100,
+   "stockEnd": 992,
+   "saturation": 0.6776,
+   "pendingEnd": 4,
+   "dwellMedianH": 0.62,
+   "dwellP90H": 1.41
+  },
+  {
+   "date": "2026-10-05",
+   "declared": 154,
+   "entries": 145,
+   "exits": 143,
+   "stockEnd": 996,
+   "saturation": 0.6803,
+   "pendingEnd": 13,
+   "dwellMedianH": 0.63,
+   "dwellP90H": 1.81
   }
  ],
  "pending": [
   {
-   "article": "1000516512",
-   "designation": "PF SUPPORT PARE-CHOC REF 19",
-   "date": "2026-09-24",
-   "doc": "4901255337",
-   "qty": 320,
+   "article": "58949692",
+   "designation": "PROJECTEUR ATLAS ECO TD G",
+   "date": "2026-10-05",
+   "doc": "6912993685",
+   "qty": 17,
    "pallets": 1,
-   "days": 9
+   "days": 0,
+   "label": "434500395",
+   "ts": "2026-10-05 15:32:31",
+   "hours": 10.33,
+   "level": "crit",
+   "project": "ATLAS",
+   "origin": "PRD2",
+   "user": "Auto"
   },
   {
-   "article": "1000812390",
-   "designation": "PF CACHE MOTEUR REF 20",
-   "date": "2026-09-25",
-   "doc": "4901255583",
+   "article": "58949692",
+   "designation": "PROJECTEUR ATLAS ECO TD G",
+   "date": "2026-10-05",
+   "doc": "6912993737",
+   "qty": 18,
+   "pallets": 1,
+   "days": 0,
+   "label": "434500409",
+   "ts": "2026-10-05 18:07:42",
+   "hours": 7.75,
+   "level": "crit",
+   "project": "ATLAS",
+   "origin": "PRD2",
+   "user": "Auto"
+  },
+  {
+   "article": "KD30372",
+   "designation": "PROJECTEUR ETNA ECO TD G",
+   "date": "2026-10-05",
+   "doc": "6912993760",
+   "qty": 18,
+   "pallets": 1,
+   "days": 0,
+   "label": "434500415",
+   "ts": "2026-10-05 18:38:10",
+   "hours": 7.24,
+   "level": "crit",
+   "project": "ETNA",
+   "origin": "PRD2",
+   "user": "Auto"
+  },
+  {
+   "article": "58871379",
+   "designation": "PROJECTEUR ATLAS LED TD D",
+   "date": "2026-10-05",
+   "doc": "6912993761",
+   "qty": 15,
+   "pallets": 1,
+   "days": 0,
+   "label": "434500416",
+   "ts": "2026-10-05 18:44:03",
+   "hours": 7.14,
+   "level": "crit",
+   "project": "ATLAS",
+   "origin": "PRD2",
+   "user": "Auto"
+  },
+  {
+   "article": "58232351",
+   "designation": "PROJECTEUR BOREAL LED TI G",
+   "date": "2026-10-05",
+   "doc": "6912993809",
+   "qty": 15,
+   "pallets": 1,
+   "days": 0,
+   "label": "434500427",
+   "ts": "2026-10-05 20:27:05",
+   "hours": 5.42,
+   "level": "warn",
+   "project": "BOREAL",
+   "origin": "PRD2",
+   "user": "Auto"
+  },
+  {
+   "article": "58871379",
+   "designation": "PROJECTEUR ATLAS LED TD D",
+   "date": "2026-10-05",
+   "doc": "6912993820",
+   "qty": 15,
+   "pallets": 1,
+   "days": 0,
+   "label": "434500429",
+   "ts": "2026-10-05 20:55:21",
+   "hours": 4.95,
+   "level": "warn",
+   "project": "ATLAS",
+   "origin": "PRD2",
+   "user": "Auto"
+  },
+  {
+   "article": "KD82962",
+   "designation": "PROJECTEUR BOREAL LED TD G",
+   "date": "2026-10-05",
+   "doc": "6912993822",
+   "qty": 15,
+   "pallets": 1,
+   "days": 0,
+   "label": "434500430",
+   "ts": "2026-10-05 21:16:21",
+   "hours": 4.6,
+   "level": "warn",
+   "project": "BOREAL",
+   "origin": "PRD2",
+   "user": "Auto"
+  },
+  {
+   "article": "58232351",
+   "designation": "PROJECTEUR BOREAL LED TI G",
+   "date": "2026-10-05",
+   "doc": "6912993879",
+   "qty": 15,
+   "pallets": 1,
+   "days": 0,
+   "label": "434500446",
+   "ts": "2026-10-06 00:58:57",
+   "hours": 0.89,
+   "level": "",
+   "project": "BOREAL",
+   "origin": "PRD2",
+   "user": "Auto"
+  },
+  {
+   "article": "58258760",
+   "designation": "FEU ARRIERE ETNA G",
+   "date": "2026-10-05",
+   "doc": "6912993882",
    "qty": 24,
    "pallets": 1,
-   "days": 8
+   "days": 0,
+   "label": "434500447",
+   "ts": "2026-10-06 01:00:44",
+   "hours": 0.86,
+   "level": "",
+   "project": "ETNA",
+   "origin": "PRD2",
+   "user": "Auto"
   },
   {
-   "article": "1000435003",
-   "designation": "PF CAPTEUR TEMPERATURE REF 17",
-   "date": "2026-09-29",
-   "doc": "4901256434",
-   "qty": 120,
-   "pallets": 2,
-   "days": 4
-  },
-  {
-   "article": "1000435003",
-   "designation": "PF CAPTEUR TEMPERATURE REF 17",
-   "date": "2026-09-29",
-   "doc": "4901256441",
-   "qty": 67,
-   "pallets": 0,
-   "days": 4
-  },
-  {
-   "article": "1000914295",
-   "designation": "PF CONNECTEUR 4 VOIES REF 04",
-   "date": "2026-09-30",
-   "doc": "4901256883",
-   "qty": 320,
-   "pallets": 1,
-   "days": 3
-  },
-  {
-   "article": "1000887507",
-   "designation": "PF COMPOUND ABS VRAC OCTABIN",
-   "date": "2026-10-01",
-   "doc": "4901257171",
-   "qty": 729.25,
-   "pallets": 2,
-   "days": 2
-  },
-  {
-   "article": "1000887507",
-   "designation": "PF COMPOUND ABS VRAC OCTABIN",
-   "date": "2026-10-01",
-   "doc": "4901257217",
-   "qty": 470.75,
-   "pallets": 0,
-   "days": 2
-  },
-  {
-   "article": "1000751673",
-   "designation": "PF BOUCHON RESERVOIR REF 07",
-   "date": "2026-10-02",
-   "doc": "4901257394",
-   "qty": 200,
-   "pallets": 1,
-   "days": 1
-  },
-  {
-   "article": "1000818461",
-   "designation": "PF CONSOLE CENTRALE REF 24",
-   "date": "2026-10-02",
-   "doc": "4901257549",
-   "qty": 36,
-   "pallets": 1,
-   "days": 1
-  },
-  {
-   "article": "1000571497",
-   "designation": "PF CARTER NOUVELLE VERSION REF 35",
-   "date": "2026-10-02",
-   "doc": "4901257553",
-   "qty": 96,
-   "pallets": null,
-   "days": 1
-  },
-  {
-   "article": "1000216115",
-   "designation": "PF PLAQUE INSONORISANTE REF 33",
-   "date": "2026-10-03",
-   "doc": "4901257725",
-   "qty": 127,
-   "pallets": 1,
-   "days": 0
-  },
-  {
-   "article": "1000730226",
-   "designation": "PF CAPOT MOTEUR GRIS REF 02",
-   "date": "2026-10-03",
-   "doc": "4901257726",
+   "article": "58258760",
+   "designation": "FEU ARRIERE ETNA G",
+   "date": "2026-10-05",
+   "doc": "6912993898",
    "qty": 24,
    "pallets": 1,
-   "days": 0
+   "days": 0,
+   "label": "434500453",
+   "ts": "2026-10-06 01:26:21",
+   "hours": 0.44,
+   "level": "",
+   "project": "ETNA",
+   "origin": "PRD2",
+   "user": "Auto"
   },
   {
-   "article": "1000216115",
-   "designation": "PF PLAQUE INSONORISANTE REF 33",
-   "date": "2026-10-03",
-   "doc": "4901257731",
-   "qty": 480,
-   "pallets": 1,
-   "days": 0
-  },
-  {
-   "article": "1000216115",
-   "designation": "PF PLAQUE INSONORISANTE REF 33",
-   "date": "2026-10-03",
-   "doc": "4901257735",
-   "qty": 480,
-   "pallets": 1,
-   "days": 0
-  },
-  {
-   "article": "1000700381",
-   "designation": "PF BOITIER FUSIBLES REF 11",
-   "date": "2026-10-03",
-   "doc": "4901257744",
-   "qty": 72,
-   "pallets": 1,
-   "days": 0
-  },
-  {
-   "article": "1000216115",
-   "designation": "PF PLAQUE INSONORISANTE REF 33",
-   "date": "2026-10-03",
-   "doc": "4901257747",
-   "qty": 480,
-   "pallets": 1,
-   "days": 0
-  },
-  {
-   "article": "1000216115",
-   "designation": "PF PLAQUE INSONORISANTE REF 33",
-   "date": "2026-10-03",
-   "doc": "4901257761",
-   "qty": 353,
-   "pallets": 0,
-   "days": 0
-  },
-  {
-   "article": "1000626925",
-   "designation": "PF BOITIER 12V REF 01",
-   "date": "2026-10-03",
-   "doc": "4901257779",
+   "article": "58258760",
+   "designation": "FEU ARRIERE ETNA G",
+   "date": "2026-10-05",
+   "doc": "6912993901",
    "qty": 24,
    "pallets": 1,
-   "days": 0
+   "days": 0,
+   "label": "434500454",
+   "ts": "2026-10-06 01:27:23",
+   "hours": 0.42,
+   "level": "",
+   "project": "ETNA",
+   "origin": "PRD2",
+   "user": "Auto"
   },
   {
-   "article": "1000866025",
-   "designation": "PF GAINE ELECTRIQUE 25MM REF 25",
-   "date": "2026-10-03",
-   "doc": "4901257814",
-   "qty": 144,
+   "article": "58603689",
+   "designation": "TRINGLERIE ESSUIE-GLACE CORSO D",
+   "date": "2026-10-05",
+   "doc": "6912993906",
+   "qty": 84,
    "pallets": 1,
-   "days": 0
+   "days": 0,
+   "label": "434500455",
+   "ts": "2026-10-06 01:35:03",
+   "hours": 0.29,
+   "level": "",
+   "project": "CORSO",
+   "origin": "PRD2",
+   "user": "Auto"
   },
   {
-   "article": "1000744039",
-   "designation": "PF PATTE FIXATION REF 26",
-   "date": "2026-10-03",
-   "doc": "4901257859",
-   "qty": 122,
+   "article": "KD82962",
+   "designation": "PROJECTEUR BOREAL LED TD G",
+   "date": "2026-10-05",
+   "doc": "6912993921",
+   "qty": 15,
    "pallets": 1,
-   "days": 0
+   "days": 0,
+   "label": "434500457",
+   "ts": "2026-10-06 01:52:27",
+   "hours": 0,
+   "level": "",
+   "project": "BOREAL",
+   "origin": "PRD2",
+   "user": "Auto"
+  }
+ ],
+ "pendingTotal": 13,
+ "articles": [
+  {
+   "a": "58118825",
+   "d": "PROJECTEUR FJORD ECO TD G",
+   "p": "FJORD",
+   "e": 6,
+   "w": 0,
+   "m": 0,
+   "q": 6,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 22:54:41"
   },
   {
-   "article": "1000744039",
-   "designation": "PF PATTE FIXATION REF 26",
-   "date": "2026-10-03",
-   "doc": "4901257880",
-   "qty": 358,
-   "pallets": 0,
-   "days": 0
+   "a": "58162391",
+   "d": "FEU ARRIERE ATLAS G",
+   "p": "ATLAS",
+   "e": 16,
+   "w": 0,
+   "m": 0,
+   "q": 24,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 20:50:30"
   },
   {
-   "article": "1000320436",
-   "designation": "PF JOINT ETANCHEITE 60MM REF 10",
-   "date": "2026-10-03",
-   "doc": "4901257935",
-   "qty": 60,
-   "pallets": 1,
-   "days": 0
+   "a": "58215676",
+   "d": "PROJECTEUR FJORD OES TI D",
+   "p": "FJORD",
+   "e": 6,
+   "w": 0,
+   "m": 0,
+   "q": 6,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 07:41:04"
   },
   {
-   "article": "1000207622",
-   "designation": "PF GRANULE PE NOIR BIG BAG",
-   "date": "2026-10-03",
-   "doc": "4901257957",
-   "qty": 400,
-   "pallets": 1,
-   "days": 0
+   "a": "58217166",
+   "d": "PROJECTEUR ATLAS ECO TI G",
+   "p": "ATLAS",
+   "e": 18,
+   "w": 0,
+   "m": 0,
+   "q": 18,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 07:55:38"
   },
   {
-   "article": "1000207622",
-   "designation": "PF GRANULE PE NOIR BIG BAG",
-   "date": "2026-10-03",
-   "doc": "4901257960",
-   "qty": 400,
-   "pallets": 1,
-   "days": 0
+   "a": "58232351",
+   "d": "PROJECTEUR BOREAL LED TI G",
+   "p": "BOREAL",
+   "e": 13,
+   "w": 2,
+   "m": 0,
+   "q": 15,
+   "qs": "ARTICLES",
+   "t": "2026-10-06 00:58:57"
   },
   {
-   "article": "1000207622",
-   "designation": "PF GRANULE PE NOIR BIG BAG",
-   "date": "2026-10-03",
-   "doc": "4901257963",
-   "qty": 400,
-   "pallets": 1,
-   "days": 0
+   "a": "58258760",
+   "d": "FEU ARRIERE ETNA G",
+   "p": "ETNA",
+   "e": 16,
+   "w": 3,
+   "m": 0,
+   "q": 24,
+   "qs": "ARTICLES",
+   "t": "2026-10-06 01:45:56"
+  },
+  {
+   "a": "58335113",
+   "d": "CACHE ANTIBROUILLARD UNIVERSEL",
+   "p": "",
+   "e": 5,
+   "w": 0,
+   "m": 2,
+   "q": 80,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 12:10:49"
+  },
+  {
+   "a": "58383596",
+   "d": "PROJECTEUR DELTA PREMIUM TD G",
+   "p": "DELTA",
+   "e": 16,
+   "w": 0,
+   "m": 0,
+   "q": 8,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 17:07:15"
+  },
+  {
+   "a": "58431725",
+   "d": "PROJECTEUR ATLAS ECO TD D",
+   "p": "ATLAS",
+   "e": 12,
+   "w": 0,
+   "m": 0,
+   "q": 18,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 17:07:15"
+  },
+  {
+   "a": "58500789",
+   "d": "ANTIBROUILLARD BOREAL G",
+   "p": "BOREAL",
+   "e": 25,
+   "w": 0,
+   "m": 0,
+   "q": 24,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 20:40:17"
+  },
+  {
+   "a": "58603689",
+   "d": "TRINGLERIE ESSUIE-GLACE CORSO D",
+   "p": "CORSO",
+   "e": 19,
+   "w": 1,
+   "m": 0,
+   "q": 84,
+   "qs": "ARTICLES",
+   "t": "2026-10-06 01:43:32"
+  },
+  {
+   "a": "58616532",
+   "d": "PROJECTEUR BOREAL LED TI D",
+   "p": "BOREAL",
+   "e": 43,
+   "w": 0,
+   "m": 0,
+   "q": 15,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 11:50:59"
+  },
+  {
+   "a": "58637936",
+   "d": "FEU DIURNE DELTA",
+   "p": "DELTA",
+   "e": 36,
+   "w": 0,
+   "m": 0,
+   "q": 50,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 13:08:16"
+  },
+  {
+   "a": "58840341",
+   "d": "PROJECTEUR ATLAS LED TD G",
+   "p": "ATLAS",
+   "e": 29,
+   "w": 0,
+   "m": 0,
+   "q": 15,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 07:17:36"
+  },
+  {
+   "a": "58871379",
+   "d": "PROJECTEUR ATLAS LED TD D",
+   "p": "ATLAS",
+   "e": 32,
+   "w": 2,
+   "m": 0,
+   "q": 15,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 20:55:21"
+  },
+  {
+   "a": "58881943",
+   "d": "PROJECTEUR ETNA ECO TD D",
+   "p": "ETNA",
+   "e": 39,
+   "w": 0,
+   "m": 0,
+   "q": 18,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 22:58:53"
+  },
+  {
+   "a": "58918811",
+   "d": "BRAS ESSUIE-GLACE CORSO",
+   "p": "CORSO",
+   "e": 28,
+   "w": 0,
+   "m": 0,
+   "q": 60,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 07:47:06"
+  },
+  {
+   "a": "58927784",
+   "d": "PROJECTEUR ATLAS ECO TI D",
+   "p": "ATLAS",
+   "e": 35,
+   "w": 0,
+   "m": 0,
+   "q": 18,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 20:43:08"
+  },
+  {
+   "a": "58949692",
+   "d": "PROJECTEUR ATLAS ECO TD G",
+   "p": "ATLAS",
+   "e": 43,
+   "w": 2,
+   "m": 0,
+   "q": 18,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 20:25:51"
+  },
+  {
+   "a": "KA62436",
+   "d": "PROJECTEUR FJORD ECO TD D",
+   "p": "FJORD",
+   "e": 13,
+   "w": 0,
+   "m": 0,
+   "q": 6,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 08:27:45"
+  },
+  {
+   "a": "KB61845",
+   "d": "PROJECTEUR BOREAL HALOGENE TD G",
+   "p": "BOREAL",
+   "e": 31,
+   "w": 0,
+   "m": 0,
+   "q": 12,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 18:52:14"
+  },
+  {
+   "a": "KB98392",
+   "d": "PROJECTEUR BOREAL LED TD D",
+   "p": "BOREAL",
+   "e": 51,
+   "w": 0,
+   "m": 0,
+   "q": 15,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 17:52:50"
+  },
+  {
+   "a": "KD30372",
+   "d": "PROJECTEUR ETNA ECO TD G",
+   "p": "ETNA",
+   "e": 42,
+   "w": 1,
+   "m": 0,
+   "q": 18,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 18:46:02"
+  },
+  {
+   "a": "KD82962",
+   "d": "PROJECTEUR BOREAL LED TD G",
+   "p": "BOREAL",
+   "e": 49,
+   "w": 2,
+   "m": 0,
+   "q": 15,
+   "qs": "ARTICLES",
+   "t": "2026-10-06 01:52:27"
+  },
+  {
+   "a": "KD94041",
+   "d": "PROJECTEUR ETNA BASE TD D",
+   "p": "ETNA",
+   "e": 24,
+   "w": 0,
+   "m": 0,
+   "q": 12,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 12:07:33"
+  },
+  {
+   "a": "KE76582",
+   "d": "PROJECTEUR BOREAL HALOGENE TD D",
+   "p": "BOREAL",
+   "e": 51,
+   "w": 0,
+   "m": 0,
+   "q": 12,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 05:45:42"
+  },
+  {
+   "a": "KE99734",
+   "d": "TRINGLERIE ESSUIE-GLACE FJORD",
+   "p": "FJORD",
+   "e": 26,
+   "w": 0,
+   "m": 0,
+   "q": 50,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 18:35:19"
+  },
+  {
+   "a": "QA13427",
+   "d": "PROJECTEUR ADAPTABLE ECO TD G",
+   "p": "",
+   "e": 12,
+   "w": 0,
+   "m": 0,
+   "q": 12,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 07:42:43"
+  },
+  {
+   "a": "QA16695",
+   "d": "KIT FIXATION PROJECTEUR UNIVERSEL",
+   "p": "",
+   "e": 10,
+   "w": 0,
+   "m": 0,
+   "q": 60,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 16:32:45"
+  },
+  {
+   "a": "QB28589",
+   "d": "TRINGLERIE ESSUIE-GLACE CORSO G",
+   "p": "CORSO",
+   "e": 17,
+   "w": 0,
+   "m": 0,
+   "q": 84,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 08:48:20"
+  },
+  {
+   "a": "QB82330",
+   "d": "PROJECTEUR DELTA PREMIUM TD D",
+   "p": "DELTA",
+   "e": 38,
+   "w": 0,
+   "m": 0,
+   "q": 8,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 06:48:11"
+  },
+  {
+   "a": "QD50778",
+   "d": "FEU ARRIERE ATLAS D",
+   "p": "ATLAS",
+   "e": 59,
+   "w": 0,
+   "m": 0,
+   "q": 24,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 14:55:28"
+  },
+  {
+   "a": "QD93939",
+   "d": "ANTIBROUILLARD BOREAL D",
+   "p": "BOREAL",
+   "e": 42,
+   "w": 0,
+   "m": 0,
+   "q": 24,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 21:49:08"
+  },
+  {
+   "a": "QE50681",
+   "d": "PROJECTEUR ATLAS OES TD G",
+   "p": "ATLAS",
+   "e": 29,
+   "w": 0,
+   "m": 0,
+   "q": 6,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 03:09:47"
+  },
+  {
+   "a": "QE68359",
+   "d": "MOTEUR ESSUIE-GLACE ETNA",
+   "p": "ETNA",
+   "e": 41,
+   "w": 0,
+   "m": 0,
+   "q": 80,
+   "qs": "ARTICLES",
+   "t": "2026-10-05 10:28:57"
+  },
+  {
+   "a": "QE86707",
+   "d": "PROJECTEUR ETNA BASE TD G",
+   "p": "ETNA",
+   "e": 24,
+   "w": 0,
+   "m": 2,
+   "q": 12,
+   "qs": "ARTICLES",
+   "t": "2026-10-06 01:15:43"
   }
  ],
  "docks": [
   {
    "quai": "Q01",
-   "status": "Occupé - chargement en cours",
-   "truck": "CAM-01",
-   "carrier": "Transporteur A",
-   "color": "bleu",
-   "arrival": "13:40",
-   "departure": "15:30",
-   "planned": 33,
-   "loaded": 21,
-   "staged": 12,
+   "status": "Libre",
+   "truck": "",
+   "carrier": "",
+   "color": "",
+   "arrival": "",
+   "departure": "",
+   "planned": null,
+   "loaded": null,
+   "staged": 0,
    "capacity": 12
   },
   {
    "quai": "Q02",
-   "status": "Occupé - chargement en cours",
-   "truck": "CAM-02",
-   "carrier": "Transporteur B",
+   "status": "En attente",
+   "truck": "CAM-01",
+   "carrier": "Transporteur C",
    "color": "rouge",
-   "arrival": "14:05",
-   "departure": "16:00",
-   "planned": 26,
-   "loaded": 9,
-   "staged": 12,
+   "arrival": "11:25",
+   "departure": "12:55",
+   "planned": 22,
+   "loaded": 0,
+   "staged": 11,
    "capacity": 12
   },
   {
@@ -1160,27 +1618,27 @@
   },
   {
    "quai": "Q04",
-   "status": "Occupé - en attente chargement",
-   "truck": "CAM-03",
-   "carrier": "Transporteur C",
-   "color": "vert",
-   "arrival": "14:30",
-   "departure": "16:45",
-   "planned": 30,
-   "loaded": 0,
-   "staged": 8,
+   "status": "Libre",
+   "truck": "",
+   "carrier": "",
+   "color": "",
+   "arrival": "",
+   "departure": "",
+   "planned": null,
+   "loaded": null,
+   "staged": 0,
    "capacity": 12
   },
   {
    "quai": "Q05",
-   "status": "Occupé - chargé, départ imminent",
-   "truck": "CAM-04",
-   "carrier": "Transporteur A",
+   "status": "Chargé",
+   "truck": "CAM-02",
+   "carrier": "Transporteur D",
    "color": "gris",
-   "arrival": "12:15",
-   "departure": "15:15",
-   "planned": 22,
-   "loaded": 22,
+   "arrival": "07:15",
+   "departure": "10:25",
+   "planned": 16,
+   "loaded": 16,
    "staged": 0,
    "capacity": 12
   },
@@ -1199,15 +1657,15 @@
   },
   {
    "quai": "Q07",
-   "status": "Occupé - chargement en cours",
-   "truck": "CAM-05",
-   "carrier": "Transporteur B",
+   "status": "Chargement",
+   "truck": "CAM-03",
+   "carrier": "Transporteur C",
    "color": "jaune",
-   "arrival": "14:50",
-   "departure": "17:00",
+   "arrival": "12:15",
+   "departure": "14:35",
    "planned": 18,
-   "loaded": 4,
-   "staged": 10,
+   "loaded": 11,
+   "staged": 7,
    "capacity": 12
   },
   {
@@ -1227,53 +1685,49 @@
  "alerts": [
   {
    "level": "crit",
-   "code": "BLOCK_SAT",
-   "text": "Bloc B6 (Allée 50 (?)) saturé à 100 % (80 / 80 pal)"
+   "code": "PRD2_CRIT",
+   "text": "4 palettes en PRD2 depuis plus de 6 h · la plus ancienne : 58949692 ATLAS depuis 10 h 19 (étiquette 434500395)"
   },
   {
-   "level": "crit",
-   "code": "PENDING_STUCK",
-   "text": "En attente PRD2 depuis 9 jours : article 1000516512 PF SUPPORT PARE-CHOC REF 19 (Doc.article 4901255337 du 24.09.2026, 320 PC)"
-  },
-  {
-   "level": "crit",
-   "code": "PENDING_STUCK",
-   "text": "En attente PRD2 depuis 8 jours : article 1000812390 PF CACHE MOTEUR REF 20 (Doc.article 4901255583 du 25.09.2026, 24 PC)"
+   "level": "warn",
+   "code": "PRD2_WARN",
+   "text": "3 palettes en PRD2 depuis 4 à 6 h"
   },
   {
    "level": "warn",
    "code": "TO_PLACE",
-   "text": "2 palettes hors capacité des blocs (famille F5) : à placer"
+   "text": "27 palettes hors capacité des blocs : à placer"
   },
   {
    "level": "warn",
-   "code": "PENDING_STUCK",
-   "text": "En attente PRD2 depuis 4 jours : article 1000435003 PF CAPTEUR TEMPERATURE REF 17 (Doc.article 4901256434 du 29.09.2026, 120 PC)"
-  },
-  {
-   "level": "warn",
-   "code": "PENDING_STUCK",
-   "text": "En attente PRD2 depuis 4 jours : article 1000435003 PF CAPTEUR TEMPERATURE REF 17 (Doc.article 4901256441 du 29.09.2026, 67 PC)"
-  },
-  {
-   "level": "warn",
-   "code": "PENDING_STUCK",
-   "text": "En attente PRD2 depuis 3 jours : article 1000914295 PF CONNECTEUR 4 VOIES REF 04 (Doc.article 4901256883 du 30.09.2026, 320 PC)"
+   "code": "NO_PROJECT",
+   "text": "3 références suivies sans projet : affectez-les dans la page Projets"
   },
   {
    "level": "warn",
    "code": "DOCK_STAGING",
-   "text": "Quai Q01 : zone quai remplie à 100 % (12 / 12 pal)"
-  },
-  {
-   "level": "warn",
-   "code": "DOCK_STAGING",
-   "text": "Quai Q02 : zone quai remplie à 100 % (12 / 12 pal)"
-  },
-  {
-   "level": "warn",
-   "code": "UNKNOWN_ARTICLE",
-   "text": "Article 1000571497 (PF CARTER NOUVELLE VERSION REF 35) absent de ARTICLES : palettes non calculables"
+   "text": "Quai Q2 : zone quai remplie à 91,7 % (11 / 12 pal)"
   }
- ]
+ ],
+ "thresholds": {
+  "satWarn": 0.85,
+  "satCrit": 0.95,
+  "pendingDaysWarn": 3,
+  "dockStagingWarn": 0.85,
+  "pendingHoursWarn": 4,
+  "pendingHoursCrit": 6,
+  "labelIsPallet": 1,
+  "trackAll": 0,
+  "freshWarnH": 4,
+  "freshCritH": 24,
+  "tvRefreshS": 60,
+  "tvSceneS": 45,
+  "importTrackedOnly": 1,
+  "pendingDaysCrit": 6
+ },
+ "stats": {
+  "movements": 1343,
+  "processed": 1343,
+  "computeMs": 0
+ }
 }

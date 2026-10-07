@@ -200,8 +200,9 @@ function effacerSimulation() {
   requireSheet_();
   var ui = SpreadsheetApp.getUi();
   var answer = ui.alert('Effacer la simulation',
-    'Supprimer toutes les données simulées (mouvements, stock initial et articles simulés, état simulé des quais) ?\n\n' +
-    'Les lignes importées depuis SAP sont conservées.', ui.ButtonSet.YES_NO);
+    'Supprimer toutes les données simulées (mouvements, stock initial, articles et projets simulés, état simulé des quais) ?\n\n' +
+    'Les lignes importées depuis SAP sont conservées, ainsi que les références et les projets enregistrés depuis le ' +
+    'panneau Projets.', ui.ButtonSet.YES_NO);
   if (answer !== ui.Button.YES) return;
   runFromSheet_('Effacement de la simulation', runClearSimulation_);
 }
@@ -625,10 +626,9 @@ function homeStatus_() {
     pending = plural_(k.pendingPallets || 0, 'palette', 'palettes') + ' · PRD2 > ' + frNum_(s.pendingHoursCrit, 1).replace(/,0$/, '') +
       ' h : ' + frNum_(s.pendingCrit, 0) + (oldest ? ' (plus ancienne : ' + oldest + ')' : '');
   }
-  var asOfTs = state && state.asOfTs ? ' ' + String(state.asOfTs).slice(11, 16) : '';
   return [
     { text: !state ? 'Aucune donnée' : state.source === 'SIMULATION' ? 'Simulation (données fictives)' : 'SAP (imports MB51)' },
-    { text: state ? frDate_(state.asOf) + asOfTs : '—' },
+    { text: state ? dataTimeText_(state) : '—' },
     { text: last ? when(last.at) + ' · ' + last.kind + (last.fresh !== null && last.fresh !== undefined ?
       ' · ' + plural_(last.fresh, 'ligne', 'lignes') : '') : '—' },
     { text: state ? when(state.computedAt) : '—' },

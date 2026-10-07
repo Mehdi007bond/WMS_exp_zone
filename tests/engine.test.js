@@ -584,14 +584,17 @@ test('real MB51 export: engine matches expected.json (asOf, learned qpp, pending
   eq(unl, e.pending.unlabeledQty);
   assert.equal(r.kpi.pendingPallets, e.pending.pallets);
   assert.equal(r.pending.reduce((t, x) => t + (x.pallets || 0), 0), e.pending.pallets, 'row pallets add up to the KPI');
-  // The reference counts LABELS by level; the KPIs count PALLETS of every pending row by level (SPEC 4.8), so the
-  // unlabeled PRD2 remainders (bulk moved into PRD2 at 10:55, returns from EMRT), all older than 6 h, add to crit.
+  // Hours judge the declared containers only (SPEC 1: declared, not yet transferred; 4.10: crit 86, warn 11): the
+  // unlabeled PRD2 remainders (bulk moved into PRD2 at 10:55 from outside the export, returns from EMRT) are older
+  // than 6 h but keep the day rule (posted on asOf: no level), so the KPIs (pallets by level) are the labels.
   assert.equal(labeled.filter(x => x.level === 'crit').length, e.pending.crit);
   assert.equal(labeled.filter(x => x.level === 'warn').length, e.pending.warn);
-  const unlabeledCrit = r.pending.filter(x => !x.label && x.level === 'crit').reduce((t, x) => t + (x.pallets || 0), 0);
-  assert.equal(unlabeledCrit, 17);
-  assert.equal(r.kpi.pendingCrit, e.pending.crit + unlabeledCrit);
-  assert.equal(r.kpi.pendingWarn, e.pending.warn, 'no unlabeled row between 4 and 6 h');
+  const unlabeledRows = r.pending.filter(x => !x.label);
+  assert.equal(unlabeledRows.reduce((t, x) => t + (x.pallets || 0), 0), 17);
+  assert.ok(unlabeledRows.every(x => x.hours > 6 && x.days === 0 && x.level === ''), 'unlabeled stock is judged in days');
+  assert.equal(r.kpi.pendingCrit, e.pending.crit);
+  assert.equal(r.kpi.pendingWarn, e.pending.warn);
+  assert.equal(r.kpi.stuckPendingLines, 0);
   near(r.kpi.oldestPendingHours, e.pending.oldestHours, 0.0101, 'oldest pending hours');
   const oldest = r.pending.reduce((m, x) => (x.hours !== null && (!m || x.hours > m.hours) ? x : m), null);
   assert.equal(oldest.article, e.pending.oldest.article);
@@ -908,6 +911,39 @@ test('v2: pending hours and levels at the 4 h and 6 h boundaries; rows without e
   assert.equal(c.alerts.find(a => a.code === 'PRD2_WARN').text, '2 palettes en PRD2 depuis 2 à 5,5 h');
   assert.equal(c.projectsList.find(p => p.project === 'ATLAS').pendingCrit, 2);
   assert.ok(Engine.toTables(c).CALC_KPI.some(row => row[0] === 'Palettes en attente > 5,5 h' && row[1] === 2));
+});
+
+test('v2: hours judge declared pallets only; unlabeled stock moved into PRD2 keeps the day rule', () => {
+  const D1 = '2026-10-01';
+  const lines = [
+    decl('A', 1, 10, D5 + ' 08:00:00'), // labeled declaration, 12 h: crit
+    decl('A', null, 10, D5 + ' 13:00:00'), // unlabeled declaration, 7 h: crit (declared, not transferred)
+    ...xfer('A', null, 7, D5 + ' 09:00:00', 'EMRT', 'PRD2', 'R1'), // return from EMRT, 11 h: day rule (0 days)
+    mv('A', 'PRD2', '311', 'O1', D5, 5, D5 + ' 10:00:00', ''), // unpaired leg from outside the export: day rule
+    ...xfer('B', null, 10, D1 + ' 07:00:00', 'EMRT', 'PRD2', 'R2'), // return 4 days old: warn by days, PENDING_STUCK
+    mv('B', 'EMRT', '131', 'BE', D1, 10, D1 + ' 06:00:00', ''), // stock in EMRT for the return above
+    decl('Z', 9, 10, D5 + ' 20:00:00') // the time of the data
+  ];
+  const articles = [{ article: 'A', qpp: 10 }, { article: 'B', qpp: 10 }, { article: 'Z', qpp: 10 }];
+  const r = Engine.compute(v2Input(lines, { articles }));
+  assert.equal(r.asOfTs, D5 + ' 20:00:00');
+  const rows = r.pending.map(x => [x.article, x.origin, x.label, x.hours, x.days, x.level]);
+  eq(rows, [
+    ['B', 'EMRT', '', 109, 4, 'warn'],
+    ['A', 'PRD2', lbl(1), 12, 0, 'crit'],
+    ['A', 'EMRT', '', 11, 0, ''],
+    ['A', 'MvT 311', '', 10, 0, ''],
+    ['A', 'PRD2', '', 7, 0, 'crit'],
+    ['Z', 'PRD2', lbl(9), 0, 0, '']
+  ]);
+  const k = r.kpi;
+  eq([k.pendingCrit, k.pendingWarn, k.oldestPendingHours, k.stuckPendingLines], [2, 1, 12, 1]);
+  assert.equal(r.alerts[0].code, 'PRD2_CRIT');
+  assert.equal(r.alerts[0].text, '2 palettes en PRD2 depuis plus de 6 h · la plus ancienne : A depuis 12 h 00 (étiquette ' + lbl(1) + ')');
+  assert.ok(!r.alerts.some(a => a.code === 'PRD2_WARN'), 'the 4-day return is not « 4 à 6 h »');
+  const stuck = r.alerts.filter(a => a.code === 'PENDING_STUCK');
+  eq(stuck.map(a => a.level), ['warn']);
+  assert.ok(stuck[0].text.includes('Doc.article R2'), stuck[0].text);
 });
 
 test('v2: dwell median / P90 (even and odd counts), per posting date, night entries on the previous day', () => {

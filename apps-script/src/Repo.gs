@@ -786,8 +786,9 @@ function RepoModule_() {
     styleHeader_(sh, header.length);
     applyFormats_(sh, FORMATS[name], header, 2, SPARE_ROWS_ADMIN);
     sh.setTabColor('#5b8def');
-    // insertSheet activates the new tab: give the person in the sheet their tab back.
-    if (active) {
+    // insertSheet activates the new tab: give the person in the sheet their tab back (never a hidden tab: activating
+    // a tab shows it).
+    if (active && !active.isSheetHidden()) {
       try {
         ss.setActiveSheet(active);
       } catch (e) {
@@ -1014,23 +1015,38 @@ function RepoModule_() {
     return projects;
   }
 
+  // The placeholder rows of a v1 setup in REGLES_PLACEMENT (FAMILLE F1 to F5, comment 'provisoire'). The migration
+  // never deletes a row (docs/SPEC_V2.md 3), so the engine input skips a placeholder whose family no article carries:
+  // it would hold its blocks and send every article without a project to À PLACER.
+  function activeRules_(rules, articles) {
+    var families = {};
+    articles.forEach(function (a) {
+      if (a.family) families[fold_(a.family).trim()] = true;
+    });
+    return rules.filter(function (r) {
+      var placeholder = r.criterion === 'FAMILLE' && /^F[1-5]$/i.test(str_(r.value)) && fold_(r.comment).trim() === 'provisoire';
+      return !placeholder || families[fold_(r.value).trim()];
+    });
+  }
+
   function readInput() {
     migrate_();
     var settings = readSettings_();
     var plant = settings.plant || C_().PLANT;
     var layout = readLayout();
+    var articles = readArticles();
     return {
       asOf: settings.asOf || null,
       plant: plant,
       movements: readMovements_(),
       opening: readOpening_(plant),
-      articles: readArticles(),
+      articles: articles,
       projects: layoutIds_(readProjects(), layout.blocks),
       blocks: layout.blocks.map(function (b) {
         return { id: b.id, label: b.label, x: b.x, y: b.y, w: b.w, h: b.h, cols: b.cols, rows: b.rows, levels: b.levels,
           color: b.color, capacity: b.capacity };
       }),
-      rules: readRules_(),
+      rules: activeRules_(readRules_(), articles),
       mvtKinds: readMvtKinds_(),
       docks: readDocks(),
       thresholds: settings.thresholds,
@@ -1617,14 +1633,29 @@ function RepoModule_() {
       out.opening = data.opening.length;
     }
     if (Array.isArray(data.articles)) {
-      var ids = data.articles.map(function (a) { return code_(a.article, true); }).filter(function (a) { return a; });
-      var drop = {};
-      (getProp('SIM_ARTICLES') || []).concat(ids).forEach(function (a) { drop[a] = true; });
+      // The rows of the previous simulation are replaced. The rows the user owns (typed by hand, or saved from the
+      // projects panel, which takes them out of SIM_ARTICLES) stay as they are, also when the simulator generates the
+      // same code: SIM_ARTICLES then lists only the rows written here.
+      var prev = {};
+      (getProp('SIM_ARTICLES') || []).forEach(function (a) { prev[String(a).toUpperCase()] = true; });
       var at = readTable_(t.ARTICLES);
       var aHeader = headers_(t.ARTICLES).concat(extraLabels_(at, headers_(t.ARTICLES)));
-      var keptArticles = remap_(at, aHeader).filter(function (r) { return !drop[code_(r[0], true)]; });
-      writeRows_(t.ARTICLES, keptArticles.concat(data.articles.map(articleRow_)), SPARE_ROWS_ADMIN, aHeader);
-      setProp('SIM_ARTICLES', ids);
+      var keptArticles = remap_(at, aHeader).filter(function (r) { return !prev[code_(r[0], true).toUpperCase()]; });
+      var mine = {};
+      keptArticles.forEach(function (r) {
+        var k = code_(r[0], true).toUpperCase();
+        if (k) mine[k] = true;
+      });
+      var ids = [], simRows = [];
+      data.articles.forEach(function (a) {
+        var id = code_(a && a.article, true);
+        if (!id || mine[id.toUpperCase()]) return;
+        mine[id.toUpperCase()] = true;
+        ids.push(id);
+        simRows.push(articleRow_(a));
+      });
+      writeRows_(t.ARTICLES, keptArticles.concat(simRows), SPARE_ROWS_ADMIN, aHeader);
+      setProp('SIM_ARTICLES', ids.length ? ids : null);
       out.articles = ids.length;
     }
     if (Array.isArray(data.projects)) {
@@ -1678,11 +1709,11 @@ function RepoModule_() {
     var simArticles = getProp('SIM_ARTICLES') || [];
     if (simArticles.length) {
       var drop = {};
-      simArticles.forEach(function (a) { drop[a] = true; });
+      simArticles.forEach(function (a) { drop[String(a).toUpperCase()] = true; });
       var at = readTable_(t.ARTICLES);
       var aHeader = headers_(t.ARTICLES).concat(extraLabels_(at, headers_(t.ARTICLES)));
       var all = remap_(at, aHeader);
-      var keptArticles = all.filter(function (r) { return !drop[code_(r[0], true)]; });
+      var keptArticles = all.filter(function (r) { return !drop[code_(r[0], true).toUpperCase()]; });
       out.articles = all.length - keptArticles.length;
       writeRows_(t.ARTICLES, keptArticles, SPARE_ROWS_ADMIN, aHeader);
       setProp('SIM_ARTICLES', null);

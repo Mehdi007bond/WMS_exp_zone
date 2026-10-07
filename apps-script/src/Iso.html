@@ -122,6 +122,19 @@
     return ((state && state.projectsList) || []).some(function (p) { return p && p.project && p.project !== NO_PROJECT; });
   }
 
+  // Families of the pallets in the blocks ({ F1: true }); null when the state has no block contents.
+  function usedFamilies(state) {
+    var bc = state && state.blockContents;
+    if (!bc) return null;
+    var out = {};
+    Object.keys(bc).forEach(function (id) {
+      (bc[id] || []).forEach(function (e) {
+        if (e && e.family) out[e.family] = true;
+      });
+    });
+    return out;
+  }
+
   // Pallet color in the project mode: its project, else its family (v1 data), else neutral grey.
   function entryColor(state, e, block, blockState) {
     var projects = (blockState && blockState.projects) || block.projects || [];
@@ -164,10 +177,11 @@
         return { label: p.project, color: p.color || projectColor(state, p.project) || noProjectColor(state) };
       });
     }
-    var fams = {}, k;
+    // Families of the pallets only (the engine always lists F1-F5): SAP data without projects or families is grey.
+    var fams = {}, k, used = usedFamilies(state);
     var sf = (state && state.families) || {};
-    for (k in sf) if (Object.prototype.hasOwnProperty.call(sf, k)) fams[k] = sf[k];
-    if (!Object.keys(fams).length && !(state && state.projects)) {
+    for (k in sf) if (Object.prototype.hasOwnProperty.call(sf, k) && (!used || used[k])) fams[k] = sf[k];
+    if (!Object.keys(fams).length && !(state && state.projects) && !used) {
       var base = (conf().COLORS || {}).families || {};
       for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) fams[k] = base[k];
     }
@@ -353,6 +367,7 @@
       ctx.fillText(sub, p[0], p[1] + hh / 2 - 4 - subSize / 2 + 0.5);
     }
     var thr = (window.App && window.App.thresholds) ? window.App.thresholds(state) : (conf().THRESHOLDS || { satWarn: 0.85, satCrit: 0.95 });
+    var projected = hasProjects(state);
     if (opts.labels !== false) {
       L.blocks.forEach(function (b) {
         var bs = blockState[b.id];
@@ -360,8 +375,10 @@
         var col = v >= thr.satCrit ? '#d03b3b' : v >= thr.satWarn ? '#fab219' : 'rgba(15,23,32,.92)';
         var fg = v >= thr.satWarn && v < thr.satCrit ? '#1b1405' : '#eef2f6';
         var pctTxt = Math.round(v * 100) + '\u00a0%';
-        // Title (project names) with 'B1 · 63 %' small; without a title (v1): 'B1  63 %'.
+        // Title (project names) with 'B1 · 63 %' small; without a title (v1): 'B1  63 %'. 'Libre' (free block) only
+        // when the state has projects: before any project is set, every block would read 'Libre'.
         var title = String((bs && bs.title) || b.title || '');
+        if (title === 'Libre' && !projected) title = '';
         if (title) tag(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, title, col, fg, null, 700, b.id + ' · ' + pctTxt);
         else tag(b.x + b.w / 2, b.y + b.h / 2, TAG_Z[b.id] || 3.4, b.id + '  ' + pctTxt, col, fg);
       });

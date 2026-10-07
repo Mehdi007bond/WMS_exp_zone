@@ -331,7 +331,7 @@ section.panel { scroll-margin-top: 64px; }
 .drop:hover, .drop.over { border-color: var(--accent); background: #f1f6fb; }
 .drop b { font-size: 15px; }
 .drop span { font: 500 12px/1.4 var(--f-mono); color: var(--ink-2); }
-.files { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.files { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 .file { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; background: #fff; border-left: 4px solid #b8c3ce; }
 .file.ok { border-left-color: #0ca30c; } .file.err { border-left-color: #d03b3b; } .file.busy { border-left-color: #2a78d6; }
 .file b { font-size: 13.5px; word-break: break-all; }
@@ -409,6 +409,8 @@ section.panel { scroll-margin-top: 64px; }
 html.mode-tv { font-size: min(0.8333vw, 1.4815vh); }
 body.theme-tv { height: 100vh; overflow: hidden; cursor: none; font-size: 1rem; }
 .tv-app { height: 100vh; display: grid; grid-template-rows: 5.25rem auto minmax(0, 1fr) 3.8rem; }
+/* Fixed rows: the simulation strip is hidden for SAP data, the scenes and the ticker must not move up a row. */
+.tv-app > .tv-top { grid-row: 1; } .tv-app > .tv-sim { grid-row: 2; } .tv-app > .tv-scenes { grid-row: 3; } .tv-app > .tv-ticker { grid-row: 4; }
 .tv-top { display: flex; align-items: center; gap: 1.4rem; padding: 0 1.6rem; border-bottom: 1px solid var(--line); min-width: 0; }
 .tv-brand { font: 700 2.6rem/1 var(--f-display); text-transform: uppercase; letter-spacing: .02em; white-space: nowrap; }
 .tv-brand span { color: var(--mark); }

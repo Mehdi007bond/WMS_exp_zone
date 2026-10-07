@@ -7,6 +7,11 @@
  * the in-memory Repo) in a fresh browser profile, so each starts from the same seeded simulation; pages of one
  * scenario share their store, like screens share the Google Sheet.
  *
+ * v2 scenarios (docs/SPEC_V2.md 7 and 8): pc-projects (paste, preview, save, zones, rename, the plan shows the project),
+ * pc-pending-hours (red from pendingHoursCrit), tv-prd2-alert (ticker and tile), pc-import-real (the user's anonymised
+ * MB51 export through the import page on an empty base: format line, filter counts, 86 labels over 6 h, TV layout of
+ * SAP data), pc-simulation-mb51 (simulated MB51 file written in the browser, then imported).
+ *
  * A scenario fails on any console error, uncaught page error or failed request, or on a failed check.
  * Screenshots: tests/harness/out/shots/ (PC pages 1440 x 900, TV 1920 x 1080); report: out/shots/e2e-report.json.
  *
@@ -27,6 +32,10 @@ const SHOTS = path.join(OUT, 'shots');
 const FONTS = path.join(HARNESS, 'vendor', 'fonts');
 const MESSY = path.join(ROOT, 'sample-data', 'messy');
 const EXPECTED = JSON.parse(fs.readFileSync(path.join(MESSY, 'expected.json'), 'utf8'));
+const REAL = path.join(ROOT, 'sample-data', 'mb51-reel');
+const REAL_FILE = path.join(REAL, 'MB51_reel_anonymise.xlsx');
+const REAL_EXPECTED = JSON.parse(fs.readFileSync(path.join(REAL, 'expected.json'), 'utf8'));
+const PC_SMALL = { width: 1366, height: 768 };
 const PC = { width: 1440, height: 900 };
 const TV = { width: 1920, height: 1080 };
 const ONLY = process.env.E2E_ONLY ? new RegExp(process.env.E2E_ONLY) : null;
@@ -171,6 +180,11 @@ const stateOf = (page) => page.evaluate(() => window.App.store.state);
 const frNum = (n) => Number(n).toLocaleString('fr-FR').replace(/[  ]/g, ' ');
 const digits = (s) => String(s).replace(/[^\d-]/g, '');
 const frDate = (iso) => iso.slice(8, 10) + '.' + iso.slice(5, 7) + '.' + iso.slice(0, 4);
+// Time of the data as the headers write it: SAP entry time 'dd/mm/yyyy hh:mm' (v2), else the date 'dd.mm.yyyy' (v1).
+const dataStamp = (s) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(s.asOfTs || ''));
+  return m ? m[3] + '/' + m[2] + '/' + m[1] + ' ' + m[4] + ':' + m[5] : frDate(s.asOf);
+};
 
 // ---------------------------------------------------------------------------------------------------------------
 // Scenarios
@@ -199,7 +213,7 @@ async function run() {
     check(info.kind !== 'none' && info.canvas && info.canvas[0] > 300 && info.canvas[1] > 200, 'TV : pas de vue 3D ni isométrique');
     check(info.docks.join(',') === 'Q1,Q2,Q3,Q4,Q5,Q6,Q7,Q8', 'TV : quais ' + info.docks.join(','));
     check(info.trucks === s.kpi.docksOccupied, 'TV : ' + info.trucks + ' camions affichés pour ' + s.kpi.docksOccupied + ' quais occupés');
-    check(info.fresh.indexOf(frDate(s.asOf)) >= 0, 'TV : date des données absente de l’en-tête');
+    check(info.fresh.indexOf(dataStamp(s)) >= 0, 'TV : heure des données ' + dataStamp(s) + ' absente de l’en-tête « ' + info.fresh + ' »');
     check(info.blocks === s.blocks.length, 'TV : barres de saturation ' + info.blocks);
     const period = await page.evaluate(() => App.pollPeriodMs());
     check(period === s.thresholds.tvRefreshS * 1000, 'TV : période de vérification ' + period + ' ms');
@@ -211,7 +225,8 @@ async function run() {
       ticker: Array.from(document.querySelectorAll('.tv-ticker-track span')).map((e) => e.textContent),
       blocksHidden: (() => { const b = document.querySelector('.tv-blocks'); return b.scrollHeight > b.clientHeight + 1; })(),
       placeholders: /\(\?\)|sans libellé/.test(document.body.textContent),
-      fresh: document.querySelector('[data-r="fresh"]').textContent
+      fresh: document.querySelector('[data-r="fresh"]').textContent,
+      freshCut: (() => { const e = document.querySelector('[data-r="fresh"]'); return e.scrollWidth > e.clientWidth + 1; })()
     }));
     if (info.kind === '3d') check(read.label >= 22, 'TV : étiquettes 3D de ' + read.label + ' px');
     check(read.sub >= 22, 'TV : sous-lignes des indicateurs de ' + read.sub + ' px');
@@ -219,7 +234,8 @@ async function run() {
     check(!read.blocksHidden, 'TV : barres de saturation coupées');
     check(read.ticker.length && read.ticker.every((x) => x.length <= 70), 'TV : bandeau trop long ' + JSON.stringify(read.ticker.filter((x) => x.length > 70)));
     check(!read.placeholders, 'TV : libellé provisoire « (?) » affiché');
-    check(/^Données simulées au \d{2}\.\d{2}\.\d{4}/.test(read.fresh), 'TV : en-tête « ' + read.fresh + ' »');
+    check(/^Données simulées jusqu’au \d{2}\/\d{2}\/\d{4} \d{2}:\d{2}/.test(read.fresh), 'TV : en-tête « ' + read.fresh + ' »');
+    check(!read.freshCut, 'TV : en-tête coupé « ' + read.fresh + ' »');
     t.note('vue ' + info.kind + ', ' + s.kpi.exp2Pallets + ' pal, ' + info.trucks + ' camions');
     await t.shot(page, 'tv-overview.png');
   });
@@ -294,7 +310,11 @@ async function run() {
     await page.click('.seg button[data-mode="age"]');
     await page.waitForTimeout(500);
     check(/âge/.test(await page.textContent('[data-r="side"] h2 small')), 'jumeau : légende âge absente');
-    await page.click('.seg button[data-mode="family"]');
+    await page.click('.seg button[data-mode="project"]');
+    await page.waitForTimeout(400);
+    const legend = await page.$$eval('[data-r="side"] .legend span', (e) => e.map((x) => x.textContent.trim()));
+    const projects = (await stateOf(page)).projectsList.filter((p) => p.project !== 'Sans projet').map((p) => p.project);
+    check(projects.length && projects.every((p) => legend.includes(p)), 'jumeau : légende des projets ' + JSON.stringify(legend));
     await page.waitForTimeout(600);
     await noHorizontalScroll(page, 'jumeau');
     t.note(kind.trim());
@@ -370,8 +390,12 @@ async function run() {
     const s = await stateOf(page);
     const rows = await page.$$eval('tr[data-article]', (e) => e.length);
     check(s.pending.length > 0 && rows === s.pending.length, 'attente : ' + rows + ' lignes pour ' + s.pending.length);
-    const first = await page.$eval('tr[data-article] td.mono', (e) => e.textContent.trim());
-    check(/Pal\*/.test(await page.textContent('table.tbl thead')) && /palette entamée/.test(await page.textContent('.panel')), 'attente : note « Pal* » absente');
+    const first = await page.$eval('tr[data-article]', (e) => e.getAttribute('data-article'));
+    // v2 (entry times): one row per label, waits in hours, counts at the time of the data.
+    const head = await page.textContent('.pend-sum');
+    check(/étiquettes? en attente/.test(head) && /depuis plus de 6 h/.test(head) && head.indexOf(dataStamp(s).slice(0, 5)) >= 0,
+      'attente : en-tête « ' + head.replace(/\s+/g, ' ') + ' »');
+    check(/Étiquette/.test(await page.textContent('table.tbl thead')), 'attente : colonne Étiquette absente');
     t.note(rows + ' lignes, ' + s.kpi.pendingPallets + ' pal');
     await noHorizontalScroll(page, 'attente');
     await t.shot(page, 'pc-pending.png');
@@ -464,11 +488,12 @@ async function run() {
       const rows = document.querySelectorAll('[data-r="preview"] table.tbl')[0].querySelectorAll('tbody tr');
       return Array.from(rows[rows.length - 1].children).map((td) => td.textContent.trim());
     });
-    // Total | Période | Lues | Valides | Doublons | Rejetées | Ignorées | Alertes
-    const got = { read: +digits(total[2]), valid: +digits(total[3]), dup: +digits(total[4]), rejected: +digits(total[5]), skipped: +digits(total[6]) };
-    const want = { read: exp.data_rows, valid: exp.valid_parsed, dup: 0, rejected: exp.rejected, skipped };
+    // Total | Période | Lues | Valides | Hors PF | Doublons | Rejetées | Ignorées | Alertes
+    const got = { read: +digits(total[2]), valid: +digits(total[3]), untracked: +digits(total[4]), dup: +digits(total[5]), rejected: +digits(total[6]),
+      skipped: +digits(total[7]) };
+    const want = { read: exp.data_rows, valid: exp.valid_parsed, untracked: 0, dup: 0, rejected: exp.rejected, skipped };
     check(JSON.stringify(got) === JSON.stringify(want), 'aperçu ' + JSON.stringify(got) + ' au lieu de ' + JSON.stringify(want));
-    t.note('aperçu ' + got.read + ' lues / ' + got.valid + ' valides / ' + got.skipped + ' ignorées / ' + digits(total[7]) + ' alerte');
+    t.note('aperçu ' + got.read + ' lues / ' + got.valid + ' valides / ' + got.skipped + ' ignorées / ' + digits(total[8]) + ' alerte');
     await t.shot(page, 'pc-import-preview.png');
     await page.click('[data-save]');
     await typeKey(page, keys.admin);
@@ -517,7 +542,7 @@ async function run() {
     const page = await t.open('out/pc-lookup.html', PC);
     await page.evaluate(() => { window.__marker = 42; });
     const ids = await page.$$eval('.pc-nav button[data-page]', (e) => e.map((x) => x.getAttribute('data-page')));
-    check(ids.length === 7, 'barre : ' + ids.join(','));
+    check(ids.join(',') === 'twin,plan,lookup,pending,projects,docks,import,simulation', 'barre : ' + ids.join(','));
     for (const id of ids.concat(['lookup'])) {
       await page.click('.pc-nav button[data-page="' + id + '"]');
       await page.waitForFunction((i) => document.querySelector('.pc-nav button[aria-current="page"]').getAttribute('data-page') === i, id);
@@ -525,6 +550,16 @@ async function run() {
       await page.waitForTimeout(150);
       await noHorizontalScroll(page, 'page ' + id);
     }
+    // A 1366 px laptop screen: no page scrolls sideways.
+    await page.setViewportSize(PC_SMALL);
+    for (const id of ids) {
+      await page.click('.pc-nav button[data-page="' + id + '"]');
+      await page.waitForFunction((i) => document.querySelector('.pc-nav button[aria-current="page"]').getAttribute('data-page') === i, id);
+      await page.waitForTimeout(150);
+      await noHorizontalScroll(page, 'page ' + id + ' (1366 px)');
+    }
+    await page.click('.pc-nav button[data-page="lookup"]');
+    await page.setViewportSize(PC);
     check(await page.evaluate(() => window.__marker) === 42, 'la navigation a rechargé la page');
     check(!(await page.$('.t3d-canvas')), 'canvas 3D non détruit en quittant le jumeau');
     await page.goBack();
@@ -564,7 +599,7 @@ async function run() {
     await t.shot(pc, 'pc-simulation-next.png');
     const t0 = Date.now();
     await tv.waitForFunction((d) => App.store.state && App.store.state.asOf === d, pc1.asOf, { timeout: 15000 });
-    await tv.waitForFunction((d) => document.querySelector('[data-r="fresh"]').textContent.indexOf(d) >= 0, frDate(pc1.asOf));
+    await tv.waitForFunction((d) => document.querySelector('[data-r="fresh"]').textContent.indexOf(d) >= 0, dataStamp(await stateOf(pc)));
     const tv1 = await tv.evaluate(() => ({ asOf: App.store.state.asOf, version: App.store.versions.data,
       kpi: document.querySelector('.scene-overview .tv-kpi .v').textContent, exp2: App.store.state.kpi.exp2Pallets }));
     check(tv1.version === pc1.version, 'TV : version ' + tv1.version + ' au lieu de ' + pc1.version);
@@ -574,6 +609,341 @@ async function run() {
     t.note('+1 jour ' + frDate(tv0.asOf) + ' -> ' + frDate(pc1.asOf) + ', TV à jour en ' + (Date.now() - t0) + ' ms');
     await tv.waitForTimeout(800);
     await t.shot(tv, 'tv-after-next-day.png');
+  });
+
+  // Projets page: paste references (header line, blank line, duplicate, leading zeros, invalid code), preview, save
+  // with the admin key; zones per project (the 2D plan shows the project on the block); rename; references without
+  // a project; all references.
+  await scenario('pc-projects', async (t) => {
+    const page = await t.open('out/pc-projects.html', PC);
+    await page.waitForSelector('.tbl.zones tr[data-block]');
+    const keys = await keysOf(page);
+    const s = await stateOf(page);
+    const noProj = s.articles.filter((a) => !a.p).map((a) => a.a);
+    const numeric = s.articles.filter((a) => a.p && /^\d+$/.test(a.a)).map((a) => a.a)[0];
+    check(noProj.length >= 3 && numeric, 'projets : simulation sans références sans projet ' + JSON.stringify(noProj));
+    await t.shot(page, 'pc-projects.png');
+    const text = ['Référence\tProjet', '  ' + noProj[0] + '  ', noProj[1].toLowerCase(), '', '00' + numeric + '\tZEPHYR', noProj[0], 'AB CD',
+      'NEWREF99'].join('\n');
+    await page.fill('[data-r="pasteText"]', text);
+    await page.fill('[data-r="pasteProject"]', 'ZEPHYR');
+    // Keyboard: Ctrl+Entrée in the paste box shows the preview.
+    await page.press('[data-r="pasteText"]', 'Control+Enter');
+    await page.waitForSelector('[data-r="pasteTable"] tr[data-status]');
+    const prev = await page.evaluate(() => ({
+      rows: Array.from(document.querySelectorAll('[data-r="pasteTable"] tr[data-status]')).map((tr) => ({ a: tr.getAttribute('data-article'),
+        st: tr.getAttribute('data-status'), text: tr.textContent })),
+      sum: document.querySelector('[data-r="pasteSummary"]').textContent,
+      save: document.querySelector('[data-save="paste"]').textContent
+    }));
+    const by = {};
+    prev.rows.forEach((r) => { by[r.a] = r; });
+    check(prev.rows.length === 5, 'aperçu : ' + prev.rows.length + ' lignes ' + JSON.stringify(prev.rows.map((r) => r.a)));
+    check(by[numeric] && by[numeric].st === 'change', 'aperçu : 00' + numeric + ' non ramené à ' + numeric + ' (changement)');
+    check(by[noProj[1]] && by[noProj[0]] && by[noProj[0]].st !== 'invalid', 'aperçu : références collées ' + JSON.stringify(Object.keys(by)));
+    check(/collée 2 fois/.test(by[noProj[0]].text), 'aperçu : doublon non fusionné');
+    check(by.NEWREF99 && by.NEWREF99.st === 'new' && /jamais vue/.test(by.NEWREF99.text), 'aperçu : référence nouvelle ' + JSON.stringify(by.NEWREF99));
+    check(prev.rows.filter((r) => r.st === 'invalid').length === 1, 'aperçu : une ligne invalide attendue');
+    check(/en-tête ignorée/.test(prev.sum) && /1 ligne vide ignorée/.test(prev.sum) && /1 doublon fusionné/.test(prev.sum) && /nouveau projet : ZEPHYR/.test(prev.sum),
+      'aperçu : résumé « ' + prev.sum.replace(/\s+/g, ' ') + ' »');
+    check(prev.save.trim() === 'Enregistrer (4)', 'aperçu : bouton « ' + prev.save + ' »');
+    await noHorizontalScroll(page, 'projets');
+    await t.shot(page, 'pc-projects-preview.png');
+    const v0 = await page.evaluate(() => App.store.versions.data);
+    await page.click('[data-save="paste"]');
+    await typeKey(page, keys.admin);
+    await page.waitForSelector('.toast.ok');
+    await page.waitForFunction((v) => App.store.versions.data > v, v0, { timeout: 15000 });
+    let st = await stateOf(page);
+    const projOf = (state, a) => (state.articles.find((x) => x.a === a) || {}).p;
+    check([noProj[0], noProj[1], numeric, 'NEWREF99'].every((a) => projOf(st, a) === 'ZEPHYR'),
+      'enregistrement : projets ' + JSON.stringify([noProj[0], noProj[1], numeric, 'NEWREF99'].map((a) => projOf(st, a))));
+    await page.waitForSelector('[data-r="preview"] .info-box');
+    check(/4 références? (ajoutée|modifiée)/.test(await page.textContent('[data-r="preview"]')) || /Enregistré/.test(await page.textContent('[data-r="preview"]')),
+      'enregistrement : message absent');
+
+    // Zones: ZEPHYR on block B5 (typed in lower case: the existing spelling is kept), then the 2D plan.
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#pj-names option')).some((o) => o.value === 'ZEPHYR'));
+    await page.fill('[data-add="B5"]', 'zephyr');
+    await page.press('[data-add="B5"]', 'Enter');
+    await page.waitForSelector('tr[data-block="B5"] .chip >> text=ZEPHYR');
+    check(await page.evaluate(() => document.activeElement && document.activeElement.getAttribute('data-add') === 'B5'), 'zones : focus perdu après Entrée');
+    const preview = await page.$$eval('[data-r="zonePlan"] text', (e) => e.map((x) => x.textContent));
+    check(preview.some((x) => /ZEPHYR/.test(x)), 'zones : aperçu du plan sans ZEPHYR ' + JSON.stringify(preview.slice(0, 12)));
+    // A name typed without Entrée is kept and added by « Enregistrer les zones ».
+    await page.fill('[data-add="B6"]', 'ZEPHYR');
+    await page.waitForFunction(() => /pas encore ajouté/.test(document.querySelector('[data-r="zoneState"]').textContent));
+    await t.shot(page, 'pc-projects-zones.png');
+    const v1 = await page.evaluate(() => App.store.versions.data);
+    await page.click('[data-save="zones"]');
+    await page.waitForFunction((v) => App.store.versions.data > v, v1, { timeout: 15000 });
+    check(!(await page.$('.modal')), 'zones : clé demandée deux fois');
+    st = await stateOf(page);
+    const b5 = st.blocks.find((b) => b.id === 'B5');
+    check(b5.projects.includes('ZEPHYR') && /ZEPHYR/.test(b5.title), 'zones : bloc B5 ' + JSON.stringify(b5));
+    const b6 = st.blocks.find((b) => b.id === 'B6');
+    check(b6.projects.includes('ZEPHYR'), 'zones : nom saisi sans Entrée non enregistré ' + JSON.stringify(b6));
+    await page.click('.pc-nav button[data-page="plan"]');
+    await page.waitForSelector('svg [data-title="B5"]');
+    const tag = await page.$$eval('svg [data-title="B5"]', (e) => e.map((x) => x.textContent).join(' / '));
+    check(/ZEPHYR/.test(tag), 'plan 2D : bloc B5 « ' + tag + ' »');
+    await t.shot(page, 'pc-projects-plan.png');
+
+    // Rename (Enter submits), references without a project, all references.
+    await page.click('.pc-nav button[data-page="projects"]');
+    await page.waitForSelector('[data-rename="ZEPHYR"]');
+    await page.click('[data-rename="ZEPHYR"]');
+    await page.waitForSelector('.modal input');
+    await page.fill('.modal input', 'ZEPHYR NORD');
+    const v2 = await page.evaluate(() => App.store.versions.data);
+    await page.press('.modal input', 'Enter');
+    await page.waitForFunction((v) => App.store.versions.data > v, v2, { timeout: 15000 });
+    st = await stateOf(page);
+    check(projOf(st, numeric) === 'ZEPHYR NORD' && /ZEPHYR NORD/.test(st.blocks.find((b) => b.id === 'B5').title), 'renommage : ' + projOf(st, numeric));
+    await page.waitForSelector('[data-r="none"] input[data-pick]');
+    const picks = await page.$$eval('[data-r="none"] input[data-pick]', (e) => e.map((x) => x.getAttribute('data-pick')));
+    check(picks.length === noProj.length - 2 && picks.includes(noProj[2]), 'sans projet : ' + JSON.stringify(picks));
+    await page.check('[data-r="none"] input[data-pick="' + noProj[2] + '"]');
+    await page.fill('[data-r="noneProject"]', 'ATLAS');
+    const v3 = await page.evaluate(() => App.store.versions.data);
+    await page.press('[data-r="noneProject"]', 'Enter');
+    await page.waitForFunction((v) => App.store.versions.data > v, v3, { timeout: 15000 });
+    check(projOf(await stateOf(page), noProj[2]) === 'ATLAS', 'sans projet : affectation');
+    await page.fill('[data-r="allQ"]', numeric);
+    await page.waitForFunction(() => document.querySelectorAll('[data-r="all"] tr[data-ref]').length === 1);
+    await page.selectOption('[data-r="all"] select[data-ref-project]', 'BOREAL');
+    await page.waitForSelector('[data-r="allSave"]:not([hidden])');
+    const v4 = await page.evaluate(() => App.store.versions.data);
+    await page.click('[data-r="allSave"]');
+    await page.waitForFunction((v) => App.store.versions.data > v, v4, { timeout: 15000 });
+    check(projOf(await stateOf(page), numeric) === 'BOREAL', 'toutes les références : changement de projet');
+    // Narrow (1366 px) and wide (1920 px) screens.
+    await page.fill('[data-r="allQ"]', '');
+    await page.setViewportSize(PC_SMALL);
+    await page.waitForTimeout(300);
+    await noHorizontalScroll(page, 'projets 1366 px');
+    await t.shot(page, 'pc-projects-1366.png');
+    await page.setViewportSize(TV);
+    await page.waitForTimeout(300);
+    await noHorizontalScroll(page, 'projets 1920 px');
+    await t.shot(page, 'pc-projects-1920.png');
+    t.note('4 références enregistrées, B5 = ETNA / ZEPHYR NORD, renommage, affectation, changement');
+  });
+
+  // Simulation page: « Télécharger un MB51 simulé (.xlsx) » writes the real 22-column format in the browser; the file
+  // goes through the import page (empty base) and the finished-goods filter drops the noise lines.
+  await scenario('pc-simulation-mb51', async (t) => {
+    const page = await t.open('out/pc-simulation.html', PC);
+    await page.waitForSelector('[data-dl]');
+    check(/Étiquettes par jour/.test(await page.textContent('.sim-card')), 'simulation : paramètre « Étiquettes par jour » absent');
+    await page.fill('[data-r="days"]', '2');
+    await page.fill('[data-r="ppd"]', '100');
+    const [download] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.click('[data-dl]')]);
+    const name = download.suggestedFilename();
+    check(/^MB51_simule_\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}\.xlsx$/.test(name), 'simulation : fichier « ' + name + ' »');
+    const file = path.join(SHOTS, name);
+    await download.saveAs(file);
+    await page.waitForSelector('[data-r="dlMsg"] .ok-t');
+    const msg = await page.textContent('[data-r="dlMsg"]');
+    const rows = Number(digits(/· ([\d\s\u00a0\u202f]+) lignes/.exec(msg)[1]));
+    const imp = await t.open('out/pc-import.html?empty=1', PC);
+    await imp.waitForSelector('[data-r="lib"] .ok-t', { timeout: 30000 });
+    await imp.setInputFiles('input[type=file]', file);
+    await imp.waitForSelector('[data-save]:not([disabled])', { timeout: 60000 });
+    const r = await imp.evaluate(() => ({ format: document.querySelector('[data-r="format"]').textContent, filter: document.querySelector('[data-r="filter"]').textContent }));
+    check(/^Format MB51 reconnu : 22 colonnes · heure de saisie ✓ · étiquettes ✓ \(/.test(r.format.trim()), 'import du MB51 simulé : « ' + r.format + ' »');
+    const m = /^([\d\s\u00a0]+) lignes gardées \(produits finis\) · ([\d\s\u00a0]+) ignorées/.exec(r.filter.trim());
+    check(m && Number(digits(m[2])) > 0 && Number(digits(m[1])) + Number(digits(m[2])) === rows, 'import du MB51 simulé : « ' + r.filter + ' » pour ' + rows + ' lignes');
+    fs.unlinkSync(file);
+    await t.shot(imp, 'pc-import-simulated-mb51.png');
+    // Round trip: save on the empty base, then every simulated line is stored as generated (the noise is not).
+    const keys = await keysOf(imp);
+    await imp.click('[data-save]');
+    await typeKey(imp, keys.admin);
+    await imp.waitForSelector('[data-r="result"] .stat', { timeout: 60000 });
+    await imp.waitForFunction((n) => App.store.state && App.store.state.stats && App.store.state.stats.movements === n,
+      Number(digits(m[1])), { timeout: 15000 });
+    const [, start, end] = /^MB51_simule_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.xlsx$/.exec(name);
+    const rt = await imp.evaluate(({ start, end }) => {
+      const s = App.store.state;
+      const gen = Sim.generate({ days: 2, endDate: end, seed: 2026, palletsPerDay: 100, blocks: s.layout.blocks });
+      const stored = new Map(window.__harness.Repo.dump().movements.map((x) => [x.key, x]));
+      const fields = ['article', 'division', 'magasin', 'mvt', 'text', 's', 'doc', 'date', 'qty', 'uqs', 'designation', 'user', 'ts', 'label',
+        'headerText', 'itemText', 'reference', 'client', 'salesOrder'];
+      const diffs = [];
+      gen.movements.forEach((g) => {
+        const x = stored.get(g.key);
+        if (!x) return diffs.push(g.key + ' absent');
+        fields.forEach((f) => {
+          if (String(x[f] === undefined ? '' : x[f]) !== String(g[f] === undefined ? '' : g[f])) diffs.push(g.key + ' ' + f + ' ' + x[f] + ' != ' + g[f]);
+        });
+        if (x.source !== 'IMPORT') diffs.push(g.key + ' source ' + x.source);
+      });
+      return { start: gen.params.startDate, generated: gen.movements.length, stored: stored.size, diffs: diffs.slice(0, 5), nDiffs: diffs.length,
+        asOf: s.asOf, source: s.source, pendingCrit: s.kpi.pendingCrit, over6h: gen.facts.pendingOver6h.length };
+    }, { start, end });
+    check(rt.start === start && rt.generated === Number(digits(m[1])) && rt.stored === rt.generated && !rt.nDiffs,
+      'aller-retour MB51 simulé : ' + JSON.stringify(rt));
+    check(rt.source === 'SAP' && rt.asOf === end && rt.pendingCrit === rt.over6h, 'aller-retour MB51 simulé : état ' + JSON.stringify(rt));
+    await t.shot(imp, 'pc-import-simulated-mb51-result.png');
+    t.note(name + ' : ' + rows + ' lignes, ' + r.filter.trim() + ', ' + rt.stored + ' enregistrées à l’identique');
+  });
+
+  // En attente: one row per label, red from pendingHoursCrit, amber from pendingHoursWarn, project filter.
+  await scenario('pc-pending-hours', async (t) => {
+    const page = await t.open('out/pc-pending.html', PC);
+    await page.waitForSelector('tr[data-article]');
+    const s = await stateOf(page);
+    const thr = s.thresholds;
+    const rows = await page.$$eval('tr[data-article]', (e) => e.map((tr) => ({ cls: tr.className, h: tr.getAttribute('data-hours'),
+      chip: tr.querySelector('.chipd').className, ink: getComputedStyle(tr.querySelector('.chipd')).color,
+      bg: getComputedStyle(tr.children[0]).backgroundColor, project: tr.children[3].textContent.trim() })));
+    const timed = rows.filter((r) => r.h !== '');
+    check(timed.length === rows.length && rows.length === s.pending.length, 'attente : ' + timed.length + ' lignes avec heure sur ' + rows.length);
+    const bad = timed.filter((r) => {
+      const h = Number(r.h);
+      const want = h >= thr.pendingHoursCrit ? 'lv-crit' : h >= thr.pendingHoursWarn ? 'lv-warn' : '';
+      return want ? r.cls.indexOf(want) < 0 : /lv-/.test(r.cls);
+    });
+    check(!bad.length, 'attente : couleur fausse ' + JSON.stringify(bad.slice(0, 3)));
+    const crit = timed.filter((r) => Number(r.h) >= thr.pendingHoursCrit);
+    check(crit.length >= 1, 'attente : aucune étiquette de plus de 6 h dans la simulation');
+    const rgb = (c) => (/rgba?\((\d+), (\d+), (\d+)/.exec(c) || []).slice(1).map(Number);
+    // Red: pale red row, dark red waiting time.
+    const red = (r) => / c\b/.test(r.chip) && rgb(r.ink)[0] > rgb(r.ink)[1] + 80 && rgb(r.bg)[0] > rgb(r.bg)[1] + 8;
+    check(crit.every(red), 'attente : lignes de plus de 6 h pas en rouge ' + JSON.stringify(crit.filter((r) => !red(r))[0]));
+    check(!timed.filter((r) => Number(r.h) < thr.pendingHoursCrit).some(red), 'attente : ligne de moins de 6 h en rouge');
+    const head = await page.evaluate(() => ({ crit: document.querySelector('[data-r="critCount"]').textContent, oldest: document.querySelector('[data-r="oldest"]').textContent }));
+    const labeledCrit = s.pending.filter((p) => p.label && p.level === 'crit').length;
+    check(Number(digits(head.crit)) === labeledCrit, 'attente : en-tête ' + head.crit + ' > 6 h au lieu de ' + labeledCrit);
+    await t.shot(page, 'pc-pending-hours.png');
+    // Filters: level, then project (and back).
+    await page.selectOption('[data-r="fLevel"]', 'crit');
+    await page.waitForFunction((n) => document.querySelectorAll('tr[data-article]').length === n, crit.length);
+    await page.selectOption('[data-r="fLevel"]', '');
+    const project = rows.map((r) => r.project).filter((p) => p && p !== '—')[0];
+    await page.selectOption('[data-r="fProject"]', project);
+    const shown = await page.$$eval('tr[data-article]', (e) => e.map((tr) => tr.children[3].textContent.trim()));
+    check(shown.length >= 1 && shown.every((p) => p === project), 'filtre projet ' + project + ' : ' + JSON.stringify(shown));
+    check(shown.length === rows.filter((r) => r.project === project).length, 'filtre projet : ' + shown.length + ' lignes');
+    check(await page.evaluate(() => document.activeElement && document.activeElement.getAttribute('data-r') === 'fProject'), 'filtre : focus perdu');
+    t.note(rows.length + ' étiquettes, ' + crit.length + ' > ' + thr.pendingHoursCrit + ' h, filtre ' + project + ' : ' + shown.length);
+  });
+
+  // TV: the > 6 h alert first in the ticker, « dont > 6 h : n » in the pending tile, red ghosts in the legend.
+  await scenario('tv-prd2-alert', async (t) => {
+    const page = await t.open('out/tv.html', TV);
+    await page.waitForSelector('.tv-ticker-track span');
+    await page.waitForSelector('[data-r="pendingCrit"]');
+    const s = await stateOf(page);
+    const k = s.kpi;
+    check(k.pendingCrit > 0, 'TV : simulation sans palette de plus de 6 h');
+    const r = await page.evaluate(() => ({
+      first: (() => { const e = document.querySelector('.tv-ticker-track span'); return { code: e.getAttribute('data-code'), text: e.textContent, cls: e.className }; })(),
+      tile: (() => { const e = document.querySelector('[data-r="pendingCrit"]'); return { text: e.textContent, cls: e.className, color: getComputedStyle(e).color }; })(),
+      sub: document.querySelector('[data-r="pendingCrit"]').parentNode.querySelector('.s').textContent,
+      legend: document.querySelector('[data-r="legend"]').textContent
+    }));
+    check(r.first.code === 'PRD2_CRIT' && r.first.cls === 'crit', 'TV : premier élément du bandeau ' + JSON.stringify(r.first));
+    check(r.first.text.indexOf(frNum(k.pendingCrit) + ' palette') >= 0 && /depuis plus de 6 h/.test(r.first.text), 'TV : bandeau « ' + r.first.text + ' »');
+    check(r.tile.text.replace(/\s+/g, ' ') === 'dont > 6 h : ' + frNum(k.pendingCrit) && /\bcrit\b/.test(r.tile.cls), 'TV : tuile « ' + r.tile.text + ' »');
+    const rgb = (/rgba?\((\d+), (\d+), (\d+)/.exec(r.tile.color) || []).slice(1).map(Number);
+    check(rgb[0] > rgb[1] + 60, 'TV : « dont > 6 h » pas en rouge (' + r.tile.color + ')');
+    check(/plus ancienne : \d+ h \d{2}/.test(r.sub), 'TV : plus ancienne attente « ' + r.sub + ' »');
+    check(/> 6 h/.test(r.legend) && s.projectsList.filter((p) => p.project !== 'Sans projet').every((p) => r.legend.indexOf(p.project) >= 0),
+      'TV : légende « ' + r.legend + ' »');
+    await page.goto(base + 'out/tv.html?scene=pending');
+    await page.waitForSelector('.scene-pending.on .tv-table tbody tr');
+    await page.waitForTimeout(300);
+    const scene = await page.evaluate(() => ({ crit: document.querySelectorAll('.scene-pending tr.lv-crit').length,
+      tiles: Array.from(document.querySelectorAll('.scene-pending .tv-kpi .v')).map((e) => e.textContent.trim()) }));
+    check(scene.crit === s.pending.filter((p) => p.level === 'crit').length, 'TV attente : ' + scene.crit + ' lignes rouges');
+    t.note(k.pendingCrit + ' pal > 6 h, plus ancienne ' + k.oldestPendingHours + ' h');
+    await t.shot(page, 'tv-prd2-alert.png');
+  });
+
+  // The user's real MB51 export through the import page on an empty base: format line, finished-goods filter,
+  // saved lines, then 86 labels over 6 h on the pending page and on the TV.
+  await scenario('pc-import-real', async (t) => {
+    const E = REAL_EXPECTED.normalize;
+    const page = await t.open('out/pc-import.html?empty=1', PC);
+    await page.waitForSelector('[data-r="lib"] .ok-t', { timeout: 30000 });
+    const keys = await keysOf(page);
+    check(!(await page.isChecked('[data-r="all"]')), 'import : case « hors produits finis » cochée par défaut');
+    await page.setInputFiles('input[type=file]', REAL_FILE);
+    await page.waitForSelector('[data-save]:not([disabled])', { timeout: 60000 });
+    const r = await page.evaluate(() => ({ format: document.querySelector('[data-r="format"]').textContent,
+      filter: document.querySelector('[data-r="filter"]').textContent, save: document.querySelector('[data-save]').textContent }));
+    const wantFormat = 'Format MB51 reconnu : 22 colonnes · heure de saisie ✓ · étiquettes ✓ (' + frNum(E.withLabel) + ')';
+    check(r.format.trim() === wantFormat, 'import : « ' + r.format + ' » au lieu de « ' + wantFormat + ' »');
+    const wantFilter = frNum(E.kept) + ' lignes gardées (produits finis) · ' + frNum(E.dropped) + ' ignorées (' + frNum(E.droppedArticles) + ' articles hors produits finis)';
+    check(r.filter.trim() === wantFilter, 'import : « ' + r.filter + ' » au lieu de « ' + wantFilter + ' »');
+    const toSave = Number(digits(r.save));
+    check(toSave > 0 && toSave <= E.kept, 'import : bouton « ' + r.save + ' »');
+    await t.shot(page, 'pc-import-real.png');
+    // The box changes the analysis at once (every article), and back.
+    await page.check('[data-r="all"]');
+    await page.waitForFunction(() => /désactivé/.test(document.querySelector('[data-r="filter"]').textContent));
+    await page.uncheck('[data-r="all"]');
+    await page.waitForFunction((w) => document.querySelector('[data-r="filter"]').textContent.trim() === w, wantFilter);
+    await page.click('[data-save]');
+    await typeKey(page, keys.admin);
+    await page.waitForSelector('[data-r="result"] .stat', { timeout: 60000 });
+    const stats = await page.$$eval('[data-r="result"] .stat .v', (e) => e.map((x) => x.textContent.trim()));
+    check(Number(digits(stats[0])) === toSave && digits(stats[1]) === '0', 'import : résultat ' + JSON.stringify(stats));
+    await page.waitForFunction(() => App.store.state && App.store.state.stats && App.store.state.stats.movements > 0, null, { timeout: 15000 });
+    const s = await stateOf(page);
+    check(s.asOfTs === REAL_EXPECTED.engine.asOfTs, 'import : heure des données ' + s.asOfTs);
+    await t.shot(page, 'pc-import-real-result.png');
+    await page.click('[data-r="result"] [data-go="pending"]');
+    await page.waitForSelector('[data-r="critCount"]');
+    const head = await page.evaluate(() => ({ crit: document.querySelector('[data-r="critCount"]').textContent, oldest: document.querySelector('[data-r="oldest"]').textContent,
+      sum: document.querySelector('.pend-sum').textContent, red: document.querySelectorAll('tr.lv-crit[data-hours]').length }));
+    check(digits(head.crit) === String(REAL_EXPECTED.engine.pending.crit), 'attente : ' + head.crit + ' étiquettes > 6 h au lieu de ' + REAL_EXPECTED.engine.pending.crit);
+    check(head.oldest.trim() === '44 h 02' && /05\/10 22:09/.test(head.sum), 'attente : « ' + head.sum.replace(/\s+/g, ' ') + ' »');
+    check(head.red >= REAL_EXPECTED.engine.pending.crit, 'attente : ' + head.red + ' lignes rouges');
+    await noHorizontalScroll(page, 'attente (données réelles)');
+    await t.shot(page, 'pc-pending-real.png');
+    // The oldest label opens its article: quantity per pallet learned from the labels, the label waiting 44 h 02 in red.
+    const old = REAL_EXPECTED.engine.pending.oldest;
+    await page.click('tr[data-article="' + old.article + '"]');
+    await page.waitForSelector('.stats .stat');
+    const lk = await page.evaluate((label) => ({
+      desc: document.querySelector('[data-r="desc"]').textContent,
+      row: (() => {
+        const tr = Array.from(document.querySelectorAll('tr.lv-crit')).find((x) => x.textContent.indexOf(label) >= 0);
+        return tr ? tr.textContent : '';
+      })()
+    }), old.label);
+    const qpp = REAL_EXPECTED.engine.learnedQpp[old.article];
+    check(lk.desc.indexOf(qpp + ' PCE / palette (apprise des étiquettes)') >= 0 && /sans projet/.test(lk.desc), 'fiche : « ' + lk.desc + ' »');
+    check(/44 h 02/.test(lk.row), 'fiche : étiquette ' + old.label + ' en attente « ' + lk.row + ' »');
+    await t.shot(page, 'pc-lookup-real.png');
+    const tv = await t.open('out/tv.html?empty=1', TV);
+    await tv.waitForSelector('.tv-ticker-track span[data-code="PRD2_CRIT"]');
+    const first = await tv.$eval('.tv-ticker-track span', (e) => e.getAttribute('data-code'));
+    check(first === 'PRD2_CRIT', 'TV (données réelles) : bandeau ' + first);
+    const crit = frNum(REAL_EXPECTED.engine.pending.crit);
+    const tvCrit = await tv.evaluate(() => ({ tile: document.querySelector('[data-r="pendingCrit"]').textContent.replace(/\s+/g, ' ').trim(),
+      tick: document.querySelector('.tv-ticker-track span[data-code="PRD2_CRIT"]').textContent }));
+    check(tvCrit.tile === 'dont > 6 h : ' + crit, 'TV (données réelles) : tuile « ' + tvCrit.tile + ' »');
+    check(tvCrit.tick.replace(/^[^\d]+/, '').indexOf(crit + ' palettes en PRD2 depuis plus de 6 h · max 44 h 02') === 0,
+      'TV (données réelles) : bandeau « ' + tvCrit.tick + ' »');
+    check(/^Données SAP jusqu’au 05\/10\/2026 22:09/.test(await tv.textContent('[data-r="fresh"]')), 'TV (données réelles) : en-tête');
+    // SAP data: no simulation strip, the scenes keep their rows (ticker at the bottom, 3D view full height).
+    const lay = await tv.evaluate(() => ({
+      sim: !document.querySelector('[data-r="sim"]').offsetParent,
+      ticker: Math.round(document.querySelector('.tv-ticker').getBoundingClientRect().bottom),
+      stage: Math.round(document.querySelector('.tv-twin-stage').getBoundingClientRect().height),
+      cut: Array.from(document.querySelectorAll('.scene-overview .tv-kpi .s, .scene-overview .tv-kpi .l')).filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent),
+      ticks: Array.from(document.querySelectorAll('.tv-ticker-track span')).map((e) => e.textContent)
+    }));
+    check(lay.sim && lay.ticker === TV.height && lay.stage > 500, 'TV (données réelles) : mise en page ' + JSON.stringify(lay));
+    check(!lay.cut.length, 'TV (données réelles) : texte coupé ' + JSON.stringify(lay.cut));
+    check(lay.ticks.every((x) => x.length <= 70), 'TV (données réelles) : bandeau trop long ' + JSON.stringify(lay.ticks.filter((x) => x.length > 70)));
+    await tv.waitForTimeout(1000);
+    await t.shot(tv, 'tv-real.png');
+    t.note(frNum(E.kept) + ' gardées / ' + frNum(E.dropped) + ' ignorées, ' + toSave + ' enregistrées, ' + digits(head.crit) + ' > 6 h');
   });
 }
 
